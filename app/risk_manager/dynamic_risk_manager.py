@@ -80,7 +80,7 @@ class DynamicRiskManager:
         return normalized_vol
 
     def calculate_atr(
-        self, price_data: list, high_data: list = None, low_data: list = None, period: int = 14
+        self, price_data: list, high_data: list | None = None, low_data: list | None = None, period: int = 14
     ) -> float:
         """
         Average True Range (ATR) hesaplar
@@ -124,9 +124,9 @@ class DynamicRiskManager:
         self,
         entry_price: float,
         position_side: str,
-        volatility: float = None,
-        atr: float = None,
-        price_data: list = None,
+        volatility: float | None = None,
+        atr: float | None = None,
+        price_data: list | None = None,
     ) -> Dict[str, float]:
         """
         Piyasa volatilitesine göre dinamik exit seviyeleri hesaplar
@@ -220,9 +220,9 @@ class DynamicRiskManager:
         self,
         exit_plan: dict,
         current_price: float,
-        price_data: list = None,
-        high_data: list = None,
-        low_data: list = None,
+        price_data: list | None = None,
+        high_data: list | None = None,
+        low_data: list | None = None,
     ) -> dict:
         """
         Mevcut exit planını piyasa koşullarına göre ayarlar
