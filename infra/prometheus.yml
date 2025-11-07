@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - "telegram-alertmanager:9093"
+
+scrape_configs:
+  - job_name: "trading-app"
+    static_configs:
+      - targets: ["app:8000"]

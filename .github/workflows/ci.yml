@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v2
+        with:
+          poetry-version: '1.7.1'
+
+      - name: Poetry install
+        run: poetry install
+
+      - name: Lint
+        run: |
+          poetry run black --check .
+          poetry run isort --check-only .
+          poetry run mypy app
+
+      - name: Tests
+        run: poetry run pytest --cov=app --cov-report=xml
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
+      - name: Build docker image
+        run: docker build -t trading-platform .

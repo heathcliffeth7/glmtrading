@@ -1,0 +1,20 @@
+{
+  "title": "AI Trading Monitoring",
+  "panels": [
+    {
+      "type": "graph",
+      "title": "WS Reconnects",
+      "targets": [
+        {"expr": "binance_ws_reconnects_total"}
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Risk Fallback Count",
+      "targets": [
+        {"expr": "risk_fallback_total"}
+      ]
+    }
+  ],
+  "timezone": "browser"
+}
