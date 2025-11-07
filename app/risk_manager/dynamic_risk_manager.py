@@ -80,7 +80,11 @@ class DynamicRiskManager:
         return normalized_vol
 
     def calculate_atr(
-        self, price_data: list, high_data: list | None = None, low_data: list | None = None, period: int = 14
+        self,
+        price_data: list,
+        high_data: list | None = None,
+        low_data: list | None = None,
+        period: int = 14,
     ) -> float:
         """
         Average True Range (ATR) hesaplar
