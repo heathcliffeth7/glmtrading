@@ -18,10 +18,12 @@ Exit Condition Checker - Pozisyon kapatma koşullarını kontrol eder
 
 Position Monitor her 3 dakikada bir (candle close) bu kontrolleri çalıştırır.
 """
+
 import re
-from typing import Tuple, Optional
-from app.utils.logging import get_logger
+from typing import Optional, Tuple
+
 from app.risk_manager.advanced_parser import AdvancedInvalidationParser
+from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -31,20 +33,17 @@ _advanced_parser = AdvancedInvalidationParser()
 
 
 def check_profit_target(
-    entry_price: float,
-    current_price: float,
-    profit_target: float,
-    is_long: bool
+    entry_price: float, current_price: float, profit_target: float, is_long: bool
 ) -> bool:
     """
     Profit target'a ulaşıldı mı kontrol et
-    
+
     Args:
         entry_price: Giriş fiyatı
         current_price: Güncel fiyat
         profit_target: Hedef fiyat
         is_long: LONG pozisyon mu?
-    
+
     Returns:
         True if profit target reached
     """
@@ -52,34 +51,31 @@ def check_profit_target(
         reached = current_price >= profit_target
     else:  # SHORT
         reached = current_price <= profit_target
-    
+
     if reached:
         logger.info(
             "✅ PROFIT TARGET REACHED | %s | entry=%.2f current=%.2f target=%.2f",
             "LONG" if is_long else "SHORT",
             entry_price,
             current_price,
-            profit_target
+            profit_target,
         )
-    
+
     return reached
 
 
 def check_stop_loss(
-    entry_price: float,
-    current_price: float,
-    stop_loss: float,
-    is_long: bool
+    entry_price: float, current_price: float, stop_loss: float, is_long: bool
 ) -> bool:
     """
     Stop loss tetiklendi mi kontrol et
-    
+
     Args:
         entry_price: Giriş fiyatı
         current_price: Güncel fiyat
         stop_loss: Stop loss seviyesi
         is_long: LONG pozisyon mu?
-    
+
     Returns:
         True if stop loss triggered
     """
@@ -87,174 +83,174 @@ def check_stop_loss(
         triggered = current_price <= stop_loss
     else:  # SHORT
         triggered = current_price >= stop_loss
-    
+
     if triggered:
         logger.warning(
             "⚠️ STOP LOSS TRIGGERED | %s | entry=%.2f current=%.2f stop=%.2f",
             "LONG" if is_long else "SHORT",
             entry_price,
             current_price,
-            stop_loss
+            stop_loss,
         )
-    
+
     return triggered
 
 
 def parse_invalidation_condition(invalidation_text: str) -> Tuple[Optional[str], Optional[float]]:
     """
     Invalidation condition string'ini parse et (İngilizce ve Türkçe desteği)
-    
+
     English examples:
     - "If price closes below 105000 on 3m candle" -> ("below", 105000.0)
     - "If price closes above 112000 on 3m candle" -> ("above", 112000.0)
-    
+
     Turkish examples:
     - "Fiyat 109200 seviyesinin altında kapanırsa" -> ("below", 109200.0)
     - "Fiyat 111000 üstünde kaparsa" -> ("above", 111000.0)
     - "109500 altında" -> ("below", 109500.0)
-    
+
     Args:
         invalidation_text: GLM'den gelen invalidation condition
-    
+
     Returns:
         (direction, price) tuple veya (None, None) if parse failed
     """
     if not invalidation_text or invalidation_text == "N/A":
         return None, None
-    
+
     try:
         # Gelişmiş parser kullan
         direction, price, time_frame, metadata = _advanced_parser.parse(invalidation_text)
-        
+
         if direction and price:
             logger.debug(
                 "✅ Parsed invalidation (ADVANCED): direction=%s price=%.2f time_frame=%s metadata=%s",
                 direction,
                 price,
                 time_frame,
-                metadata
+                metadata,
             )
             return direction, price
-        
+
         # Fallback: Önceki basit parser
         patterns = [
             # İngilizce desenler
-            (r'closes?\s+(below|above)\s+([\d,.]+)', lambda m: (m.group(1).lower(), float(m.group(2).replace(",", "")))),
-            
+            (
+                r"closes?\s+(below|above)\s+([\d,.]+)",
+                lambda m: (m.group(1).lower(), float(m.group(2).replace(",", ""))),
+            ),
             # Türkçe desenler
-            (r'fiyat\s+([\d,.]+)\s+seviyesinin\s+(altında|üstünde|üzerinde)', 
-             lambda m: ("below" if m.group(2).lower() == "altında" else "above", 
-                       float(m.group(1).replace(",", "").replace(".", "")))),
-            
-            (r'([\d,.]+)\s+(altında|üstünde|üzerinde)', 
-             lambda m: ("below" if m.group(2).lower() == "altında" else "above", 
-                       float(m.group(1).replace(",", "").replace(".", "")))),
-            
-            (r'(altında|üstünde|üzerinde)\s+([\d,.]+)', 
-             lambda m: ("below" if m.group(1).lower() == "altında" else "above", 
-                       float(m.group(2).replace(",", "").replace(".", "")))),
+            (
+                r"fiyat\s+([\d,.]+)\s+seviyesinin\s+(altında|üstünde|üzerinde)",
+                lambda m: (
+                    "below" if m.group(2).lower() == "altında" else "above",
+                    float(m.group(1).replace(",", "").replace(".", "")),
+                ),
+            ),
+            (
+                r"([\d,.]+)\s+(altında|üstünde|üzerinde)",
+                lambda m: (
+                    "below" if m.group(2).lower() == "altında" else "above",
+                    float(m.group(1).replace(",", "").replace(".", "")),
+                ),
+            ),
+            (
+                r"(altında|üstünde|üzerinde)\s+([\d,.]+)",
+                lambda m: (
+                    "below" if m.group(1).lower() == "altında" else "above",
+                    float(m.group(2).replace(",", "").replace(".", "")),
+                ),
+            ),
         ]
-        
+
         for pattern, processor in patterns:
             match = re.search(pattern, invalidation_text, re.IGNORECASE)
             if match:
                 direction, price = processor(match)
-                
+
                 logger.debug(
                     "✅ Parsed invalidation (FALLBACK): direction=%s price=%.2f from text='%s'",
                     direction,
                     price,
-                    invalidation_text
+                    invalidation_text,
                 )
                 return direction, price
-        
+
         # No pattern matched
-        logger.warning(
-            "⚠️ Could not parse invalidation condition: '%s'",
-            invalidation_text
-        )
+        logger.warning("⚠️ Could not parse invalidation condition: '%s'", invalidation_text)
         return None, None
-            
+
     except Exception as exc:
-        logger.error(
-            "❌ Error parsing invalidation condition '%s': %s",
-            invalidation_text,
-            exc
-        )
+        logger.error("❌ Error parsing invalidation condition '%s': %s", invalidation_text, exc)
         return None, None
 
 
 def check_invalidation_condition(
-    current_price: float,
-    invalidation_condition: str,
-    is_long: bool
+    current_price: float, invalidation_condition: str, is_long: bool
 ) -> Tuple[bool, str]:
     """
     Invalidation condition tetiklendi mi kontrol et
-    
+
     Bu fonksiyon 3-minute candle close bazında çalışır.
     Position Monitor tarafından her 3 dakikada bir çağrılır.
-    
+
     Args:
         current_price: Güncel kapanış fiyatı (3m mum kapanışı)
         invalidation_condition: GLM'den gelen condition text
             Örnek: "If price closes below 105000 on 3m candle"
         is_long: LONG pozisyon mu?
-    
+
     Returns:
         (triggered: bool, reason: str)
     """
     direction, threshold_price = parse_invalidation_condition(invalidation_condition)
-    
+
     if direction is None or threshold_price is None:
         # Parse edilemedi, skip
         return False, "Invalidation condition could not be parsed"
-    
+
     triggered = False
     reason = ""
-    
+
     # 3-minute candle close kontrolü
     # Position Monitor her 3 dakikada bir bu fonksiyonu çağırır
     # Dolayısıyla current_price zaten 3m candle close fiyatıdır
-    
+
     if direction == "below":
         # "closes below X" -> 3m mum X'in altında kapandı mı?
         triggered = current_price < threshold_price
         if triggered:
             reason = f"3m candle closed below {threshold_price:.2f} (close: {current_price:.2f})"
-    
+
     elif direction == "above":
         # "closes above X" -> 3m mum X'in üstünde kapandı mı?
         triggered = current_price > threshold_price
         if triggered:
             reason = f"3m candle closed above {threshold_price:.2f} (close: {current_price:.2f})"
-    
+
     if triggered:
         logger.warning(
             "⚠️ INVALIDATION TRIGGERED | %s | %s | condition='%s'",
             "LONG" if is_long else "SHORT",
             reason,
-            invalidation_condition
+            invalidation_condition,
         )
-    
+
     return triggered, reason
 
 
 def check_all_exit_conditions(
-    entry_price: float,
-    current_price: float,
-    exit_plan: dict,
-    is_long: bool
+    entry_price: float, current_price: float, exit_plan: dict, is_long: bool
 ) -> Tuple[bool, str, str]:
     """
     Tüm exit koşullarını kontrol et (profit target, stop loss, invalidation)
-    
+
     Args:
         entry_price: Giriş fiyatı
         current_price: Güncel fiyat (3m mum kapanışı)
         exit_plan: {profit_target, stop_loss, invalidation_condition}
         is_long: LONG pozisyon mu?
-    
+
     Returns:
         (should_close: bool, trigger_type: str, reason: str)
         trigger_type: "profit_target" | "stop_loss" | "invalidation" | ""
@@ -262,20 +258,22 @@ def check_all_exit_conditions(
     profit_target = exit_plan.get("profit_target")
     stop_loss = exit_plan.get("stop_loss")
     invalidation_condition = exit_plan.get("invalidation_condition", "")
-    
+
     # 1. Profit Target kontrolü (öncelikli)
     if profit_target and check_profit_target(entry_price, current_price, profit_target, is_long):
         return True, "profit_target", f"Profit target reached: {profit_target:.2f}"
-    
+
     # 2. Stop Loss kontrolü
     if stop_loss and check_stop_loss(entry_price, current_price, stop_loss, is_long):
         return True, "stop_loss", f"Stop loss triggered: {stop_loss:.2f}"
-    
+
     # 3. Invalidation Condition kontrolü
     if invalidation_condition and invalidation_condition != "N/A":
-        triggered, reason = check_invalidation_condition(current_price, invalidation_condition, is_long)
+        triggered, reason = check_invalidation_condition(
+            current_price, invalidation_condition, is_long
+        )
         if triggered:
             return True, "invalidation", reason
-    
+
     # Hiçbir koşul sağlanmadı
     return False, "", ""

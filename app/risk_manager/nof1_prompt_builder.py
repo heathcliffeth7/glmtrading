@@ -4,111 +4,141 @@ Builds prompts in the exact format used by professional trading systems
 """
 
 from datetime import datetime
-from typing import Dict, List, Any, Tuple, Optional
-from app.risk_manager.dynamic_risk_manager import DynamicRiskManager
+from typing import Any, Dict, List, Optional, Tuple
+
 from app.risk_manager.advanced_parser import AdvancedInvalidationParser
+from app.risk_manager.dynamic_risk_manager import DynamicRiskManager
 
 
 class Nof1PromptBuilder:
     """Builds NOF1.AI style prompts with full market context"""
-    
+
     def __init__(self):
         self._start_time = datetime.utcnow()
         self._invocation_count = 0
-    
-    def validate_exit_plan(self, exit_plan: dict, position_side: str, entry_price: float) -> Tuple[bool, str]:
+
+    def validate_exit_plan(
+        self, exit_plan: dict, position_side: str, entry_price: float
+    ) -> Tuple[bool, str]:
         """
         Exit planını doğrular ve mantıksal çatışmaları kontrol eder
-        
+
         Args:
             exit_plan: GLM'den gelen exit planı
             position_side: "LONG" veya "SHORT"
             entry_price: Giriş fiyatı
-            
+
         Returns:
             (is_valid, error_message)
         """
         if not exit_plan:
             return False, "Exit plan eksik"
-        
+
         profit_target = exit_plan.get("profit_target", 0.0)
         stop_loss = exit_plan.get("stop_loss", 0.0)
         invalidation_condition = exit_plan.get("invalidation_condition", "")
-        
+
         # Değerlerin geçerliliğini kontrol et
         if profit_target <= 0.0 or stop_loss <= 0.0:
             return False, "Profit target ve stop loss 0'dan büyük olmalı"
-        
+
         # Invalidation condition parse et
         direction, invalidation_price = self._parse_invalidation_condition(invalidation_condition)
-        
+
         # Mantıksal doğruluk kontrolü
         if position_side == "LONG":
             # LONG için: stop_loss < profit_target ve entry ORTADA
             if not (stop_loss < entry_price < profit_target):
-                return False, f"LONG için stop_loss({stop_loss}) < entry({entry_price}) < profit_target({profit_target}) olmalı"
-            
+                return (
+                    False,
+                    f"LONG için stop_loss({stop_loss}) < entry({entry_price}) < profit_target({profit_target}) olmalı",
+                )
+
             # Invalidation condition kontrolü - LONG: Entry > Invalidation > Stop Loss
             if direction and invalidation_price:
                 if not (entry_price > invalidation_price > stop_loss):
-                    return False, f"LONG için Entry({entry_price}) > Invalidation({invalidation_price}) > SL({stop_loss}) olmalı (erken uyarı mantığı)"
+                    return (
+                        False,
+                        f"LONG için Entry({entry_price}) > Invalidation({invalidation_price}) > SL({stop_loss}) olmalı (erken uyarı mantığı)",
+                    )
         else:  # SHORT
             # SHORT için: profit_target < entry < stop_loss
             if not (profit_target < entry_price < stop_loss):
-                return False, f"SHORT için profit_target({profit_target}) < entry({entry_price}) < stop_loss({stop_loss}) olmalı"
-            
+                return (
+                    False,
+                    f"SHORT için profit_target({profit_target}) < entry({entry_price}) < stop_loss({stop_loss}) olmalı",
+                )
+
             # Invalidation condition kontrolü - SHORT: Stop Loss > Invalidation > Entry
             if direction and invalidation_price:
                 if not (stop_loss > invalidation_price > entry_price):
-                    return False, f"SHORT için SL({stop_loss}) > Invalidation({invalidation_price}) > Entry({entry_price}) olmalı (erken uyarı mantığı)"
-        
+                    return (
+                        False,
+                        f"SHORT için SL({stop_loss}) > Invalidation({invalidation_price}) > Entry({entry_price}) olmalı (erken uyarı mantığı)",
+                    )
+
         return True, ""
-    
-    def _parse_invalidation_condition(self, invalidation_text: str) -> Tuple[Optional[str], Optional[float]]:
+
+    def _parse_invalidation_condition(
+        self, invalidation_text: str
+    ) -> Tuple[Optional[str], Optional[float]]:
         """
         Invalidation condition string'ini parse et
-        
+
         Args:
             invalidation_text: GLM'den gelen invalidation condition
-            
+
         Returns:
             (direction, price) tuple veya (None, None) if parse failed
         """
         if not invalidation_text or invalidation_text == "N/A":
             return None, None
-        
+
         try:
             import re
+
             # Önceden derlenmiş regex desenleri kullan (optimize edilmiş)
             patterns = [
                 # İngilizce desenler
-                (r'closes?\s+(below|above)\s+([\d,.]+)', lambda m: (m.group(1).lower(), float(m.group(2).replace(",", "")))),
-                
+                (
+                    r"closes?\s+(below|above)\s+([\d,.]+)",
+                    lambda m: (m.group(1).lower(), float(m.group(2).replace(",", ""))),
+                ),
                 # Türkçe desenler
-                (r'fiyat\s+([\d,.]+)\s+seviyesinin\s+(altında|üstünde|üzerinde)', 
-                 lambda m: ("below" if m.group(2).lower() == "altında" else "above", 
-                           float(m.group(1).replace(",", "").replace(".", "")))),
-                
-                (r'([\d,.]+)\s+(altında|üstünde|üzerinde)', 
-                 lambda m: ("below" if m.group(2).lower() == "altında" else "above", 
-                           float(m.group(1).replace(",", "").replace(".", "")))),
-                
-                (r'(altında|üstünde|üzerinde)\s+([\d,.]+)', 
-                 lambda m: ("below" if m.group(1).lower() == "altında" else "above", 
-                           float(m.group(2).replace(",", "").replace(".", "")))),
+                (
+                    r"fiyat\s+([\d,.]+)\s+seviyesinin\s+(altında|üstünde|üzerinde)",
+                    lambda m: (
+                        "below" if m.group(2).lower() == "altında" else "above",
+                        float(m.group(1).replace(",", "").replace(".", "")),
+                    ),
+                ),
+                (
+                    r"([\d,.]+)\s+(altında|üstünde|üzerinde)",
+                    lambda m: (
+                        "below" if m.group(2).lower() == "altında" else "above",
+                        float(m.group(1).replace(",", "").replace(".", "")),
+                    ),
+                ),
+                (
+                    r"(altında|üstünde|üzerinde)\s+([\d,.]+)",
+                    lambda m: (
+                        "below" if m.group(1).lower() == "altında" else "above",
+                        float(m.group(2).replace(",", "").replace(".", "")),
+                    ),
+                ),
             ]
-            
+
             for pattern, processor in patterns:
                 match = re.search(pattern, invalidation_text, re.IGNORECASE)
                 if match:
                     direction, price = processor(match)
                     return direction, price
-            
+
             return None, None
-                
+
         except Exception:
             return None, None
-    
+
     def build_prompt(
         self,
         raw_market_data: Dict[str, Any],
@@ -117,44 +147,46 @@ class Nof1PromptBuilder:
     ) -> str:
         """
         Build comprehensive NOF1.AI style prompt
-        
+
         Args:
             raw_market_data: All timeframe data from PureDataCollector
             portfolio_metrics: Current portfolio state
             htf_analysis: Higher timeframe support/resistance
-            
+
         Returns:
             Formatted prompt string
         """
         self._invocation_count += 1
-        
+
         # Calculate runtime
         runtime_minutes = int((datetime.utcnow() - self._start_time).total_seconds() / 60)
         current_time = datetime.utcnow()
-        
+
         # Extract data
         symbol = raw_market_data.get("symbol", "BTCUSDT")
         current_snapshots = raw_market_data.get("current_snapshots", {})
         historical_arrays = raw_market_data.get("historical_arrays", {})
         futures_data = raw_market_data.get("futures_data", {})
-        
+
         # Build prompt sections
         sections = []
-        
+
         # === HEADER ===
         sections.append(self._build_header(runtime_minutes, current_time))
-        
+
         # === CURRENT MARKET STATE ===
-        sections.append(self._build_market_state(symbol, current_snapshots, historical_arrays, futures_data))
-        
+        sections.append(
+            self._build_market_state(symbol, current_snapshots, historical_arrays, futures_data)
+        )
+
         # === ACCOUNT INFORMATION ===
         sections.append(self._build_account_info(portfolio_metrics))
-        
+
         # === TRADING INSTRUCTIONS ===
         sections.append(self._build_instructions())
-        
+
         return "\n\n".join(sections)
-    
+
     def _build_header(self, runtime_minutes: int, current_time: datetime) -> str:
         """Build header with runtime info"""
         return f"""It has been {runtime_minutes} minutes since you started trading. The current time is {current_time} and you've been invoked {self._invocation_count} times. Below, we are providing you with a variety of state data, price data, and predictive signals so you can discover alpha. Below that is your current account information, value, performance, positions, etc.
@@ -162,7 +194,7 @@ class Nof1PromptBuilder:
 ALL OF THE PRICE OR SIGNAL DATA BELOW IS ORDERED: OLDEST → NEWEST
 
 Timeframes note: Unless stated otherwise in a section title, the primary timeframe is 30-minute intervals. Additional timeframes (1m, 5m, 15m, 1h, 4h, 1d) are provided for comprehensive analysis."""
-    
+
     def _build_market_state(
         self,
         symbol: str,
@@ -171,470 +203,536 @@ Timeframes note: Unless stated otherwise in a section title, the primary timefra
         futures_data: Dict[str, any],
     ) -> str:
         """Build complete market state section"""
-        
+
         lines = [
             "=" * 80,
             f"CURRENT MARKET STATE FOR {symbol}",
             "=" * 80,
         ]
-        
+
         # Primary 30m data
         data_30m = current_snapshots.get("30m", {})
         hist_30m = historical_arrays.get("30m", {})
-        
+
         if data_30m:
-            lines.extend([
-                "",
-                f"PRIMARY TIMEFRAME (30-minute)",
-                f"current_price = {data_30m.get('close', 0):.2f}",
-                f"current_ema20 = {data_30m.get('ema_20', 0):.2f}",
-                f"current_ema50 = {data_30m.get('ema_50', 0):.2f}",
-                f"current_macd = {data_30m.get('macd', 0):.2f}",
-                f"current_rsi (14-period) = {data_30m.get('rsi_14', 50):.2f}",
-            ])
-            
+            lines.extend(
+                [
+                    "",
+                    f"PRIMARY TIMEFRAME (30-minute)",
+                    f"current_price = {data_30m.get('close', 0):.2f}",
+                    f"current_ema20 = {data_30m.get('ema_20', 0):.2f}",
+                    f"current_ema50 = {data_30m.get('ema_50', 0):.2f}",
+                    f"current_macd = {data_30m.get('macd', 0):.2f}",
+                    f"current_rsi (14-period) = {data_30m.get('rsi_14', 50):.2f}",
+                ]
+            )
+
             # Intraday series (30m)
             if hist_30m:
-                lines.extend([
-                    "",
-                    "30-minute series (oldest → latest):",
-                    "",
-                ])
-                
+                lines.extend(
+                    [
+                        "",
+                        "30-minute series (oldest → latest):",
+                        "",
+                    ]
+                )
+
                 # Close prices
                 if "close" in hist_30m:
                     prices = hist_30m["close"][-10:]  # Last 10
                     lines.append(f"Mid prices: {self._format_array(prices, 2)}")
-                
+
                 # EMA 20
                 if "ema_20" in hist_30m:
                     ema20 = hist_30m["ema_20"][-10:]
                     lines.append(f"EMA indicators (20-period): {self._format_array(ema20, 2)}")
-                
+
                 # MACD
                 if "macd" in hist_30m:
                     macd = hist_30m["macd"][-10:]
                     lines.append(f"MACD indicators: {self._format_array(macd, 2)}")
-                
+
                 # RSI 14
                 if "rsi_14" in hist_30m:
                     rsi14 = hist_30m["rsi_14"][-10:]
                     lines.append(f"RSI indicators (14-Period): {self._format_array(rsi14, 2)}")
-        
+
         # FUTURES MARKET DATA (Funding Rate, Open Interest, Long/Short Ratio)
         if futures_data and futures_data.get("current"):
-            lines.extend([
-                "",
-                "=" * 80,
-                "FUTURES MARKET DATA:",
-                "",
-            ])
-            
+            lines.extend(
+                [
+                    "",
+                    "=" * 80,
+                    "FUTURES MARKET DATA:",
+                    "",
+                ]
+            )
+
             current_futures = futures_data.get("current", {})
             avg_futures = futures_data.get("averages", {})
-            
+
             funding_rate = current_futures.get("funding_rate", 0)
             open_interest = current_futures.get("open_interest", 0)
             long_short_ratio = current_futures.get("long_short_ratio", 0)
-            
-            lines.extend([
-                f"Funding Rate: {funding_rate:.8f}" if funding_rate else "Funding Rate: N/A",
-                f"  (8-hour average: {avg_futures.get('funding_rate_avg', 0):.8f})",
-                "",
-                f"Open Interest: {open_interest:.2f}" if open_interest else "Open Interest: N/A",
-                f"  (20-period average: {avg_futures.get('open_interest_avg', 0):.2f})",
-                "",
-                f"Long/Short Ratio: {long_short_ratio:.4f}" if long_short_ratio else "Long/Short Ratio: N/A",
-                f"  (20-period average: {avg_futures.get('long_short_ratio_avg', 0):.4f})",
-                "",
-            ])
-            
+
+            lines.extend(
+                [
+                    f"Funding Rate: {funding_rate:.8f}" if funding_rate else "Funding Rate: N/A",
+                    f"  (8-hour average: {avg_futures.get('funding_rate_avg', 0):.8f})",
+                    "",
+                    (
+                        f"Open Interest: {open_interest:.2f}"
+                        if open_interest
+                        else "Open Interest: N/A"
+                    ),
+                    f"  (20-period average: {avg_futures.get('open_interest_avg', 0):.2f})",
+                    "",
+                    (
+                        f"Long/Short Ratio: {long_short_ratio:.4f}"
+                        if long_short_ratio
+                        else "Long/Short Ratio: N/A"
+                    ),
+                    f"  (20-period average: {avg_futures.get('long_short_ratio_avg', 0):.4f})",
+                    "",
+                ]
+            )
+
             # Add historical futures data if available
             hist_futures = futures_data.get("historical", {})
             if hist_futures:
-                lines.extend([
-                    "",
-                    "FUTURES HISTORICAL DATA (20 periods):",
-                    "",
-                ])
-                
+                lines.extend(
+                    [
+                        "",
+                        "FUTURES HISTORICAL DATA (20 periods):",
+                        "",
+                    ]
+                )
+
                 if "funding_rate" in hist_futures:
                     fr_hist = hist_futures["funding_rate"][-20:]
-                    lines.append(f"Funding Rate history (20 periods): {self._format_array(fr_hist, 8)}")
-                
+                    lines.append(
+                        f"Funding Rate history (20 periods): {self._format_array(fr_hist, 8)}"
+                    )
+
                 if "open_interest" in hist_futures:
                     oi_hist = hist_futures["open_interest"][-20:]
-                    lines.append(f"Open Interest history (20 periods): {self._format_array(oi_hist, 2)}")
-                
+                    lines.append(
+                        f"Open Interest history (20 periods): {self._format_array(oi_hist, 2)}"
+                    )
+
                 if "long_short_ratio" in hist_futures:
                     lsr_hist = hist_futures["long_short_ratio"][-20:]
-                    lines.append(f"Long/Short Ratio history (20 periods): {self._format_array(lsr_hist, 4)}")
+                    lines.append(
+                        f"Long/Short Ratio history (20 periods): {self._format_array(lsr_hist, 4)}"
+                    )
             else:
-                lines.extend([
-                    "",
-                    "FUTURES HISTORICAL DATA: No historical data available",
-                    "",
-                ])
-        
+                lines.extend(
+                    [
+                        "",
+                        "FUTURES HISTORICAL DATA: No historical data available",
+                        "",
+                    ]
+                )
+
         # 1-minute intraday data
         data_1m = current_snapshots.get("1m", {})
         hist_1m = historical_arrays.get("1m", {})
-        
+
         if hist_1m:
-            lines.extend([
-                "",
-                "=" * 80,
-                "INTRADAY SERIES (1-minute, oldest → latest):",
-                "",
-            ])
-            
+            lines.extend(
+                [
+                    "",
+                    "=" * 80,
+                    "INTRADAY SERIES (1-minute, oldest → latest):",
+                    "",
+                ]
+            )
+
             if "close" in hist_1m:
                 prices = hist_1m["close"][-20:]  # Last 20
                 lines.append(f"Mid prices: {self._format_array(prices, 2)}")
-            
+
             if "rsi_14" in hist_1m:
                 rsi = hist_1m["rsi_14"][-20:]
                 lines.append(f"RSI indicators (14-Period): {self._format_array(rsi, 2)}")
-            
+
             if "macd" in hist_1m:
                 macd = hist_1m["macd"][-20:]
                 lines.append(f"MACD indicators: {self._format_array(macd, 2)}")
-        
+
         # 4-hour longer-term context
         data_4h = current_snapshots.get("4h", {})
         hist_4h = historical_arrays.get("4h", {})
-        
+
         if data_4h and hist_4h:
-            lines.extend([
-                "",
-                "=" * 80,
-                "LONGER-TERM CONTEXT (4-hour timeframe):",
-                "",
-            ])
-            
-            lines.extend([
-                f"20-Period EMA: {data_4h.get('ema_20', 0):.2f} vs. 50-Period EMA: {data_4h.get('ema_50', 0):.2f}",
-                f"14-Period ATR: {data_4h.get('atr_14', 0):.2f}",
-                f"Current Volume: {data_4h.get('volume', 0):.2f}",
-            ])
-            
+            lines.extend(
+                [
+                    "",
+                    "=" * 80,
+                    "LONGER-TERM CONTEXT (4-hour timeframe):",
+                    "",
+                ]
+            )
+
+            lines.extend(
+                [
+                    f"20-Period EMA: {data_4h.get('ema_20', 0):.2f} vs. 50-Period EMA: {data_4h.get('ema_50', 0):.2f}",
+                    f"14-Period ATR: {data_4h.get('atr_14', 0):.2f}",
+                    f"Current Volume: {data_4h.get('volume', 0):.2f}",
+                ]
+            )
+
             # 4h series
             if "macd" in hist_4h:
                 macd_4h = hist_4h["macd"][-10:]
                 lines.append(f"MACD indicators: {self._format_array(macd_4h, 2)}")
-            
+
             if "rsi_14" in hist_4h:
                 rsi_4h = hist_4h["rsi_14"][-10:]
                 lines.append(f"RSI indicators (14-Period): {self._format_array(rsi_4h, 2)}")
-        
+
         # Additional timeframes with full data
-        lines.extend([
-            "",
-            "=" * 80,
-            "ADDITIONAL TIMEFRAMES AVAILABLE:",
-            "",
-        ])
-        
+        lines.extend(
+            [
+                "",
+                "=" * 80,
+                "ADDITIONAL TIMEFRAMES AVAILABLE:",
+                "",
+            ]
+        )
+
         for tf in ["5m", "15m", "1h", "1d"]:
             data = current_snapshots.get(tf, {})
             hist_data = historical_arrays.get(tf, {})
-            
+
             if data:
-                lines.extend([
-                    f"",
-                    f"{tf.upper()} TIMEFRAME:",
-                    f"Current Price: {data.get('close', 0):.2f}",
-                    f"Current EMA 20: {data.get('ema_20', 0):.2f}",
-                    f"Current EMA 50: {data.get('ema_50', 0):.2f}",
-                    f"Current MACD: {data.get('macd', 0):.2f}",
-                    f"Current RSI (14): {data.get('rsi_14', 50):.2f}",
-                    f"Current Volume: {data.get('volume', 0):.2f}",
-                ])
-                
+                lines.extend(
+                    [
+                        f"",
+                        f"{tf.upper()} TIMEFRAME:",
+                        f"Current Price: {data.get('close', 0):.2f}",
+                        f"Current EMA 20: {data.get('ema_20', 0):.2f}",
+                        f"Current EMA 50: {data.get('ema_50', 0):.2f}",
+                        f"Current MACD: {data.get('macd', 0):.2f}",
+                        f"Current RSI (14): {data.get('rsi_14', 50):.2f}",
+                        f"Current Volume: {data.get('volume', 0):.2f}",
+                    ]
+                )
+
                 # Add historical series if available
                 if hist_data:
                     lines.extend([f"", f"{tf.upper()} Historical Series (latest 10):"])
-                    
+
                     if "close" in hist_data:
                         prices = hist_data["close"][-10:]
                         lines.append(f"  Close prices: {self._format_array(prices, 2)}")
-                    
+
                     if "ema_20" in hist_data:
                         ema20 = hist_data["ema_20"][-10:]
                         lines.append(f"  EMA 20: {self._format_array(ema20, 2)}")
-                    
+
                     if "ema_50" in hist_data:
                         ema50 = hist_data["ema_50"][-10:]
                         lines.append(f"  EMA 50: {self._format_array(ema50, 2)}")
-                    
+
                     if "macd" in hist_data:
                         macd = hist_data["macd"][-10:]
                         lines.append(f"  MACD: {self._format_array(macd, 2)}")
-                    
+
                     if "rsi_14" in hist_data:
                         rsi = hist_data["rsi_14"][-10:]
                         lines.append(f"  RSI 14: {self._format_array(rsi, 2)}")
-                        
+
                     if "volume" in hist_data:
                         volume = hist_data["volume"][-10:]
                         lines.append(f"  Volume: {self._format_array(volume, 2)}")
             else:
                 lines.append(f"  {tf}: No data available")
-        
+
         return "\n".join(lines)
-    
+
     def _build_account_info(self, portfolio_metrics: Dict[str, Any]) -> str:
         """Build account information section with multi-position and fee support"""
-        
+
         lines = [
             "=" * 80,
             "HERE IS YOUR ACCOUNT INFORMATION & PERFORMANCE",
             "=" * 80,
             "",
         ]
-        
+
         # CHECK FOR RECENT POSITION CLOSE NOTIFICATIONS
         close_notification = self._check_position_close_notification()
         if close_notification:
             lines.extend(self._format_close_notification(close_notification))
             lines.append("")
-        
+
         # Account metrics
         equity = portfolio_metrics.get("equity", 10000)
         initial_capital = 10000  # From settings
         total_return_pct = ((equity - initial_capital) / initial_capital) * 100
-        
-        lines.extend([
-            f"Current Total Return (percent): {total_return_pct:.2f}%",
-            f"Available Cash: {portfolio_metrics.get('available_cash', equity):.2f}",
-            f"Current Account Value: {equity:.2f}",
-            "",
-        ])
-        
+
+        lines.extend(
+            [
+                f"Current Total Return (percent): {total_return_pct:.2f}%",
+                f"Available Cash: {portfolio_metrics.get('available_cash', equity):.2f}",
+                f"Current Account Value: {equity:.2f}",
+                "",
+            ]
+        )
+
         # YENİ: Multi-position support
         long_position = portfolio_metrics.get("long_position", 0.0)
         short_position = portfolio_metrics.get("short_position", 0.0)
         net_position = portfolio_metrics.get("net_position", portfolio_metrics.get("position", 0.0))
-        
+
         has_long = abs(long_position) > 0.0001
         has_short = abs(short_position) > 0.0001
-        
+
         # Fee bilgileri
         current_price = portfolio_metrics.get("current_price", 0)
         last_trade_price = portfolio_metrics.get("last_trade_price")
         last_trade_timestamp = portfolio_metrics.get("last_trade_timestamp")
         taker_fee_pct = 0.05  # Binance USDT-M Futures taker fee
-        
+
         # Fee cost örnek hesaplama
         example_position_usd = 50000  # $50k notional için örnek
         example_fee = example_position_usd * (taker_fee_pct / 100)
-        
-        lines.extend([
-            "=" * 80,
-            "FEE COSTS & TRADING LIMITS",
-            "=" * 80,
-            "",
-            f"Taker Fee: {taker_fee_pct}% (per trade)",
-            f"Example fee for $50,000 position: ${example_fee:.2f}",
-            f"Round-trip cost (open + close): ${example_fee * 2:.2f}",
-            "",
-            "LIMITS:",
-            "  • Maximum margin per position: $3,000",
-            "  • Maximum leverage: 20x",
-            "  • Maximum position per side: 1.0 BTC",
-            "",
-        ])
-        
+
+        lines.extend(
+            [
+                "=" * 80,
+                "FEE COSTS & TRADING LIMITS",
+                "=" * 80,
+                "",
+                f"Taker Fee: {taker_fee_pct}% (per trade)",
+                f"Example fee for $50,000 position: ${example_fee:.2f}",
+                f"Round-trip cost (open + close): ${example_fee * 2:.2f}",
+                "",
+                "LIMITS:",
+                "  • Maximum margin per position: $3,000",
+                "  • Maximum leverage: 20x",
+                "  • Maximum position per side: 1.0 BTC",
+                "",
+            ]
+        )
+
         # Fiyat değişimi kontrolü
         if last_trade_price and current_price:
             price_change_pct = abs((current_price - last_trade_price) / last_trade_price) * 100
             price_change_status = "✓ OK" if price_change_pct >= 3.0 else "✗ BLOCKED"
             allowed_status = "Allowed" if price_change_pct >= 3.0 else "Will be blocked"
-            
-            lines.extend([
-                "=" * 80,
-                "PRICE CHANGE AWARENESS (Fee Optimization)",
-                "=" * 80,
-                "",
-                f"Last trade price: ${last_trade_price:.2f}",
-                f"Current price: ${current_price:.2f}",
-                f"Price change: {price_change_pct:.2f}%",
-                f"System threshold status: {price_change_status}",
-                "",
-                "💡 FEE OPTIMIZATION GUIDELINE (Not a requirement for YOUR decision):",
-                "",
-                "  ℹ️ System Behavior:",
-                "  • If price change <3%: System will BLOCK your trade",
-                "  • If price change ≥3%: System will ALLOW your trade",
-                f"  • Current: {price_change_status} ({allowed_status})",
-                "",
-                "  💭 Your Decision Process:",
-                "  • YOU are not forced to trade just because price moved 3%+",
-                "  • YOU can choose HOLD even at 5%, 10%, or any price change",
-                "  • This 3% rule is for system's fee protection, not your strategy",
-                "  • Analyze market conditions and decide what's best",
-                "",
-                "  💰 Fee Context:",
-                "  • Round-trip fee: 0.10% (open + close)",
-                "  • Trading at small moves (<3%) increases fee/profit ratio",
-                "  • Larger moves (3%+) have better fee/profit efficiency",
-                "",
-            ])
-        
+
+            lines.extend(
+                [
+                    "=" * 80,
+                    "PRICE CHANGE AWARENESS (Fee Optimization)",
+                    "=" * 80,
+                    "",
+                    f"Last trade price: ${last_trade_price:.2f}",
+                    f"Current price: ${current_price:.2f}",
+                    f"Price change: {price_change_pct:.2f}%",
+                    f"System threshold status: {price_change_status}",
+                    "",
+                    "💡 FEE OPTIMIZATION GUIDELINE (Not a requirement for YOUR decision):",
+                    "",
+                    "  ℹ️ System Behavior:",
+                    "  • If price change <3%: System will BLOCK your trade",
+                    "  • If price change ≥3%: System will ALLOW your trade",
+                    f"  • Current: {price_change_status} ({allowed_status})",
+                    "",
+                    "  💭 Your Decision Process:",
+                    "  • YOU are not forced to trade just because price moved 3%+",
+                    "  • YOU can choose HOLD even at 5%, 10%, or any price change",
+                    "  • This 3% rule is for system's fee protection, not your strategy",
+                    "  • Analyze market conditions and decide what's best",
+                    "",
+                    "  💰 Fee Context:",
+                    "  • Round-trip fee: 0.10% (open + close)",
+                    "  • Trading at small moves (<3%) increases fee/profit ratio",
+                    "  • Larger moves (3%+) have better fee/profit efficiency",
+                    "",
+                ]
+            )
+
         # Current positions (MULTI-POSITION SUPPORT)
         if has_long or has_short:
-            lines.extend([
-                "=" * 80,
-                "CURRENT LIVE POSITIONS",
-                "=" * 80,
-                "",
-            ])
-            
+            lines.extend(
+                [
+                    "=" * 80,
+                    "CURRENT LIVE POSITIONS",
+                    "=" * 80,
+                    "",
+                ]
+            )
+
             if has_long:
                 long_entry = portfolio_metrics.get("long_avg_price", 0)
                 long_pnl = ((current_price - long_entry) / long_entry) * 100 if long_entry else 0
                 long_pnl_usd = (current_price - long_entry) * long_position if long_entry else 0
                 long_leverage = portfolio_metrics.get("long_leverage", 1)
                 long_exit_plan = portfolio_metrics.get("long_exit_plan")
-                
+
                 # Entry fee (ödenmiş)
                 long_notional = long_position * long_entry
                 long_entry_fee = long_notional * (taker_fee_pct / 100)
-                
-                lines.extend([
-                    "📈 LONG POSITION:",
-                    f"  {{",
-                    f"    'symbol': 'BTCUSDT',",
-                    f"    'position_type': 'LONG',",
-                    f"    'quantity': {long_position:.6f} BTC,",
-                    f"    'entry_price': ${long_entry:.2f},",
-                    f"    'current_price': ${current_price:.2f},",
-                    f"    'unrealized_pnl': ${long_pnl_usd:.2f} ({long_pnl:.2f}%),",
-                    f"    'leverage': {long_leverage}x,",
-                    f"    'entry_fee_paid': ${long_entry_fee:.2f},",
-                ])
-                
+
+                lines.extend(
+                    [
+                        "📈 LONG POSITION:",
+                        f"  {{",
+                        f"    'symbol': 'BTCUSDT',",
+                        f"    'position_type': 'LONG',",
+                        f"    'quantity': {long_position:.6f} BTC,",
+                        f"    'entry_price': ${long_entry:.2f},",
+                        f"    'current_price': ${current_price:.2f},",
+                        f"    'unrealized_pnl': ${long_pnl_usd:.2f} ({long_pnl:.2f}%),",
+                        f"    'leverage': {long_leverage}x,",
+                        f"    'entry_fee_paid': ${long_entry_fee:.2f},",
+                    ]
+                )
+
                 if long_exit_plan:
-                    pt = long_exit_plan.get('profit_target', 0)
-                    sl = long_exit_plan.get('stop_loss', 0)
-                    inv = long_exit_plan.get('invalidation_condition', 'N/A')
-                    lines.extend([
-                        f"    'exit_plan': {{",
-                        f"      'profit_target': ${pt:.2f},",
-                        f"      'stop_loss': ${sl:.2f},",
-                        f"      'invalidation': '{inv}'",
-                        f"    }}",
-                    ])
-                
-                lines.extend([
-                    f"  }}",
-                    "",
-                ])
-            
+                    pt = long_exit_plan.get("profit_target", 0)
+                    sl = long_exit_plan.get("stop_loss", 0)
+                    inv = long_exit_plan.get("invalidation_condition", "N/A")
+                    lines.extend(
+                        [
+                            f"    'exit_plan': {{",
+                            f"      'profit_target': ${pt:.2f},",
+                            f"      'stop_loss': ${sl:.2f},",
+                            f"      'invalidation': '{inv}'",
+                            f"    }}",
+                        ]
+                    )
+
+                lines.extend(
+                    [
+                        f"  }}",
+                        "",
+                    ]
+                )
+
             if has_short:
                 short_entry = portfolio_metrics.get("short_avg_price", 0)
-                short_pnl = ((short_entry - current_price) / short_entry) * 100 if short_entry else 0
-                short_pnl_usd = (short_entry - current_price) * abs(short_position) if short_entry else 0
+                short_pnl = (
+                    ((short_entry - current_price) / short_entry) * 100 if short_entry else 0
+                )
+                short_pnl_usd = (
+                    (short_entry - current_price) * abs(short_position) if short_entry else 0
+                )
                 short_leverage = portfolio_metrics.get("short_leverage", 1)
                 short_exit_plan = portfolio_metrics.get("short_exit_plan")
-                
+
                 # Entry fee (ödenmiş)
                 short_notional = abs(short_position) * short_entry
                 short_entry_fee = short_notional * (taker_fee_pct / 100)
-                
-                lines.extend([
-                    "📉 SHORT POSITION:",
-                    f"  {{",
-                    f"    'symbol': 'BTCUSDT',",
-                    f"    'position_type': 'SHORT',",
-                    f"    'quantity': {abs(short_position):.6f} BTC,",
-                    f"    'entry_price': ${short_entry:.2f},",
-                    f"    'current_price': ${current_price:.2f},",
-                    f"    'unrealized_pnl': ${short_pnl_usd:.2f} ({short_pnl:.2f}%),",
-                    f"    'leverage': {short_leverage}x,",
-                    f"    'entry_fee_paid': ${short_entry_fee:.2f},",
-                ])
-                
+
+                lines.extend(
+                    [
+                        "📉 SHORT POSITION:",
+                        f"  {{",
+                        f"    'symbol': 'BTCUSDT',",
+                        f"    'position_type': 'SHORT',",
+                        f"    'quantity': {abs(short_position):.6f} BTC,",
+                        f"    'entry_price': ${short_entry:.2f},",
+                        f"    'current_price': ${current_price:.2f},",
+                        f"    'unrealized_pnl': ${short_pnl_usd:.2f} ({short_pnl:.2f}%),",
+                        f"    'leverage': {short_leverage}x,",
+                        f"    'entry_fee_paid': ${short_entry_fee:.2f},",
+                    ]
+                )
+
                 if short_exit_plan:
-                    pt = short_exit_plan.get('profit_target', 0)
-                    sl = short_exit_plan.get('stop_loss', 0)
-                    inv = short_exit_plan.get('invalidation_condition', 'N/A')
-                    lines.extend([
-                        f"    'exit_plan': {{",
-                        f"      'profit_target': ${pt:.2f},",
-                        f"      'stop_loss': ${sl:.2f},",
-                        f"      'invalidation': '{inv}'",
-                        f"    }}",
-                    ])
-                
-                lines.extend([
-                    f"  }}",
-                    "",
-                ])
-            
+                    pt = short_exit_plan.get("profit_target", 0)
+                    sl = short_exit_plan.get("stop_loss", 0)
+                    inv = short_exit_plan.get("invalidation_condition", "N/A")
+                    lines.extend(
+                        [
+                            f"    'exit_plan': {{",
+                            f"      'profit_target': ${pt:.2f},",
+                            f"      'stop_loss': ${sl:.2f},",
+                            f"      'invalidation': '{inv}'",
+                            f"    }}",
+                        ]
+                    )
+
+                lines.extend(
+                    [
+                        f"  }}",
+                        "",
+                    ]
+                )
+
             # Net exposure
-            lines.extend([
-                f"NET POSITION: {net_position:.6f} BTC",
-                f"  • Long: {long_position:.6f} BTC",
-                f"  • Short: {short_position:.6f} BTC",
-                "",
-            ])
-            
+            lines.extend(
+                [
+                    f"NET POSITION: {net_position:.6f} BTC",
+                    f"  • Long: {long_position:.6f} BTC",
+                    f"  • Short: {short_position:.6f} BTC",
+                    "",
+                ]
+            )
+
             # HEDGE RULES
-            lines.extend([
-                "=" * 80,
-                "HEDGE STRATEGY RULES",
-                "=" * 80,
-                "",
-                "✅ YOU CAN:",
-                "  • Open LONG + SHORT simultaneously (hedge position)",
-                "  • Example: LONG 0.5 BTC + SHORT 0.3 BTC = 0.2 BTC net long exposure",
-                "",
-                "❌ YOU CANNOT:",
-                "  • Open LONG + LONG (duplicate same-direction position)",
-                "  • Open SHORT + SHORT (duplicate same-direction position)",
-                "",
-                f"CURRENT STATE:",
-                f"  • Long: {'OPEN (%.6f BTC)' % long_position if has_long else 'NONE'}",
-                f"  • Short: {'OPEN (%.6f BTC)' % abs(short_position) if has_short else 'NONE'}",
-                "",
-                "STRATEGY EXAMPLES:",
-                "  1. Market Neutral Hedge:",
-                "     → Open LONG 0.5 BTC + SHORT 0.5 BTC (net: 0 BTC)",
-                "     → Profit from funding rates or volatility",
-                "",
-                "  2. Partial Hedge:",
-                "     → Long açıkken düşüş riski var → SHORT 0.3 BTC ekle (risk azalt)",
-                "",
-                "  3. Directional with Protection:",
-                "     → Bullish ama hedge için SHORT 0.2 BTC + LONG 0.8 BTC",
-                "",
-            ])
+            lines.extend(
+                [
+                    "=" * 80,
+                    "HEDGE STRATEGY RULES",
+                    "=" * 80,
+                    "",
+                    "✅ YOU CAN:",
+                    "  • Open LONG + SHORT simultaneously (hedge position)",
+                    "  • Example: LONG 0.5 BTC + SHORT 0.3 BTC = 0.2 BTC net long exposure",
+                    "",
+                    "❌ YOU CANNOT:",
+                    "  • Open LONG + LONG (duplicate same-direction position)",
+                    "  • Open SHORT + SHORT (duplicate same-direction position)",
+                    "",
+                    f"CURRENT STATE:",
+                    f"  • Long: {'OPEN (%.6f BTC)' % long_position if has_long else 'NONE'}",
+                    f"  • Short: {'OPEN (%.6f BTC)' % abs(short_position) if has_short else 'NONE'}",
+                    "",
+                    "STRATEGY EXAMPLES:",
+                    "  1. Market Neutral Hedge:",
+                    "     → Open LONG 0.5 BTC + SHORT 0.5 BTC (net: 0 BTC)",
+                    "     → Profit from funding rates or volatility",
+                    "",
+                    "  2. Partial Hedge:",
+                    "     → Long açıkken düşüş riski var → SHORT 0.3 BTC ekle (risk azalt)",
+                    "",
+                    "  3. Directional with Protection:",
+                    "     → Bullish ama hedge için SHORT 0.2 BTC + LONG 0.8 BTC",
+                    "",
+                ]
+            )
         else:
-            lines.extend([
-                "Current live positions: NONE (FLAT)",
-                "",
-                "=" * 80,
-                "HEDGE STRATEGY (AVAILABLE)",
-                "=" * 80,
-                "",
-                "Since you have NO positions, you can:",
-                "  1. Open LONG if bullish",
-                "  2. Open SHORT if bearish",
-                "  3. Open both LONG + SHORT for neutral/hedge strategy",
-                "",
-            ])
-        
+            lines.extend(
+                [
+                    "Current live positions: NONE (FLAT)",
+                    "",
+                    "=" * 80,
+                    "HEDGE STRATEGY (AVAILABLE)",
+                    "=" * 80,
+                    "",
+                    "Since you have NO positions, you can:",
+                    "  1. Open LONG if bullish",
+                    "  2. Open SHORT if bearish",
+                    "  3. Open both LONG + SHORT for neutral/hedge strategy",
+                    "",
+                ]
+            )
+
         # Sharpe ratio (if available)
         sharpe = portfolio_metrics.get("sharpe_ratio", 0)
         if sharpe:
             lines.append(f"Sharpe Ratio: {sharpe:.3f}")
-        
+
         return "\n".join(lines)
-    
+
     def _build_instructions(self) -> str:
         """Build trading instructions section"""
-        
+
         return """
 ================================================================================
 YOUR TASK
@@ -1035,60 +1133,63 @@ Think step by step and make your decision based on:
 4. Risk/reward ratio
 5. Market structure and momentum
 """
-    
+
     def _format_array(self, values: List[float], decimals: int = 2) -> str:
         """Format array for display"""
         if not values:
             return "[]"
         formatted = [f"{v:.{decimals}f}" for v in values]
         return "[" + ", ".join(formatted) + "]"
-    
+
     def _check_position_close_notification(self) -> Dict[str, Any] | None:
         """
         Redis'ten position close bildirimini kontrol et
-        
+
         Returns:
             Notification data dict veya None
         """
         try:
             import json
+
             from app.utils.redis import get_redis_client
-            
+
             redis = get_redis_client()
             redis_key = "position_closed:BTCUSDT"  # Hardcoded for now
-            
+
             notification_json = redis.get(redis_key)
-            
+
             if notification_json:
                 notification_data = json.loads(notification_json)
-                
+
                 # Bildirimi oku ve sil (tek seferlik)
                 redis.delete(redis_key)
-                
+
                 from app.utils.logging import get_logger
+
                 logger = get_logger(__name__)
                 logger.info(
                     "✅ GLM read position close notification from Redis | trigger=%s",
-                    notification_data.get("trigger_type")
+                    notification_data.get("trigger_type"),
                 )
-                
+
                 return notification_data
-            
+
             return None
-            
+
         except Exception as exc:
             from app.utils.logging import get_logger
+
             logger = get_logger(__name__)
             logger.error("Failed to read position close notification from Redis: %s", exc)
             return None
-    
+
     def _format_close_notification(self, notification: Dict[str, Any]) -> List[str]:
         """
         Position close notification'ı formatla
-        
+
         Args:
             notification: Redis'ten okunan notification data
-        
+
         Returns:
             Formatted lines list
         """
@@ -1101,15 +1202,11 @@ Think step by step and make your decision based on:
         pnl_pct = notification.get("pnl_pct", 0)
         position_type = notification.get("position_type", "UNKNOWN")
         quantity = notification.get("quantity", 0)
-        
+
         # Emoji seçimi
-        emoji_map = {
-            "profit_target": "🎯",
-            "stop_loss": "🛑",
-            "invalidation": "⚠️"
-        }
+        emoji_map = {"profit_target": "🎯", "stop_loss": "🛑", "invalidation": "⚠️"}
         emoji = emoji_map.get(trigger_type, "🔔")
-        
+
         lines = [
             "=" * 80,
             f"{emoji} RECENT POSITION CLOSE NOTIFICATION (AUTOMATIC)",
@@ -1136,5 +1233,5 @@ Think step by step and make your decision based on:
             "  • Decide if market conditions are good for opening a new position",
             "",
         ]
-        
+
         return lines

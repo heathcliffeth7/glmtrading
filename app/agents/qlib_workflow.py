@@ -5,7 +5,6 @@ import pandas as pd
 from app.config.settings import get_settings
 from app.utils.logging import get_logger
 
-
 settings = get_settings()
 logger = get_logger(__name__)
 

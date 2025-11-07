@@ -11,7 +11,6 @@ from qlib.workflow.task.gen_config import create_task
 
 from app.config.settings import get_settings
 
-
 settings = get_settings()
 
 

@@ -6,7 +6,6 @@ from typing import List
 from pydantic import AnyHttpUrl, AnyUrl, Field, validator
 from pydantic_settings import BaseSettings
 
-
 BASE_DIR = Path(__file__).resolve().parents[2]
 ENV_FILE = BASE_DIR / ".env"
 
@@ -101,12 +100,16 @@ class AppSettings(BaseSettings):
     telegram_bot_token: str = Field("", alias="TELEGRAM_BOT_TOKEN")
     telegram_channel_id: str = Field("", alias="TELEGRAM_CHANNEL_ID")
     use_nof1_style: bool = Field(False, alias="USE_NOF1_STYLE")
-    
+
     # Position Monitor Settings
     enable_position_monitor: bool = Field(True, alias="ENABLE_POSITION_MONITOR")
-    position_monitor_interval_seconds: int = Field(180, alias="POSITION_MONITOR_INTERVAL_SECONDS")  # 3 dakika
-    position_monitor_check_invalidation: bool = Field(True, alias="POSITION_MONITOR_CHECK_INVALIDATION")
-    
+    position_monitor_interval_seconds: int = Field(
+        180, alias="POSITION_MONITOR_INTERVAL_SECONDS"
+    )  # 3 dakika
+    position_monitor_check_invalidation: bool = Field(
+        True, alias="POSITION_MONITOR_CHECK_INVALIDATION"
+    )
+
     binance: BinanceSettings = Field(default_factory=BinanceSettings)
     twelve_data: TwelveDataSettings = Field(default_factory=TwelveDataSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)

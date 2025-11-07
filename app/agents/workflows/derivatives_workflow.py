@@ -9,7 +9,11 @@ import pandas as pd
 
 
 def run(data: pd.DataFrame, experiment: str = "derivatives") -> Tuple[Path, dict]:
-    model = joblib.load("models/derivatives.joblib") if Path("models/derivatives.joblib").exists() else None
+    model = (
+        joblib.load("models/derivatives.joblib")
+        if Path("models/derivatives.joblib").exists()
+        else None
+    )
     if model is None:
         from sklearn.linear_model import LogisticRegression
 

@@ -8,21 +8,40 @@ from typing import Dict, Optional
 from sqlalchemy.orm import Session
 
 from app.executor.ledger import (
-    DailyPnL, Portfolio, Trade, engine, get_daily_pnl, get_portfolio, record_trade, get_recent_trades, 
-    get_open_position_details, close_open_trades, generate_position_id,
-    create_stop_loss_order, create_take_profit_order, get_active_stop_loss_orders, get_active_take_profit_orders,
-    trigger_stop_loss_order, trigger_take_profit_order, create_stop_loss_notification, get_recent_notifications,
-    StopLossOrder, TakeProfitOrder, StopLossNotification
+    DailyPnL,
+    Portfolio,
+    StopLossNotification,
+    StopLossOrder,
+    TakeProfitOrder,
+    Trade,
+    close_open_trades,
+    create_stop_loss_notification,
+    create_stop_loss_order,
+    create_take_profit_order,
+    engine,
+    generate_position_id,
+    get_active_stop_loss_orders,
+    get_active_take_profit_orders,
+    get_daily_pnl,
+    get_open_position_details,
+    get_portfolio,
+    get_recent_notifications,
+    get_recent_trades,
+    record_trade,
+    trigger_stop_loss_order,
+    trigger_take_profit_order,
 )
-from app.executor.portfolio_sync import get_synced_portfolio, calculate_correct_margin_usage
-from app.risk_manager.manager import RiskDecision
-from app.risk_manager.dynamic_risk_manager import DynamicRiskManager
+from app.executor.portfolio_sync import (
+    calculate_correct_margin_usage,
+    get_synced_portfolio,
+)
 from app.risk_manager.advanced_parser import AdvancedInvalidationParser
+from app.risk_manager.dynamic_risk_manager import DynamicRiskManager
+from app.risk_manager.manager import RiskDecision
 from app.utils.influx import query_latest
-from app.utils.price_cache import ensure_price_cache_listener, price_cache
 from app.utils.logging import get_logger
+from app.utils.price_cache import ensure_price_cache_listener, price_cache
 from app.utils.telegram import format_markdown, telegram_client
-
 
 logger = get_logger(__name__)
 
@@ -53,11 +72,11 @@ class Executor:
         self._max_margin_per_trade = max_trade_value  # YENİ: Rename for clarity
         self._starting_cash = 10000.0
         self._taker_fee_rate = taker_fee_rate
-        
+
         # BACKWARD COMPATIBILITY
         self._max_position = max_position
         self._max_trade_value = max_trade_value
-        
+
         # Global notional cap (sum of open positions' amount×price)
         self._max_total_notional_usd = self._starting_cash * self._max_leverage
         # Hard per-trade BTC cap (safety)
@@ -65,34 +84,34 @@ class Executor:
         # Reasonable price sanity range for BTCUSDT (display/guardrail only)
         self._min_price_sanity = 100.0
         self._max_price_sanity = 1_000_000.0
-        
+
         # CLOSE sonrası cooldown mekanizması
         self._last_close_time = None
         self._close_cooldown_seconds = 0  # Cooldown kaldırıldı - hızlı müdahale için
-        
+
         # STOP-LOSS ve TAKE-PROFIT sistemi
         self._stop_loss_enabled = True
         self._take_profit_enabled = True
         self._base_stop_loss_percent = 0.05  # %5 baz stop-loss (Nof1.ai standardı)
         self._base_take_profit_percent = 0.10  # %10 baz take-profit (Nof1.ai standardı)
-        
+
         # Log'daki pozisyona göre özel seviyeler (SHORT pozisyonu)
         self._current_entry_price = 111607.60  # Mevcut SHORT giriş fiyatı
         self._stop_loss_price_short = 112187.98  # Entry + %0.52 (stop-loss)
         self._take_profit_price_short = 110495.22  # Entry - %1.0 (take-profit)
-        
+
         # İşlem sıklığı kontrolü
         self._last_trade_direction = None
         self._last_trade_time = None
         self._same_direction_cooldown = 900  # 15 dakika aynı yöne işlem bekleme
-        
+
         # YENİ: Dinamik risk yönetimi ve gelişmiş parser
         self._dynamic_risk_manager = DynamicRiskManager()
         self._advanced_parser = AdvancedInvalidationParser()
-        
+
         ensure_price_cache_listener(self._symbol)
         self._last_trade_report_stats: Dict[str, int] = {"skipped_anomalies": 0}
-        
+
         # WebSocket stop-loss monitoring
         self._stop_loss_monitoring_active = False
         self._last_sl_tp_notification = None
@@ -100,6 +119,7 @@ class Executor:
     def get_current_position_id(self, session: Session, symbol: str) -> Optional[str]:
         """DEPRECATED: Tek pozisyon varsayar. get_position_id_by_side kullanın."""
         from app.executor.ledger import Trade
+
         open_trade = (
             session.query(Trade)
             .filter_by(symbol=symbol)
@@ -110,9 +130,12 @@ class Executor:
         )
         return open_trade.position_id if open_trade else None
 
-    def get_position_id_by_side(self, session: Session, symbol: str, position_side: str) -> Optional[str]:
+    def get_position_id_by_side(
+        self, session: Session, symbol: str, position_side: str
+    ) -> Optional[str]:
         """Belirtilen yön (LONG/SHORT) için açık pozisyon ID'sini bul"""
         from app.executor.ledger import Trade
+
         open_trade = (
             session.query(Trade)
             .filter_by(symbol=symbol, position_side=position_side)
@@ -126,6 +149,7 @@ class Executor:
     def get_all_open_position_ids(self, session: Session, symbol: str) -> Dict[str, str]:
         """Tüm açık pozisyon ID'lerini döndür {position_side: position_id}"""
         from app.executor.ledger import Trade
+
         open_trades = (
             session.query(Trade)
             .filter_by(symbol=symbol)
@@ -140,34 +164,31 @@ class Executor:
         return result
 
     def _check_price_change_threshold(
-        self, 
-        portfolio: Portfolio, 
-        current_price: float, 
-        action: str
+        self, portfolio: Portfolio, current_price: float, action: str
     ) -> tuple[bool, str]:
         """
         Son işlemden bu yana minimum %3 fiyat değişimi kontrolü.
-        
+
         Args:
             portfolio: Güncel portfolio durumu
             current_price: Mevcut BTC fiyatı
             action: BUY/SELL/CLOSE
-            
+
         Returns:
             (allowed: bool, reason: str)
         """
         MIN_PRICE_CHANGE_PERCENT = 3.0
-        
+
         # İlk işlem kontrolü
         if not portfolio.last_trade_price:
             logger.info("✅ Price change check: First trade, no threshold required")
             return True, "First trade"
-        
+
         # Fiyat değişimini hesapla
-        price_change_pct = abs(
-            (current_price - portfolio.last_trade_price) / portfolio.last_trade_price
-        ) * 100.0
-        
+        price_change_pct = (
+            abs((current_price - portfolio.last_trade_price) / portfolio.last_trade_price) * 100.0
+        )
+
         if price_change_pct < MIN_PRICE_CHANGE_PERCENT:
             reason = (
                 f"Fiyat değişimi %.2f%% < minimum %.2f%% "
@@ -178,25 +199,27 @@ class Executor:
                 price_change_pct,
                 MIN_PRICE_CHANGE_PERCENT,
                 portfolio.last_trade_price,
-                current_price
+                current_price,
             )
             return False, reason
-        
+
         reason = (
             f"Fiyat değişimi yeterli: %.2f%% ≥ %.2f%% "
             f"(son: ${portfolio.last_trade_price:.2f}, şu an: ${current_price:.2f})"
         ) % (price_change_pct, MIN_PRICE_CHANGE_PERCENT)
-        
+
         logger.info(
             "✅ Price change threshold OK: %.2f%% ≥ %.2f%% (last: $%.2f, current: $%.2f)",
             price_change_pct,
             MIN_PRICE_CHANGE_PERCENT,
             portfolio.last_trade_price,
-            current_price
+            current_price,
         )
         return True, reason
 
-    def _calculate_volatility_adjusted_position_size(self, base_amount: float, volatility: float = 0.5) -> float:
+    def _calculate_volatility_adjusted_position_size(
+        self, base_amount: float, volatility: float = 0.5
+    ) -> float:
         """Volatiliteye göre pozisyon boyutunu ayarla - $4000 max trade için optimize"""
         if volatility < 0.3:  # Düşük volatilite - daha büyük pozisyon
             multiplier = 1.3
@@ -206,14 +229,14 @@ class Executor:
             multiplier = 0.8
         else:  # Çok yüksek volatilite
             multiplier = 0.6
-        
+
         adjusted_amount = base_amount * multiplier
         logger.info(
             "Position size adjusted: %.4f → %.4f (volatility=%.2f, multiplier=%.2f)",
             base_amount,
             adjusted_amount,
             volatility,
-            multiplier
+            multiplier,
         )
         return adjusted_amount
 
@@ -226,81 +249,73 @@ class Executor:
             decision.leverage,
             reason,
         )
-        
+
         # ALLOW CLOSE ACTION: Only when GLM has 100% confidence
         if decision.action == "CLOSE":
             if decision.glm_confidence >= 100.0:
                 logger.info(
                     "✅ CLOSE action allowed: GLM has 100%% confidence (%.1f%%) - closing position",
-                    decision.glm_confidence
+                    decision.glm_confidence,
                 )
                 # Continue to execution - CLOSE doesn't need exit_plan validation
             else:
                 logger.warning(
                     "❌ CLOSE action rejected: GLM confidence %.1f%% < 100%% - positions close automatically via exit_plan",
-                    decision.glm_confidence
+                    decision.glm_confidence,
                 )
                 return ExecutionResult(
                     status="INVALID",
-                    details=f"GLM CLOSE action rejected - confidence {decision.glm_confidence:.1f}% < 100% (use exit_plan instead)"
+                    details=f"GLM CLOSE action rejected - confidence {decision.glm_confidence:.1f}% < 100% (use exit_plan instead)",
                 )
-        
+
         # VALIDATE EXIT PLAN: BUY/SELL requires valid exit_plan (CLOSE doesn't need it)
         if decision.action in ["BUY", "SELL"]:
             # Exit plan must exist
             if not decision.exit_plan:
                 logger.error("BLOCKED: GLM must provide exit_plan for %s", decision.action)
-                return ExecutionResult(
-                    status="BLOCKED",
-                    details="Exit plan eksik - GLM hatası"
-                )
-            
+                return ExecutionResult(status="BLOCKED", details="Exit plan eksik - GLM hatası")
+
             # Exit plan values must be valid
             profit_target = decision.exit_plan.get("profit_target")
             stop_loss = decision.exit_plan.get("stop_loss")
             invalidation = decision.exit_plan.get("invalidation_condition")
-            
+
             if not profit_target or profit_target == 0.0:
-                logger.error("BLOCKED: Invalid profit_target=%s for %s", profit_target, decision.action)
-                return ExecutionResult(
-                    status="BLOCKED",
-                    details="Profit target geçersiz veya eksik"
+                logger.error(
+                    "BLOCKED: Invalid profit_target=%s for %s", profit_target, decision.action
                 )
-            
+                return ExecutionResult(
+                    status="BLOCKED", details="Profit target geçersiz veya eksik"
+                )
+
             if not stop_loss or stop_loss == 0.0:
                 logger.error("BLOCKED: Invalid stop_loss=%s for %s", stop_loss, decision.action)
-                return ExecutionResult(
-                    status="BLOCKED",
-                    details="Stop loss geçersiz veya eksik"
-                )
-            
+                return ExecutionResult(status="BLOCKED", details="Stop loss geçersiz veya eksik")
+
             logger.info(
                 "✅ Exit plan validated: PT=%.2f SL=%.2f INV=%s",
                 profit_target,
                 stop_loss,
-                invalidation or "N/A"
+                invalidation or "N/A",
             )
-        
+
         # === DECISION STALENESS CHECK ===
         # Reject decisions that are too old (default: 60 seconds)
         age = decision.age_seconds()
         logger.info("🔍 Decision age check: %.1fs old (max: 60s)", age)
-        
+
         if decision.is_stale(max_age_seconds=60):
             logger.error(
                 "❌ SKIP REASON: Decision is STALE (%.1fs old > 60s max) - market conditions may have changed",
-                age
+                age,
             )
             telegram_client.send_message(
                 f"⚠️ TRADE SKIPPED: Decision too old ({age:.1f}s)\n"
                 f"Action: {decision.action}\n"
                 f"Market may have moved significantly"
             )
-            return ExecutionResult(
-                status="SKIPPED",
-                details=f"Decision stale ({age:.1f}s old)"
-            )
-        
+            return ExecutionResult(status="SKIPPED", details=f"Decision stale ({age:.1f}s old)")
+
         # === PRICE FRESHNESS CHECK ===
         # Validate that we have fresh price data before executing
         if decision.action in ["BUY", "SELL", "CLOSE"]:
@@ -308,7 +323,7 @@ class Executor:
             validated_price = self._get_current_price_validated(self._symbol)
             if validated_price is None:
                 logger.error("❌ SKIP REASON: No fresh price available from data feed")
-                
+
                 # Send Telegram notification about price fetch failure
                 cache_age = price_cache.get_age_seconds(self._symbol)
                 try:
@@ -323,31 +338,35 @@ class Executor:
                         f"- REST API: Başarısız\n"
                         f"- InfluxDB: Başarısız\n\n"
                         f"**Durum:** WebSocket listener kontrol ediliyor...",
-                        parse_mode="Markdown"
+                        parse_mode="Markdown",
                     )
                 except Exception as exc:
                     logger.error("Failed to send Telegram notification: %s", exc)
-                
-                return ExecutionResult(
-                    status="SKIPPED",
-                    details="No fresh price available"
-                )
+
+                return ExecutionResult(status="SKIPPED", details="No fresh price available")
             logger.info("✅ Price is fresh: %.2f", validated_price)
-        
+
         if decision.action == "HOLD" or decision.amount == 0:
             # HOLD kararında cooldown bilgisi ver
             logger.info("🔍 HOLD decision - checking close cooldown...")
             if self._last_close_time:
                 elapsed = (datetime.utcnow() - self._last_close_time).total_seconds()
                 remaining = self._close_cooldown_seconds - elapsed
-                logger.info("   └─ Last close: %.0fs ago, cooldown: %.0fs (%.0fs remaining)", 
-                           elapsed, self._close_cooldown_seconds, max(0, remaining))
+                logger.info(
+                    "   └─ Last close: %.0fs ago, cooldown: %.0fs (%.0fs remaining)",
+                    elapsed,
+                    self._close_cooldown_seconds,
+                    max(0, remaining),
+                )
                 if elapsed < self._close_cooldown_seconds:
-                    logger.info("❌ SKIP REASON: HOLD during close cooldown (%.0f/%.0f minutes remaining)", 
-                               remaining/60, self._close_cooldown_seconds/60)
+                    logger.info(
+                        "❌ SKIP REASON: HOLD during close cooldown (%.0f/%.0f minutes remaining)",
+                        remaining / 60,
+                        self._close_cooldown_seconds / 60,
+                    )
                     return ExecutionResult(
                         status="SKIP",
-                        details=f"Hold kararı (cooldown: {int(remaining/60)} dakika {int(remaining%60)} saniye kaldı)"
+                        details=f"Hold kararı (cooldown: {int(remaining/60)} dakika {int(remaining%60)} saniye kaldı)",
                     )
             logger.info("✅ HOLD decision accepted")
             return ExecutionResult(status="SKIP", details="Hold kararı")
@@ -356,36 +375,42 @@ class Executor:
         if decision.action in ["BUY", "SELL"]:
             current_time = datetime.utcnow()
             logger.info("🔍 Checking same-direction trade cooldown for %s...", decision.action)
-            logger.info("   └─ Last trade direction: %s, Last trade time: %s", 
-                       self._last_trade_direction, self._last_trade_time)
-            
-            if (self._last_trade_direction == decision.action and 
-                self._last_trade_time and 
-                (current_time - self._last_trade_time).total_seconds() < self._same_direction_cooldown):
-                
+            logger.info(
+                "   └─ Last trade direction: %s, Last trade time: %s",
+                self._last_trade_direction,
+                self._last_trade_time,
+            )
+
+            if (
+                self._last_trade_direction == decision.action
+                and self._last_trade_time
+                and (current_time - self._last_trade_time).total_seconds()
+                < self._same_direction_cooldown
+            ):
+
                 elapsed = (current_time - self._last_trade_time).total_seconds()
                 remaining = self._same_direction_cooldown - elapsed
                 logger.warning(
                     "❌ SKIP REASON: Same-direction trade cooldown - %s blocked (%.0fs elapsed, %.0fs remaining)",
                     decision.action,
                     elapsed,
-                    remaining
+                    remaining,
                 )
                 return ExecutionResult(
-                    status="SKIP", 
-                    details=f"{decision.action} atlandı (aynı yönde {int(remaining/60)} dk bekleme)"
+                    status="SKIP",
+                    details=f"{decision.action} atlandı (aynı yönde {int(remaining/60)} dk bekleme)",
                 )
-            
+
             logger.info("✅ Same-direction cooldown check passed")
 
         # ACİL GÜVENLİK KONTROLÜ: Portfolio astronomik mi?
         with Session(engine) as safety_session:
             safety_portfolio = get_synced_portfolio(safety_session, self._symbol)
-            
+
             if abs(safety_portfolio.position) > 10.0:  # 10 BTC acil limit
                 logger.critical(
                     "EMERGENCY: Position astronomical (%.6f BTC), forcing reset",
-                    safety_portfolio.position
+                    safety_portfolio.position,
                 )
                 # Tüm açık pozisyonları kapat
                 price = self._resolve_price()
@@ -402,8 +427,10 @@ class Executor:
                 safety_portfolio.average_price = 0.0
                 safety_portfolio.updated_at = datetime.utcnow()
                 safety_session.commit()
-                return ExecutionResult(status="EMERGENCY_RESET", details="Astronomik pozisyon sıfırlandı")
-        
+                return ExecutionResult(
+                    status="EMERGENCY_RESET", details="Astronomik pozisyon sıfırlandı"
+                )
+
         # COOLDOWN KONTROLÜ: CLOSE sonrası hemen işlem yapma
         if self._last_close_time and decision.action in ["BUY", "SELL"]:
             elapsed = (datetime.utcnow() - self._last_close_time).total_seconds()
@@ -412,11 +439,11 @@ class Executor:
                 logger.info(
                     "COOLDOWN: Last CLOSE was %.0f seconds ago, waiting %.0f more seconds before opening new position",
                     elapsed,
-                    remaining
+                    remaining,
                 )
                 return ExecutionResult(
                     status="COOLDOWN",
-                    details=f"CLOSE sonrası cooldown: {int(remaining/60)} dakika {int(remaining%60)} saniye kaldı"
+                    details=f"CLOSE sonrası cooldown: {int(remaining/60)} dakika {int(remaining%60)} saniye kaldı",
                 )
 
         with Session(engine) as session:
@@ -438,57 +465,58 @@ class Executor:
                     self._max_price_sanity,
                 )
                 return ExecutionResult(status="SKIP", details="Price out of sanity bounds")
-            
+
             # %3 FİYAT DEĞİŞİMİ KONTROLÜ: Gereksiz işlemleri engelle
             if decision.action in ["BUY", "SELL", "CLOSE"]:
                 logger.info("🔍 Checking 3%% price change threshold for %s...", decision.action)
-                allowed, reason = self._check_price_change_threshold(portfolio, price, decision.action)
+                allowed, reason = self._check_price_change_threshold(
+                    portfolio, price, decision.action
+                )
                 if not allowed:
                     logger.warning("❌ SKIP REASON: Price change threshold not met - %s", reason)
-                    return ExecutionResult(
-                        status="BLOCKED_PRICE_THRESHOLD",
-                        details=reason
-                    )
+                    return ExecutionResult(status="BLOCKED_PRICE_THRESHOLD", details=reason)
                 logger.info("✅ Price change threshold passed: %s", reason)
-            
+
             # NOTE: Position sizing is handled by Risk Manager's _apply_safety_limits()
             # which enforces max 3000 USD margin and max 20x leverage
             # No need for additional equity % cap here
-            
+
             leverage = self._normalize_leverage(decision.leverage)
-            
+
             # Toplam equity hesapla
             total_equity = self._starting_cash + daily_pnl.realized_pnl + daily_pnl.unrealized_pnl
-            
+
             # GÜVENLIK KONTROLÜ: Negatif veya sıfır equity
             if total_equity <= 100:  # Minimum $100 gerekli
                 logger.error(
                     "CRITICAL: Total equity too low or negative (%.2f) - halting trading",
-                    total_equity
+                    total_equity,
                 )
-                return ExecutionResult(status="SKIP", details=f"Yetersiz sermaye: ${total_equity:.2f}")
-            
+                return ExecutionResult(
+                    status="SKIP", details=f"Yetersiz sermaye: ${total_equity:.2f}"
+                )
+
             # Pozisyon durumu kontrolü (YENİ: Long ve Short ayrı)
             has_long = portfolio.long_position > 0.0001
             has_short = portfolio.short_position < -0.0001
-            
+
             # HEDGE LOGIC: Aynı yönde çift pozisyon engelleme + ters yön hedge izni
             if decision.action == "BUY":
                 if has_long:
                     logger.warning(
                         "❌ BLOCKED: Long pozisyon zaten açık (%.6f BTC @ $%.2f), ikinci long açılamaz",
                         portfolio.long_position,
-                        portfolio.long_avg_price or 0.0
+                        portfolio.long_avg_price or 0.0,
                     )
                     return ExecutionResult(
                         status="BLOCKED_DUPLICATE_POSITION",
-                        details=f"Long pozisyon zaten açık: {portfolio.long_position:.6f} BTC"
+                        details=f"Long pozisyon zaten açık: {portfolio.long_position:.6f} BTC",
                     )
                 elif has_short:
                     logger.info(
                         "🔀 HEDGE: Short pozisyon açıkken (%.6f BTC @ $%.2f) yeni LONG pozisyon açılıyor",
                         portfolio.short_position,
-                        portfolio.short_avg_price or 0.0
+                        portfolio.short_avg_price or 0.0,
                     )
                     position_side = "LONG"
                     is_closing = False
@@ -496,23 +524,23 @@ class Executor:
                     logger.info("📈 OPENING NEW LONG POSITION")
                     position_side = "LONG"
                     is_closing = False
-                    
+
             elif decision.action == "SELL":
                 if has_short:
                     logger.warning(
                         "❌ BLOCKED: Short pozisyon zaten açık (%.6f BTC @ $%.2f), ikinci short açılamaz",
                         portfolio.short_position,
-                        portfolio.short_avg_price or 0.0
+                        portfolio.short_avg_price or 0.0,
                     )
                     return ExecutionResult(
                         status="BLOCKED_DUPLICATE_POSITION",
-                        details=f"Short pozisyon zaten açık: {portfolio.short_position:.6f} BTC"
+                        details=f"Short pozisyon zaten açık: {portfolio.short_position:.6f} BTC",
                     )
                 elif has_long:
                     logger.info(
                         "🔀 HEDGE: Long pozisyon açıkken (%.6f BTC @ $%.2f) yeni SHORT pozisyon açılıyor",
                         portfolio.long_position,
-                        portfolio.long_avg_price or 0.0
+                        portfolio.long_avg_price or 0.0,
                     )
                     position_side = "SHORT"
                     is_closing = False
@@ -520,24 +548,37 @@ class Executor:
                     logger.info("📉 OPENING NEW SHORT POSITION")
                     position_side = "SHORT"
                     is_closing = False
-                    
+
             elif decision.action == "CLOSE":
                 # CLOSE action için hangi pozisyon kapatılacak?
                 # RiskDecision'da close_side varsa onu kullan, yoksa belirle
-                close_side = getattr(decision, 'close_side', None)
-                
+                close_side = getattr(decision, "close_side", None)
+
                 if not close_side:
                     # close_side yoksa, ikisi de açıksa en zararlı olanı kapat
                     if has_long and has_short:
-                        long_pnl_pct = ((price - portfolio.long_avg_price) / portfolio.long_avg_price) * 100 if portfolio.long_avg_price else 0
-                        short_pnl_pct = ((portfolio.short_avg_price - price) / portfolio.short_avg_price) * 100 if portfolio.short_avg_price else 0
-                        
+                        long_pnl_pct = (
+                            ((price - portfolio.long_avg_price) / portfolio.long_avg_price) * 100
+                            if portfolio.long_avg_price
+                            else 0
+                        )
+                        short_pnl_pct = (
+                            ((portfolio.short_avg_price - price) / portfolio.short_avg_price) * 100
+                            if portfolio.short_avg_price
+                            else 0
+                        )
+
                         if long_pnl_pct < short_pnl_pct:
                             close_side = "LONG"
-                            logger.info("🎯 Auto-selecting worst position: LONG (%.2f%% PnL)", long_pnl_pct)
+                            logger.info(
+                                "🎯 Auto-selecting worst position: LONG (%.2f%% PnL)", long_pnl_pct
+                            )
                         else:
                             close_side = "SHORT"
-                            logger.info("🎯 Auto-selecting worst position: SHORT (%.2f%% PnL)", short_pnl_pct)
+                            logger.info(
+                                "🎯 Auto-selecting worst position: SHORT (%.2f%% PnL)",
+                                short_pnl_pct,
+                            )
                     elif has_long:
                         close_side = "LONG"
                     elif has_short:
@@ -545,20 +586,24 @@ class Executor:
                     else:
                         logger.warning("❌ BLOCKED: No position to close")
                         return ExecutionResult(status="SKIP", details="Kapatılacak pozisyon yok")
-                
+
                 position_side = close_side
                 is_closing = True
                 logger.info(
                     "🔚 CLOSING %s POSITION (%.6f BTC @ $%.2f)",
                     close_side,
-                    portfolio.long_position if close_side == "LONG" else abs(portfolio.short_position),
-                    portfolio.long_avg_price if close_side == "LONG" else portfolio.short_avg_price
+                    (
+                        portfolio.long_position
+                        if close_side == "LONG"
+                        else abs(portfolio.short_position)
+                    ),
+                    portfolio.long_avg_price if close_side == "LONG" else portfolio.short_avg_price,
                 )
             else:
                 # HOLD veya bilinmeyen action
                 logger.info("HOLD decision, no action taken")
                 return ExecutionResult(status="SKIP", details="Hold kararı")
-            
+
             # POZİSYON KAPATMA PATH
             if is_closing:
                 # Kapatılacak pozisyon miktarını belirle
@@ -568,39 +613,49 @@ class Executor:
                 else:  # SHORT
                     max_closeable = abs(portfolio.short_position)
                     entry_price = portfolio.short_avg_price
-                
+
                 if max_closeable < 0.0001:
                     logger.warning("❌ No %s position to close!", position_side)
-                    return ExecutionResult(status="SKIP", details=f"Kapatılacak {position_side} pozisyon yok")
-                
+                    return ExecutionResult(
+                        status="SKIP", details=f"Kapatılacak {position_side} pozisyon yok"
+                    )
+
                 # decision.amount: kapatılacak oran (1.0 = %100)
                 btc_amount = min(max_closeable, max_closeable * decision.amount)
-                
+
                 logger.info(
                     "CLOSING %s position: max=%.6f, amount=%.6f, price=$%.2f",
                     position_side,
                     max_closeable,
                     btc_amount,
-                    price
+                    price,
                 )
-                
+
                 # ERKEN RETURN: Kapatma işlemi
                 return self._execute_closing_trade(
-                    session, portfolio, daily_pnl, price, decision,
-                    reason, portfolio.net_position, btc_amount, leverage, position_side
+                    session,
+                    portfolio,
+                    daily_pnl,
+                    price,
+                    decision,
+                    reason,
+                    portfolio.net_position,
+                    btc_amount,
+                    leverage,
+                    position_side,
                 )
-            
+
             # YENİ POZİSYON AÇMA PATH
             else:
                 # DOĞRU MARGIN HESABI: Portfolio sync ile doğru pozisyon kullanılıyor
                 used_margin = calculate_correct_margin_usage(portfolio, price, leverage)
-                
+
                 # ÖNEMLİ: Equity'yi makul sınırlara çek
                 safe_equity = self._starting_cash + daily_pnl.realized_pnl
                 safe_equity = max(100, min(safe_equity, self._starting_cash * 10))  # Max 10x büyüme
-                
+
                 free_equity = safe_equity - used_margin
-                
+
                 if free_equity <= 0:
                     logger.error(
                         "No free equity available: safe_equity=%.2f used_margin=%.2f free=%.2f",
@@ -609,25 +664,25 @@ class Executor:
                         free_equity,
                     )
                     return ExecutionResult(status="SKIP", details="Serbest sermaye yok")
-                
+
                 # DOĞRU KALDIRAÇ HESAPLAMASI:
                 # 1. Margin = equity'nin ne kadarını teminat olarak ayıralım (decision.amount)
                 # 2. Position size = Margin × Leverage (kaldıraç ile büyütülmüş pozisyon)
                 # 3. BTC amount = Position size / BTC price
-                
+
                 margin_to_use = free_equity * decision.amount  # Örn: 10,000 × 0.3 = 3,000 USDT
-                
+
                 # Max MARGIN kontrolü ($3000 margin limiti)
                 # Risk Manager already enforces this, but double-check as safety net
                 if margin_to_use > self._max_trade_value:
                     margin_to_use = self._max_trade_value
                     logger.warning(
                         "Margin limited to $%.2f (Risk Manager should have handled this)",
-                        self._max_trade_value
+                        self._max_trade_value,
                     )
-                
-                position_size_usd = margin_to_use * leverage   # Örn: 2,000 × 20 = 40,000 USDT
-                btc_amount = position_size_usd / price          # Örn: 40,000 / 100,000 = 0.4 BTC
+
+                position_size_usd = margin_to_use * leverage  # Örn: 2,000 × 20 = 40,000 USDT
+                btc_amount = position_size_usd / price  # Örn: 40,000 / 100,000 = 0.4 BTC
 
                 # Sanity debug log of raw sizing inputs/outputs
                 logger.debug(
@@ -640,18 +695,18 @@ class Executor:
                     position_size_usd,
                     btc_amount,
                 )
-                
+
                 # GÜVENLIK KONTROLÜ: Maximum BTC per trade
                 MAX_BTC_PER_TRADE = self._max_btc_per_trade  # Tek işlemde max 1 BTC
                 if btc_amount > MAX_BTC_PER_TRADE:
                     logger.warning(
                         "BTC amount capped: requested=%.6f capped=%.6f",
                         btc_amount,
-                        MAX_BTC_PER_TRADE
+                        MAX_BTC_PER_TRADE,
                     )
                     btc_amount = MAX_BTC_PER_TRADE
                     position_size_usd = btc_amount * price  # Recalculate position size
-                
+
                 # SON GÜVENLİK KONTROLÜ: Total pozisyon limiti
                 total_position_after = abs(portfolio.position) + btc_amount
                 if total_position_after > self._max_position:
@@ -661,11 +716,11 @@ class Executor:
                         logger.warning(
                             "Position limit reached: current=%.6f limit=%.6f",
                             abs(portfolio.position),
-                            self._max_position
+                            self._max_position,
                         )
                         return ExecutionResult(status="SKIP", details="Pozisyon limiti doldu")
                     position_size_usd = btc_amount * price  # Recalculate position size
-                
+
                 # NOTIONAL CAP GUARDRAIL: Sum of open notional must not exceed cap
                 try:
                     open_trades = (
@@ -711,7 +766,9 @@ class Executor:
                             requested_amount=btc_amount,
                             leverage=leverage,
                         )
-                        return ExecutionResult(status="BLOCKED", details="Notional limiti nedeniyle engellendi")
+                        return ExecutionResult(
+                            status="BLOCKED", details="Notional limiti nedeniyle engellendi"
+                        )
                     logger.warning(
                         "Notional trimmed: requested=%.6f -> %.6f (remaining $%.2f)",
                         btc_amount,
@@ -720,7 +777,7 @@ class Executor:
                     )
                     btc_amount = trimmed_btc
                     position_size_usd = btc_amount * price
-                
+
                 logger.info(
                     "OPENING position: total_equity=%.2f free=%.2f margin_to_use=%.2f (%.1f%%) leverage=%.1fx position_size=%.2f btc_amount=%.6f",
                     total_equity,
@@ -731,7 +788,7 @@ class Executor:
                     position_size_usd,
                     btc_amount,
                 )
-            
+
             # Guardrail kontrolü - pozisyon miktarı ile
             if not self._check_guardrails(portfolio, btc_amount, total_equity):
                 self._notify_guardrail_block(
@@ -742,21 +799,21 @@ class Executor:
                     leverage=leverage,
                 )
                 return ExecutionResult(status="BLOCKED", details="Guardrail engelledi")
-            
+
             # Calculate trading fee (on position size, not margin)
             notional_value = position_size_usd
             fee = notional_value * self._taker_fee_rate
-            
+
             # Calculate PnL (before fee)
             pnl_before_fee = self._calculate_pnl(portfolio, decision.action, btc_amount, price)
-            
+
             # Subtract fee from PnL
             pnl = pnl_before_fee - fee
-            
+
             # Determine is_long and is_short from position_side (needed for logging)
-            is_long = (position_side == "LONG")
-            is_short = (position_side == "SHORT")
-            
+            is_long = position_side == "LONG"
+            is_short = position_side == "SHORT"
+
             # SAFETY CHECK: Bu noktada is_closing=False olmalı
             if is_closing:
                 logger.error(
@@ -765,11 +822,11 @@ class Executor:
                     portfolio.position,
                     decision.action,
                     is_long,
-                    is_short
+                    is_short,
                 )
                 # Force to opening position to prevent bug
                 is_closing = False
-            
+
             # LOG: Opening position decision
             position_type = "LONG" if is_long else "SHORT" if is_short else "FLAT"
             logger.info(
@@ -777,12 +834,12 @@ class Executor:
                 portfolio.position,
                 position_type,
                 decision.action,
-                btc_amount if 'btc_amount' in locals() else 0.0
+                btc_amount if "btc_amount" in locals() else 0.0,
             )
-            
+
             # Yeni pozisyon açılıyor veya mevcut pozisyon artırılıyor
             close_price = None  # Henüz kapatılmadı
-            
+
             # Determine position side (LONG/SHORT)
             # - If BUY, we're opening/adding to LONG
             # - If SELL, we're opening/adding to SHORT
@@ -790,7 +847,7 @@ class Executor:
                 position_side = "LONG"
             else:
                 position_side = "SHORT"
-            
+
             # Pozisyon ID yönetimi (is_closing durumunda zaten dönmüştük)
             current_position_id = None
             if pre_position == 0:
@@ -799,7 +856,7 @@ class Executor:
             else:
                 # Mevcut pozisyonu artırıyor - mevcut pozisyon ID'sini kullan
                 current_position_id = self.get_current_position_id(session, self._symbol)
-            
+
             logger.info(
                 "Opening trade: notional=%.2f fee_rate=%.4f%% fee=%.2f pnl_before=%.2f pnl_after=%.2f leverage=%.1fx position_side=%s position_id=%s",
                 notional_value,
@@ -811,62 +868,70 @@ class Executor:
                 position_side,
                 current_position_id,
             )
-            
+
             # YENİ TRADE KAYDET (pozisyon açma veya artırma)
             # VOLATILITEYE GÖRE POZISYON BOYUTU AYARLAMA
             volatility = 0.5  # Basit volatilite tahmini (daha gelişmiş yöntem eklenebilir)
-            adjusted_amount = self._calculate_volatility_adjusted_position_size(btc_amount, volatility)
-            
+            adjusted_amount = self._calculate_volatility_adjusted_position_size(
+                btc_amount, volatility
+            )
+
             # EXIT PLAN: GLM'in verdiği exit_plan MUTLAKA kullanılmalı
             is_long = position_side == "LONG"
-            
+
             # Extract exit plan values (manager.py ensures exit_plan dict always exists)
             profit_target = decision.exit_plan.get("profit_target") if decision.exit_plan else None
             stop_loss = decision.exit_plan.get("stop_loss") if decision.exit_plan else None
-            
+
             # Değerler geçersizse fallback exit plan kullan
             has_valid_profit_target = profit_target is not None and profit_target != 0.0
             has_valid_stop_loss = stop_loss is not None and stop_loss != 0.0
-            
+
             if not (has_valid_profit_target and has_valid_stop_loss):
                 logger.error(
                     "CRITICAL: GLM exit_plan has invalid values (profit_target: %s, stop_loss: %s)",
                     profit_target,
-                    stop_loss
+                    stop_loss,
                 )
-                logger.warning("⚠️ Using FALLBACK exit plan calculation (GLM failed to provide valid exit plan)")
-                
+                logger.warning(
+                    "⚠️ Using FALLBACK exit plan calculation (GLM failed to provide valid exit plan)"
+                )
+
                 # FALLBACK: Calculate default exit plan
                 # Simple volatility-based risk: 2% stop loss, 4% profit target (2:1 risk/reward)
                 sl_pct = 0.02  # 2% stop loss
                 tp_pct = 0.04  # 4% profit target
-                
+
                 if position_side == "LONG":
                     profit_target = price * (1 + tp_pct)
                     stop_loss = price * (1 - sl_pct)
                     # Invalidation BETWEEN stop_loss and entry (50% distance = early warning)
                     invalidation_price = stop_loss + (price - stop_loss) * 0.5
-                    invalidation_condition = f"If price closes below {invalidation_price:.2f} on 3-minute candle"
+                    invalidation_condition = (
+                        f"If price closes below {invalidation_price:.2f} on 3-minute candle"
+                    )
                 else:  # SHORT
                     profit_target = price * (1 - tp_pct)
                     stop_loss = price * (1 + sl_pct)
                     # Invalidation BETWEEN entry and stop_loss (50% distance = early warning)
                     invalidation_price = price + (stop_loss - price) * 0.5
-                    invalidation_condition = f"If price closes above {invalidation_price:.2f} on 3-minute candle"
-                
+                    invalidation_condition = (
+                        f"If price closes above {invalidation_price:.2f} on 3-minute candle"
+                    )
+
                 logger.warning(
                     "✅ FALLBACK exit plan created: TP=%.2f (%.1f%%), SL=%.2f (%.1f%%), Invalidation=%s",
                     profit_target,
                     tp_pct * 100,
                     stop_loss,
                     sl_pct * 100,
-                    invalidation_condition
+                    invalidation_condition,
                 )
-                
+
                 # Send Telegram notification about fallback usage
                 try:
-                    from app.utils.telegram import telegram_client, format_markdown
-                    
+                    from app.utils.telegram import format_markdown, telegram_client
+
                     fallback_message = (
                         "⚠️ *FALLBACK EXIT PLAN USED*\n\n"
                         f"GLM did not provide valid exit plan for {decision.action} action.\n\n"
@@ -881,70 +946,71 @@ class Executor:
                         f"*Entry Price:* ${price:,.2f}\n\n"
                         "💡 *Note:* Please review GLM prompt to ensure exit plan requirements are clear."
                     )
-                    
+
                     telegram_client.send_message(fallback_message)
                     logger.info("✅ Fallback notification sent to Telegram")
                 except Exception as exc:
                     logger.warning("Failed to send fallback notification: %s", exc)
                     # Don't fail on notification error
-            
+
             # GLM'nin exit_plan'ı geçerli, kullan
             exit_plan = {
                 "profit_target": profit_target,
                 "stop_loss": stop_loss,
                 "invalidation_condition": decision.exit_plan.get("invalidation_condition", ""),
             }
-            
+
             # GELİŞMİŞ VALIDATION: Exit planını doğrula
             if position_side and price:
                 is_valid, validation_error = self._validate_exit_plan(
                     exit_plan, position_side, price
                 )
-                
+
                 if not is_valid:
-                    logger.error(
-                        "❌ EXIT PLAN VALIDATION FAILED: %s",
-                        validation_error
-                    )
-                    
+                    logger.error("❌ EXIT PLAN VALIDATION FAILED: %s", validation_error)
+
                     # FALLBACK: Calculate default exit plan
                     logger.warning("⚠️ Using FALLBACK exit plan due to validation failure")
-                    
+
                     sl_pct = 0.02  # 2% stop loss
                     tp_pct = 0.04  # 4% profit target
-                    
+
                     if position_side == "LONG":
                         profit_target = price * (1 + tp_pct)
                         stop_loss = price * (1 - sl_pct)
                         # Invalidation BETWEEN stop_loss and entry (50% distance = early warning)
                         invalidation_price = stop_loss + (price - stop_loss) * 0.5
-                        invalidation_condition = f"If price closes below {invalidation_price:.2f} on 3-minute candle"
+                        invalidation_condition = (
+                            f"If price closes below {invalidation_price:.2f} on 3-minute candle"
+                        )
                     else:  # SHORT
                         profit_target = price * (1 - tp_pct)
                         stop_loss = price * (1 + sl_pct)
                         # Invalidation BETWEEN entry and stop_loss (50% distance = early warning)
                         invalidation_price = price + (stop_loss - price) * 0.5
-                        invalidation_condition = f"If price closes above {invalidation_price:.2f} on 3-minute candle"
-                    
+                        invalidation_condition = (
+                            f"If price closes above {invalidation_price:.2f} on 3-minute candle"
+                        )
+
                     exit_plan = {
                         "profit_target": profit_target,
                         "stop_loss": stop_loss,
                         "invalidation_condition": invalidation_condition,
                     }
-                    
+
                     logger.warning(
                         "✅ FALLBACK exit plan created: TP=%.2f (%.1f%%), SL=%.2f (%.1f%%), Invalidation=%s",
                         profit_target,
                         tp_pct * 100,
                         stop_loss,
                         sl_pct * 100,
-                        invalidation_condition
+                        invalidation_condition,
                     )
-                    
+
                     # Telegram bildirimi gönder
                     try:
-                        from app.utils.telegram import telegram_client, format_markdown
-                        
+                        from app.utils.telegram import format_markdown, telegram_client
+
                         fallback_message = (
                             "⚠️ *EXIT PLAN VALIDATION FAILED - FALLBACK USED*\n\n"
                             f"GLM exit plan failed validation: {validation_error}\n\n"
@@ -960,19 +1026,19 @@ class Executor:
                             f"*Entry Price:* ${price:,.2f}\n\n"
                             "💡 *Note:* Exit plan validation failed - please review GLM response format"
                         )
-                        
+
                         telegram_client.send_message(fallback_message)
                         logger.info("✅ Fallback notification sent to Telegram")
                     except Exception as exc:
                         logger.warning("Failed to send fallback notification: %s", exc)
-            
+
             logger.info(
                 "✅ Using validated exit plan: profit_target=%.2f stop_loss=%.2f invalidation=%s",
                 profit_target or 0.0,
                 stop_loss or 0.0,
-                exit_plan.get("invalidation_condition", "N/A")
+                exit_plan.get("invalidation_condition", "N/A"),
             )
-            
+
             trade = record_trade(
                 session,
                 symbol=self._symbol,
@@ -1029,7 +1095,7 @@ class Executor:
         position_status = self._describe_position_change(pre_position, post_position)
         # Telegram mesajı orchestrator tarafından gönderiliyor, buradan göndermiyoruz
         # self._notify_telegram(trade_summary, portfolio_summary, daily_summary, leverage, reason, position_status)
-        
+
         # Telemetry for position opening operations
         telemetry = {
             "last_action": position_side,  # LONG or SHORT
@@ -1040,7 +1106,9 @@ class Executor:
             "fee": fee,
             "pnl": pnl,  # Will be 0 for opening trades
         }
-        return ExecutionResult(status="PAPER", details="Paper trading kaydedildi", telemetry=telemetry)
+        return ExecutionResult(
+            status="PAPER", details="Paper trading kaydedildi", telemetry=telemetry
+        )
 
     def _check_guardrails(self, portfolio: Portfolio, btc_amount: float, equity: float) -> bool:
         """
@@ -1057,7 +1125,7 @@ class Executor:
                 extra={"skip_telegram": True},
             )
             return False
-        
+
         # 2. Total pozisyon kontrolü (BTC cinsinden)
         new_total_position = abs(portfolio.position) + btc_amount
         if new_total_position > self._max_position:
@@ -1070,7 +1138,7 @@ class Executor:
                 extra={"skip_telegram": True},
             )
             return False
-        
+
         # 3. Equity sanity check - astronomik değerleri engelle
         if equity > self._starting_cash * 10:
             logger.warning(
@@ -1080,57 +1148,57 @@ class Executor:
                 extra={"skip_telegram": True},
             )
             return False
-        
+
         return True
 
-    def _get_current_price_validated(self, symbol: str, max_age_seconds: int = 10) -> Optional[float]:
+    def _get_current_price_validated(
+        self, symbol: str, max_age_seconds: int = 10
+    ) -> Optional[float]:
         """
         Get current price with comprehensive fallback chain.
-        
+
         Fallback chain:
         1. WebSocket cache (fresh: < 10s)
         2. REST API (Binance with retry)
         3. InfluxDB (may be delayed)
         4. Stale cache (emergency: < 60s)
-        
+
         Args:
             symbol: Trading symbol (e.g., BTCUSDT)
             max_age_seconds: Maximum acceptable age for fresh data (default 10s)
-        
+
         Returns:
             Price if available, None if all sources fail
         """
         logger.info("🔍 Fetching price for %s (max_age=%ds)...", symbol, max_age_seconds)
-        
+
         # SOURCE 1: Try fresh cache first (WebSocket data)
         cached_price = price_cache.get(symbol, max_age_seconds=max_age_seconds)
         if cached_price is not None:
             logger.info("✅ Price from WebSocket cache: %.2f (fresh)", cached_price)
             return cached_price
-        
+
         # Get cache age for diagnostics
         cache_age = price_cache.get_age_seconds(symbol)
-        logger.warning(
-            "⚠️ WebSocket cache miss for %s (age: %.1fs)",
-            symbol, cache_age
-        )
-        
+        logger.warning("⚠️ WebSocket cache miss for %s (age: %.1fs)", symbol, cache_age)
+
         # SOURCE 2: REST API as fallback (with built-in retry)
         logger.info("🔄 Trying REST API fallback...")
         rest_price = self._resolve_price()
-        
+
         if rest_price > 0:
             # Update cache for next time
             price_cache.set(symbol, rest_price, source="rest_fallback")
             logger.info("✅ Price from REST API: %.2f", rest_price)
             return rest_price
-        
+
         logger.error("❌ REST API fallback failed")
-        
+
         # SOURCE 3: Try InfluxDB directly (in case _resolve_price's InfluxDB also failed)
         logger.info("🔄 Trying InfluxDB direct fallback...")
         try:
             from app.utils.influx import query_latest_snapshot
+
             snapshot = query_latest_snapshot("features_1m", symbol, "1m")
             if snapshot and "close" in snapshot:
                 influx_price = float(snapshot.get("close", 0.0))
@@ -1140,40 +1208,41 @@ class Executor:
                     return influx_price
         except Exception as exc:
             logger.error("❌ InfluxDB direct fallback failed: %s", exc)
-        
+
         # SOURCE 4: Emergency - use stale cache (up to 60 seconds old)
         logger.warning("🚨 EMERGENCY: All fresh sources failed, checking stale cache...")
         stale_price = price_cache.get(symbol, max_age_seconds=60)
         if stale_price is not None:
             logger.warning(
                 "⚠️ Using STALE cache price: %.2f (age: %.1fs) - EMERGENCY FALLBACK",
-                stale_price, cache_age
+                stale_price,
+                cache_age,
             )
             return stale_price
-        
+
         # All sources exhausted
         logger.critical(
-            "❌ CRITICAL: NO PRICE AVAILABLE from any source (cache age: %.1fs)",
-            cache_age
+            "❌ CRITICAL: NO PRICE AVAILABLE from any source (cache age: %.1fs)", cache_age
         )
         return None
-    
+
     def _resolve_price(self) -> float:
         """
         Resolve current price with retry mechanism and multiple fallbacks.
-        
+
         Strategy:
         1. Try Binance REST API (3 attempts with exponential backoff)
         2. Fallback to InfluxDB if Binance fails
         3. Return 0.0 if all sources fail
         """
-        import httpx
         import time
-        
+
+        import httpx
+
         # Primary: Binance real-time price with retry
         max_attempts = 3
         base_timeout = 5.0
-        
+
         for attempt in range(1, max_attempts + 1):
             timeout = base_timeout * attempt  # 5s, 10s, 15s
             try:
@@ -1181,52 +1250,60 @@ class Executor:
                 response = httpx.get(
                     "https://fapi.binance.com/fapi/v1/ticker/price",
                     params={"symbol": self._symbol},
-                    timeout=timeout
+                    timeout=timeout,
                 )
                 response.raise_for_status()
                 data = response.json()
                 price = float(data["price"])
                 elapsed = time.time() - start_time
-                
+
                 if price > 0:
                     logger.info(
                         "✅ Binance API price: %.2f (attempt %d/%d, %.2fs)",
-                        price, attempt, max_attempts, elapsed
+                        price,
+                        attempt,
+                        max_attempts,
+                        elapsed,
                     )
                     return price
-                    
+
             except httpx.ConnectTimeout as exc:
                 logger.warning(
                     "⚠️ Binance API connection timeout (attempt %d/%d, timeout=%.1fs): %s",
-                    attempt, max_attempts, timeout, exc
+                    attempt,
+                    max_attempts,
+                    timeout,
+                    exc,
                 )
             except httpx.ReadTimeout as exc:
                 logger.warning(
                     "⚠️ Binance API read timeout (attempt %d/%d, timeout=%.1fs): %s",
-                    attempt, max_attempts, timeout, exc
+                    attempt,
+                    max_attempts,
+                    timeout,
+                    exc,
                 )
             except httpx.RequestError as exc:
                 logger.warning(
-                    "⚠️ Binance API request error (attempt %d/%d): %s",
-                    attempt, max_attempts, exc
+                    "⚠️ Binance API request error (attempt %d/%d): %s", attempt, max_attempts, exc
                 )
             except Exception as exc:
                 logger.warning(
-                    "⚠️ Binance API unexpected error (attempt %d/%d): %s",
-                    attempt, max_attempts, exc
+                    "⚠️ Binance API unexpected error (attempt %d/%d): %s", attempt, max_attempts, exc
                 )
-            
+
             # Exponential backoff between retries (except on last attempt)
             if attempt < max_attempts:
                 backoff = 2 ** (attempt - 1)  # 1s, 2s
                 logger.debug("Retrying in %.1fs...", backoff)
                 time.sleep(backoff)
-        
+
         logger.error("❌ Binance API failed after %d attempts", max_attempts)
-        
+
         # Fallback: InfluxDB (may be delayed)
         try:
             from app.utils.influx import query_latest_snapshot
+
             snapshot = query_latest_snapshot("features_1m", self._symbol, "1m")
             if snapshot and "close" in snapshot:
                 price = float(snapshot.get("close", 0.0))
@@ -1235,36 +1312,38 @@ class Executor:
                     return price
         except Exception as exc:
             logger.error("❌ InfluxDB fallback also failed: %s", exc)
-        
+
         logger.error("❌ Could not resolve valid price from ANY source")
         return 0.0
 
-    def _calculate_pnl(self, portfolio: Portfolio, action: str, amount: float, price: float) -> float:
+    def _calculate_pnl(
+        self, portfolio: Portfolio, action: str, amount: float, price: float
+    ) -> float:
         """
         Realized PnL hesaplama:
         - Yeni pozisyon açılıyorsa veya artırılıyorsa: PnL = 0
         - Mevcut pozisyon kapatılıyor/azaltılıyorsa: PnL hesaplanır
-        
+
         LONG pozisyon (position > 0):
           - BUY: pozisyon artırma → PnL = 0
           - SELL: pozisyon kapatma → PnL = (sell_price - avg_price) * amount
-        
+
         SHORT pozisyon (position < 0):
-          - SELL: pozisyon artırma → PnL = 0  
+          - SELL: pozisyon artırma → PnL = 0
           - BUY: pozisyon kapatma → PnL = (avg_price - buy_price) * amount
         """
         if portfolio.position == 0:
             # Yeni pozisyon açılıyor, henüz realize olmadı
             return 0.0
-        
+
         # Pozisyonun yönünü belirle
         is_long = portfolio.position > 0
         is_closing = (is_long and action == "SELL") or (not is_long and action == "BUY")
-        
+
         if not is_closing:
             # Pozisyon artırılıyor, henüz realize PnL yok
             return 0.0
-        
+
         # Pozisyon kapatılıyor/azaltılıyor - Realized PnL hesapla
         if is_long:
             # LONG pozisyon kapatılıyor: kar = sell price - avg price
@@ -1273,7 +1352,9 @@ class Executor:
             # SHORT pozisyon kapatılıyor: kar = avg price - buy price
             return (portfolio.average_price - price) * amount
 
-    def _update_portfolio(self, portfolio: Portfolio, action: str, amount: float, price: float) -> None:
+    def _update_portfolio(
+        self, portfolio: Portfolio, action: str, amount: float, price: float
+    ) -> None:
         """
         Portföy güncelleme:
         - Pozisyon artırılıyorsa: weighted average price hesapla
@@ -1281,13 +1362,13 @@ class Executor:
         - Pozisyon yön değiştiriyorsa: yeni pozisyon price'ı average price olur
         """
         old_position = portfolio.position
-        
+
         # Pozisyon değişimi
         if action == "BUY":
             portfolio.position += amount
         else:  # SELL
             portfolio.position -= amount
-        
+
         # Average price güncelleme mantığı
         if old_position == 0:
             # Yeni pozisyon açılıyor (LONG veya SHORT)
@@ -1299,14 +1380,18 @@ class Executor:
         elif portfolio.position == 0:
             # Pozisyon tamamen kapandı
             portfolio.average_price = 0.0
-        elif (old_position > 0 and portfolio.position < 0) or (old_position < 0 and portfolio.position > 0):
+        elif (old_position > 0 and portfolio.position < 0) or (
+            old_position < 0 and portfolio.position > 0
+        ):
             # Pozisyon yön değiştirdi (LONG'dan SHORT'a veya SHORT'dan LONG'a)
             portfolio.average_price = price
         # else: Pozisyon azaltılıyor (kısmi kapatma), average price değişmez
-        
+
         portfolio.updated_at = datetime.utcnow()
 
-    def _update_daily_pnl(self, daily_pnl: DailyPnL, pnl: float, portfolio: Portfolio, price: float, fee: float = 0.0) -> None:
+    def _update_daily_pnl(
+        self, daily_pnl: DailyPnL, pnl: float, portfolio: Portfolio, price: float, fee: float = 0.0
+    ) -> None:
         daily_pnl.realized_pnl += pnl
         daily_pnl.unrealized_pnl = (price - portfolio.average_price) * portfolio.position
         if fee > 0:
@@ -1368,28 +1453,30 @@ class Executor:
         free_cash_pct = (free_cash / equity * 100) if equity > 0 else 0.0
 
         # Get fee and notional from trade summary
-        fee = getattr(trade, 'fee', 0)
-        notional = getattr(trade, 'notional', trade.amount * trade.price)
-        
-        close_price = getattr(trade, 'close_price', None)
+        fee = getattr(trade, "fee", 0)
+        notional = getattr(trade, "notional", trade.amount * trade.price)
+
+        close_price = getattr(trade, "close_price", None)
         is_close_trade = close_price is not None
-        position_side = getattr(trade, 'position_side', '') or ''
+        position_side = getattr(trade, "position_side", "") or ""
 
         # Emoji seçimi ve action text
         if is_close_trade:
-            direction_emoji = '🔒'
-            side_label = position_side if position_side else ('LONG' if trade.side == 'SELL' else 'SHORT')
+            direction_emoji = "🔒"
+            side_label = (
+                position_side if position_side else ("LONG" if trade.side == "SELL" else "SHORT")
+            )
             action_text = f"{side_label} POZİSYON KAPATILDI"
-        elif trade.side == 'BUY':
-            direction_emoji = '📈'
+        elif trade.side == "BUY":
+            direction_emoji = "📈"
             action_text = "LONG AÇILDI"
         else:  # SELL
-            direction_emoji = '📉'
+            direction_emoji = "📉"
             action_text = "SHORT AÇILDI"
-        
+
         # Generate timestamp header like BTC_ANALYZER
         timestamp_header = f"BTC_ANALYZER, [{trade.timestamp.strftime('%d.%m.%Y %H:%M')}]"
-        
+
         message_lines = [
             f"{timestamp_header}",
             f"*🚨 İşlem Gerçekleşti - {action_text}*",
@@ -1406,59 +1493,72 @@ class Executor:
 
         if is_close_trade:
             # CLOSE özel bilgileri: yeni pozisyon açılmadı + kalan pozisyon özetleri
-            message_lines.extend([
-                "⛔ Yeni pozisyon açılmadı (CLOSE)",
-                f"🔒 Kapatılan: {trade.amount:.4f} BTC | Kalan: {portfolio.position:.4f} BTC",
-                f"⏳ Kalan pozisyon unrealized: ${daily_pnl.unrealized_pnl:.2f}",
-                "",
-            ])
+            message_lines.extend(
+                [
+                    "⛔ Yeni pozisyon açılmadı (CLOSE)",
+                    f"🔒 Kapatılan: {trade.amount:.4f} BTC | Kalan: {portfolio.position:.4f} BTC",
+                    f"⏳ Kalan pozisyon unrealized: ${daily_pnl.unrealized_pnl:.2f}",
+                    "",
+                ]
+            )
 
         # Get enhanced position details if available
-        position_details = metrics.get('position_details', [])
-        starting_cash = metrics.get('starting_cash', self._starting_cash)
+        position_details = metrics.get("position_details", [])
+        starting_cash = metrics.get("starting_cash", self._starting_cash)
 
-        message_lines.extend([
-            f"📍 Pozisyon Durumu: {format_markdown(position_status)}",
-            f"📊 Portföy Pozisyonu: {portfolio.position:.4f} BTC @ ${portfolio.average_price:.2f}",
-            f"💸 Pozisyon Değeri: ${position_value:.2f}",
-            "",
-            "*💰 Portföy Özeti*",
-            f"💎 Serbest Sermaye: ${free_cash:.2f} ({free_cash_pct:.1f}%)",
-            f"📊 Kullanılan Margin: ${margin_used:.2f}",
-        ])
+        message_lines.extend(
+            [
+                f"📍 Pozisyon Durumu: {format_markdown(position_status)}",
+                f"📊 Portföy Pozisyonu: {portfolio.position:.4f} BTC @ ${portfolio.average_price:.2f}",
+                f"💸 Pozisyon Değeri: ${position_value:.2f}",
+                "",
+                "*💰 Portföy Özeti*",
+                f"💎 Serbest Sermaye: ${free_cash:.2f} ({free_cash_pct:.1f}%)",
+                f"📊 Kullanılan Margin: ${margin_used:.2f}",
+            ]
+        )
 
         # Add position-specific details if available
         if position_details:
             for i, pos in enumerate(position_details, 1):
-                side = pos.get('position_side', '')
-                leverage = pos.get('leverage', 1.0)
-                margin = pos.get('margin', 0.0)
-                notional = pos.get('notional', 0.0)
-                amount = pos.get('amount', 0.0)
+                side = pos.get("position_side", "")
+                leverage = pos.get("leverage", 1.0)
+                margin = pos.get("margin", 0.0)
+                notional = pos.get("notional", 0.0)
+                amount = pos.get("amount", 0.0)
                 message_lines.append(
                     f"  ├─ {side}: {amount:.4f} BTC @ {leverage:.1f}x → ${notional:,.2f} (Margin: ${margin:,.2f})"
                 )
 
-        message_lines.extend([
-            f"🏦 Toplam Equity: ${equity:.2f}",
-            f"💰 Başlangıç Sermayesi: ${starting_cash:.2f}",
-            f"{'🟢' if equity_pct >= 0 else '🔴'} Toplam Değişim: {equity_pct:+.2f}%",
-            f"✅ Gerçekleşen PnL: ${daily_pnl.realized_pnl:.2f}",
-            f"⏳ Gerçekleşmemiş PnL: ${daily_pnl.unrealized_pnl:.2f}",
-            "",
-            f"🕒 Zaman: {trade.timestamp.isoformat()}",
-        ])
+        message_lines.extend(
+            [
+                f"🏦 Toplam Equity: ${equity:.2f}",
+                f"💰 Başlangıç Sermayesi: ${starting_cash:.2f}",
+                f"{'🟢' if equity_pct >= 0 else '🔴'} Toplam Değişim: {equity_pct:+.2f}%",
+                f"✅ Gerçekleşen PnL: ${daily_pnl.realized_pnl:.2f}",
+                f"⏳ Gerçekleşmemiş PnL: ${daily_pnl.unrealized_pnl:.2f}",
+                "",
+                f"🕒 Zaman: {trade.timestamp.isoformat()}",
+            ]
+        )
 
         message = "\n".join(message_lines)
-        
+
         # Gerekçeyi ayrı mesaj olarak gönder (çok uzun olabilir)
-        reason_escaped = reason.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`').replace('(', '\\(').replace(')', '\\)')
-        
+        reason_escaped = (
+            reason.replace("_", "\\_")
+            .replace("*", "\\*")
+            .replace("[", "\\[")
+            .replace("`", "\\`")
+            .replace("(", "\\(")
+            .replace(")", "\\)")
+        )
+
         # Gerekçe çok uzunsa kısalt (Telegram 4096 karakter limiti)
         max_reason_length = 3000  # Ana mesaj + gerekçe için yer bırak
         if len(reason_escaped) > max_reason_length:
             reason_escaped = reason_escaped[:max_reason_length] + "... (kısaltıldı)"
-        
+
         message_with_reason = message + f"\n\n💬 *Gerekçe:*\n{reason_escaped}"
         logger.info(
             "Telegram trade notify: side=%s amount=%.4f price=%.2f position=%.4f avg_price=%.2f realized=%.2f unrealized=%.2f equity=%.2f message_len=%d (with reason: %d)",
@@ -1537,20 +1637,22 @@ class Executor:
                 margin_used += trade_margin
                 total_notional += trade_notional
 
-                position_details.append({
-                    "amount": trade.amount,
-                    "price": trade.price,
-                    "leverage": leverage,
-                    "notional": trade_notional,
-                    "margin": trade_margin,
-                    "position_side": trade.position_side,
-                })
-            
+                position_details.append(
+                    {
+                        "amount": trade.amount,
+                        "price": trade.price,
+                        "leverage": leverage,
+                        "notional": trade_notional,
+                        "margin": trade_margin,
+                        "position_side": trade.position_side,
+                    }
+                )
+
             # Get exit plan from latest trade (Nof1.ai style)
             exit_plan = None
             if latest_trade and latest_trade.exit_plan:
                 exit_plan = latest_trade.exit_plan
-            
+
             # Get order IDs for latest trade (Nof1.ai style)
             sl_oid = -1
             tp_oid = -1
@@ -1570,7 +1672,7 @@ class Executor:
                 )
                 if sl_orders:
                     sl_oid = sl_orders.id
-                
+
                 # Find active take-profit order for this trade
                 tp_orders = (
                     session.query(TakeProfitOrder)
@@ -1586,7 +1688,9 @@ class Executor:
                     tp_oid = tp_orders.id
 
         exposure = portfolio.position * price
-        unrealized = (price - portfolio.average_price) * portfolio.position if portfolio.position else 0.0
+        unrealized = (
+            (price - portfolio.average_price) * portfolio.position if portfolio.position else 0.0
+        )
 
         # ÖNEMLİ: Unrealized PnL'i sınırla (astronomik değerleri önle)
         max_reasonable_pnl = self._starting_cash * 5  # Max 5x kâr/zarar
@@ -1599,7 +1703,7 @@ class Executor:
         equity = max(0, min(equity, self._starting_cash * 10))
 
         free_cash = equity - margin_used
-        
+
         # Calculate notional_usd for latest trade (Nof1.ai style)
         notional_usd = 0.0
         if latest_trade:
@@ -1625,7 +1729,7 @@ class Executor:
             "last_trade_timestamp": portfolio.last_trade_timestamp,
             "current_price": price,
         }
-        
+
         # Add exit plan info (Nof1.ai style)
         if exit_plan:
             result["exit_plan"] = exit_plan
@@ -1636,10 +1740,14 @@ class Executor:
                 result["sl_oid"] = sl_oid
                 result["tp_oid"] = tp_oid
                 result["notional_usd"] = notional_usd
-                result["leverage"] = latest_trade.leverage if latest_trade.leverage and latest_trade.leverage > 0 else 10.0
+                result["leverage"] = (
+                    latest_trade.leverage
+                    if latest_trade.leverage and latest_trade.leverage > 0
+                    else 10.0
+                )
                 # Confidence için şimdilik None (trade modelinde yok, default değer _build_nof1_prompt'ta kullanılacak)
                 result["confidence"] = None
-        
+
         return result
 
     def calculate_real_pnl(self, pnl_before_fee: float, fees: float) -> dict:
@@ -1671,10 +1779,10 @@ class Executor:
             fee_percentage = total_fees * 200  # 0.0005 × 200 = 0.1% (estimate)
 
         return {
-            'pnl_gross': pnl_gross,
-            'fees': total_fees,
-            'pnl_net': pnl_net,
-            'fee_percentage': fee_percentage,
+            "pnl_gross": pnl_gross,
+            "fees": total_fees,
+            "pnl_net": pnl_net,
+            "fee_percentage": fee_percentage,
         }
 
     def get_recent_trades_with_pnl(self, limit: int = 5) -> list[dict]:
@@ -1686,7 +1794,7 @@ class Executor:
         for trade in trades:
             # Compute entry notional (unleveraged)
             entry_notional = abs((trade.price or 0.0) * (trade.amount or 0.0))
-            notional_value = getattr(trade, 'notional_value', None)
+            notional_value = getattr(trade, "notional_value", None)
             if notional_value is None or notional_value <= 0:
                 notional_value = entry_notional
 
@@ -1695,7 +1803,9 @@ class Executor:
                 # Kapanış fiyatı var = Pozisyon kapatılmış
                 # PnL sabit kalmalı (trade.pnl kapanışta hesaplanmış veya en azından fee içerir)
                 # Percent PnL = pnl / entry_notional × 100 (fee etkisi dahil)
-                trade_pct_pnl = ((trade.pnl or 0.0) / entry_notional) * 100 if entry_notional > 0 else 0.0
+                trade_pct_pnl = (
+                    ((trade.pnl or 0.0) / entry_notional) * 100 if entry_notional > 0 else 0.0
+                )
 
                 # REAL PNL HESAPLAMA
                 fees = trade.fees if trade.fees else 0.0
@@ -1705,25 +1815,31 @@ class Executor:
                 real_pnl = self.calculate_real_pnl(pnl_gross, fees)
 
                 # Extract exit_plan if available
-                exit_plan = trade.exit_plan if hasattr(trade, 'exit_plan') and trade.exit_plan else {}
-                
-                result.append({
-                    "side": trade.side,
-                    "amount": trade.amount,
-                    "open_price": trade.price,  # Açılış fiyatı
-                    "close_price": trade.close_price,  # Kapanış fiyatı
-                    "pnl": trade.pnl,  # ✅ Sabit PnL (kapanışta hesaplanan, fee düşülmüş)
-                    "pnl_pct": trade_pct_pnl,
-                    "fee": fees,  # ✅ Fee ekle
-                    "is_closed": True,
-                    "timestamp": trade.timestamp,
-                    "position_id": trade.position_id,  # ✅ Pozisyon ID eklendi
-                    "notional": entry_notional,
-                    "real_pnl": real_pnl,  # ✅ Real PnL bilgisi (brüt, net, fee)
-                    "stop_loss": exit_plan.get("stop_loss"),  # ✅ Stop loss ekle
-                    "take_profit": exit_plan.get("profit_target"),  # ✅ Take profit ekle
-                    "invalidation_condition": exit_plan.get("invalidation_condition"),  # ✅ Invalidation condition ekle
-                })
+                exit_plan = (
+                    trade.exit_plan if hasattr(trade, "exit_plan") and trade.exit_plan else {}
+                )
+
+                result.append(
+                    {
+                        "side": trade.side,
+                        "amount": trade.amount,
+                        "open_price": trade.price,  # Açılış fiyatı
+                        "close_price": trade.close_price,  # Kapanış fiyatı
+                        "pnl": trade.pnl,  # ✅ Sabit PnL (kapanışta hesaplanan, fee düşülmüş)
+                        "pnl_pct": trade_pct_pnl,
+                        "fee": fees,  # ✅ Fee ekle
+                        "is_closed": True,
+                        "timestamp": trade.timestamp,
+                        "position_id": trade.position_id,  # ✅ Pozisyon ID eklendi
+                        "notional": entry_notional,
+                        "real_pnl": real_pnl,  # ✅ Real PnL bilgisi (brüt, net, fee)
+                        "stop_loss": exit_plan.get("stop_loss"),  # ✅ Stop loss ekle
+                        "take_profit": exit_plan.get("profit_target"),  # ✅ Take profit ekle
+                        "invalidation_condition": exit_plan.get(
+                            "invalidation_condition"
+                        ),  # ✅ Invalidation condition ekle
+                    }
+                )
             else:
                 # ELSE: Position still open - calculate current PnL
                 current_pnl = 0.0
@@ -1733,12 +1849,16 @@ class Executor:
                     # LONG: Current PnL = (current_price - entry_price) * amount - original_fee
                     price_diff = price - trade.price
                     current_pnl = (price_diff * trade.amount) + trade.pnl  # trade.pnl has -fee
-                    trade_pct_pnl = (current_pnl / entry_notional) * 100 if entry_notional > 0 else 0.0
+                    trade_pct_pnl = (
+                        (current_pnl / entry_notional) * 100 if entry_notional > 0 else 0.0
+                    )
                 else:
                     # SHORT: Current PnL = (entry_price - current_price) * amount - original_fee
                     price_diff = trade.price - price
                     current_pnl = (price_diff * trade.amount) + trade.pnl  # trade.pnl has -fee
-                    trade_pct_pnl = (current_pnl / entry_notional) * 100 if entry_notional > 0 else 0.0
+                    trade_pct_pnl = (
+                        (current_pnl / entry_notional) * 100 if entry_notional > 0 else 0.0
+                    )
 
                 # REAL PNL HESAPLAMA (açık pozisyon için)
                 fees = trade.fees if trade.fees else 0.0
@@ -1746,25 +1866,31 @@ class Executor:
                 real_pnl = self.calculate_real_pnl(pnl_gross, fees)
 
                 # Extract exit_plan if available
-                exit_plan = trade.exit_plan if hasattr(trade, 'exit_plan') and trade.exit_plan else {}
+                exit_plan = (
+                    trade.exit_plan if hasattr(trade, "exit_plan") and trade.exit_plan else {}
+                )
 
-                result.append({
-                    "side": trade.side,
-                    "amount": trade.amount,
-                    "open_price": trade.price,  # Açılış fiyatı
-                    "close_price": price,  # Mevcut piyasa fiyatı (henüz kapatılmadı)
-                    "pnl": current_pnl,  # Güncel PnL (pozisyon hala açık)
-                    "pnl_pct": trade_pct_pnl,
-                    "fee": fees,  # ✅ Fee ekle
-                    "is_closed": False,
-                    "timestamp": trade.timestamp,
-                    "position_id": trade.position_id,  # ✅ Pozisyon ID eklendi
-                    "notional": entry_notional,
-                    "real_pnl": real_pnl,  # ✅ Real PnL bilgisi (açık pozisyon)
-                    "stop_loss": exit_plan.get("stop_loss"),  # ✅ Stop loss ekle
-                    "take_profit": exit_plan.get("profit_target"),  # ✅ Take profit ekle
-                    "invalidation_condition": exit_plan.get("invalidation_condition"),  # ✅ Invalidation condition ekle
-                })
+                result.append(
+                    {
+                        "side": trade.side,
+                        "amount": trade.amount,
+                        "open_price": trade.price,  # Açılış fiyatı
+                        "close_price": price,  # Mevcut piyasa fiyatı (henüz kapatılmadı)
+                        "pnl": current_pnl,  # Güncel PnL (pozisyon hala açık)
+                        "pnl_pct": trade_pct_pnl,
+                        "fee": fees,  # ✅ Fee ekle
+                        "is_closed": False,
+                        "timestamp": trade.timestamp,
+                        "position_id": trade.position_id,  # ✅ Pozisyon ID eklendi
+                        "notional": entry_notional,
+                        "real_pnl": real_pnl,  # ✅ Real PnL bilgisi (açık pozisyon)
+                        "stop_loss": exit_plan.get("stop_loss"),  # ✅ Stop loss ekle
+                        "take_profit": exit_plan.get("profit_target"),  # ✅ Take profit ekle
+                        "invalidation_condition": exit_plan.get(
+                            "invalidation_condition"
+                        ),  # ✅ Invalidation condition ekle
+                    }
+                )
 
         return result
 
@@ -1790,33 +1916,36 @@ class Executor:
         """
         Pozisyon kapatma trade'i (BUY ile SHORT kapatma veya SELL ile LONG kapatma)
         Yeni trade kaydedilmez, sadece mevcut trade'ler güncellenir.
-        
+
         Args:
             position_side: Kapatılacak pozisyonun yönü ("LONG" veya "SHORT")
                           None ise eski mantık (decision.action'dan çıkar)
         """
         # Use Influx-aligned close price if available
         from app.utils.influx import query_price_at_time
+
         close_ts = datetime.utcnow()
-        eff_price = price_cache.get(self._symbol) or query_price_at_time(
-            self._symbol, close_ts, interval="1m", window_minutes=2
-        ) or price
-        
+        eff_price = (
+            price_cache.get(self._symbol)
+            or query_price_at_time(self._symbol, close_ts, interval="1m", window_minutes=2)
+            or price
+        )
+
         position_size_usd = btc_amount * eff_price
-        
+
         # Position side belirleme
         if not position_side:
             # Backward compatibility: action'dan çıkar
             position_side = "LONG" if decision.action == "SELL" else "SHORT"
-        
+
         logger.info(
             "CLOSING %s position: %.6f BTC @ $%.2f via %s",
             position_side,
             btc_amount,
             eff_price,
-            decision.action
+            decision.action,
         )
-        
+
         # Sadece mevcut trade'leri güncelle (YENİ TRADE YOK!)
         updated_count, realized_delta, closing_fee_total = close_open_trades(
             session=session,
@@ -1826,7 +1955,7 @@ class Executor:
             close_price=eff_price,
             taker_fee_rate=self._taker_fee_rate,
         )
-        
+
         logger.info(
             "Closed %s position: Updated %d trade(s) | PnL: $%.2f | Fee: $%.2f",
             position_side,
@@ -1834,15 +1963,15 @@ class Executor:
             realized_delta,
             closing_fee_total,
         )
-        
+
         # Portfolio ve PnL güncelle
         self._update_portfolio(portfolio, decision.action, btc_amount, eff_price)
         self._update_daily_pnl(daily_pnl, realized_delta, portfolio, eff_price, closing_fee_total)
-        
+
         post_position = portfolio.net_position  # YENİ: net_position kullan
         session.flush()
         session.commit()
-        
+
         # Bildirim için geçici trade objesi
         trade_summary = SimpleNamespace(
             amount=btc_amount,
@@ -1855,21 +1984,21 @@ class Executor:
             close_price=eff_price,
             position_side=position_side,
         )
-        
+
         portfolio_summary = SimpleNamespace(
             position=portfolio.net_position,  # YENİ: net_position
             average_price=portfolio.average_price,
             long_position=portfolio.long_position,
             short_position=portfolio.short_position,
         )
-        
+
         daily_summary = SimpleNamespace(
             realized_pnl=daily_pnl.realized_pnl,
             unrealized_pnl=daily_pnl.unrealized_pnl,
         )
-        
+
         position_status = self._describe_position_change(pre_position, post_position)
-        
+
         # Telemetry for cycle notifier
         current_position_id = self.get_position_id_by_side(session, self._symbol, position_side)
         telemetry = {
@@ -1881,76 +2010,79 @@ class Executor:
             "fee": closing_fee_total,
             "pnl": realized_delta,
         }
-        return ExecutionResult(status="PAPER", details="Pozisyon kapatıldı (trade güncellendi)", telemetry=telemetry)
-    
+        return ExecutionResult(
+            status="PAPER", details="Pozisyon kapatıldı (trade güncellendi)", telemetry=telemetry
+        )
+
     def close_position_by_exit_plan(
-        self,
-        reason: str,
-        trigger_type: str  # "profit_target" | "stop_loss" | "invalidation"
+        self, reason: str, trigger_type: str  # "profit_target" | "stop_loss" | "invalidation"
     ) -> ExecutionResult:
         """
         Exit plan tarafından tetiklenen pozisyon kapatma
         Position monitor tarafından çağrılır (AUTOMATIC CLOSING)
-        
+
         Args:
             reason: Kapatma sebebi (detaylı açıklama)
             trigger_type: Tetikleyici tip ("profit_target" | "stop_loss" | "invalidation")
-        
+
         Returns:
             ExecutionResult
         """
         logger.info(
-            "🔔 Closing position by exit plan | trigger=%s | reason=%s",
-            trigger_type,
-            reason
+            "🔔 Closing position by exit plan | trigger=%s | reason=%s", trigger_type, reason
         )
-        
+
         with Session(engine) as session:
             # Portfolio'yu kontrol et
             portfolio = get_synced_portfolio(session, self._symbol)
-            
+
             if abs(portfolio.position) < 0.0001:
                 logger.warning("No open position to close")
                 return ExecutionResult(status="SKIP", details="Kapatılacak pozisyon yok")
-            
+
             daily_pnl = get_daily_pnl(session)
             price = self._resolve_price()
-            
+
             if price <= 0:
                 logger.error("Invalid price: %.2f, cannot close position", price)
                 return ExecutionResult(status="ERROR", details="Invalid price")
-            
+
             pre_position = portfolio.position
-            
+
             # CLOSE zamanını kaydet (cooldown başlat)
             self._last_close_time = datetime.utcnow()
-            
+
             # === POSITION CLOSING LOGIC ===
             max_closeable = abs(portfolio.position)
             btc_amount = max_closeable  # Always close 100%
-            
+
             # Efektif kapanış fiyatını al
             from app.utils.influx import query_price_at_time
+
             close_ts = datetime.utcnow()
-            eff_price = price_cache.get(self._symbol) or query_price_at_time(self._symbol, close_ts, interval="1m", window_minutes=2) or price
+            eff_price = (
+                price_cache.get(self._symbol)
+                or query_price_at_time(self._symbol, close_ts, interval="1m", window_minutes=2)
+                or price
+            )
             position_size_usd = btc_amount * eff_price
-            
+
             # Pozisyon yönü
             is_long = portfolio.position > 0
             position_side = "LONG" if is_long else "SHORT"
-            
+
             logger.info(
                 "CLOSE %s position (exit plan): current=%.6f btc_to_close=%.6f notional=%.2f trigger=%s",
                 position_side,
                 portfolio.position,
                 btc_amount,
                 position_size_usd,
-                trigger_type
+                trigger_type,
             )
-            
+
             # Pozisyon ID'sini al
             current_position_id = self.get_current_position_id(session, self._symbol)
-            
+
             # Mevcut açık trade'lerin close_price'larını güncelle
             trade_side = "SELL" if is_long else "BUY"
             updated_count, realized_delta, closing_fee_total = close_open_trades(
@@ -1961,27 +2093,33 @@ class Executor:
                 close_price=eff_price,
                 taker_fee_rate=self._taker_fee_rate,
             )
-            
+
             logger.info(
                 "Closed %s position: %d trade(s) updated with close_price=%.2f",
                 position_side,
                 updated_count,
                 eff_price,
             )
-            
+
             # Portfolio güncelle (tam kapatma)
             portfolio.position = 0.0
             portfolio.average_price = 0.0
             portfolio.updated_at = datetime.utcnow()
-            
+
             # Daily PnL güncelle
-            self._update_daily_pnl(daily_pnl, realized_delta, portfolio, eff_price, closing_fee_total)
-            
+            self._update_daily_pnl(
+                daily_pnl, realized_delta, portfolio, eff_price, closing_fee_total
+            )
+
             session.flush()
             session.commit()
-            
-            logger.info("✅ Position closed by exit plan | pnl=%.2f fee=%.2f", realized_delta, closing_fee_total)
-            
+
+            logger.info(
+                "✅ Position closed by exit plan | pnl=%.2f fee=%.2f",
+                realized_delta,
+                closing_fee_total,
+            )
+
             telemetry = {
                 "last_action": "CLOSE",
                 "amount": btc_amount,
@@ -1992,11 +2130,11 @@ class Executor:
                 "pnl": realized_delta,
                 "trigger_type": trigger_type,
             }
-            
+
             return ExecutionResult(
                 status="PAPER",
                 details=f"{position_side} position closed by {trigger_type}",
-                telemetry=telemetry
+                telemetry=telemetry,
             )
 
     def format_reason(self, text: str) -> str:
@@ -2035,16 +2173,17 @@ class Executor:
         """WebSocket ile stop-loss/take-profit izlemeyi başlat"""
         if self._stop_loss_monitoring_active:
             return
-            
+
         self._stop_loss_monitoring_active = True
         logger.info("Stop-loss/Take-profit monitoring started for %s", self._symbol)
-        
+
         # WebSocket monitoring thread başlat
         import threading
+
         monitor_thread = threading.Thread(
             target=self._monitor_stop_loss_websocket,
             name=f"sl-tp-monitor-{self._symbol}",
-            daemon=True
+            daemon=True,
         )
         monitor_thread.start()
 
@@ -2053,36 +2192,36 @@ class Executor:
         import asyncio
         import time
         from datetime import datetime
-        
+
         async def monitor():
             try:
                 from app.data_feeds.binance_ws import BinanceWebSocketClient
-                
+
                 def price_handler(message):
                     try:
                         # WebSocketMessage formatını kontrol et
-                        if hasattr(message, 'payload'):
+                        if hasattr(message, "payload"):
                             payload = message.payload
                         elif isinstance(message, dict):
                             payload = message.get("payload", {})
                         else:
                             logger.warning("Unknown message format: %s", type(message))
                             return
-                            
+
                         kline = payload.get("k", {})
                         close_price = float(kline.get("c", 0.0))
-                        
+
                         if close_price > 0:
                             self._check_and_notify_sl_tp(close_price)
                     except Exception as e:
                         logger.error("Error in price handler: %s", e)
-                
+
                 ws_client = BinanceWebSocketClient(self._symbol, "1m")
                 await ws_client.listen(price_handler)
-                
+
             except Exception as e:
                 logger.error("WebSocket monitoring error: %s", e)
-        
+
         # Async loop çalıştır
         try:
             asyncio.run(monitor())
@@ -2095,12 +2234,13 @@ class Executor:
             # Mevcut pozisyonu kontrol et
             with Session(engine) as session:
                 portfolio = get_synced_portfolio(session, self._symbol)
-                
+
                 if abs(portfolio.position) < 0.0001:  # Pozisyon yoksa izleme
                     return
-                
+
                 # En son açık trade'i bul ve exit_plan'ını kontrol et
                 from app.executor.ledger import Trade
+
                 latest_trade = (
                     session.query(Trade)
                     .filter_by(symbol=self._symbol)
@@ -2108,42 +2248,44 @@ class Executor:
                     .order_by(Trade.timestamp.desc())
                     .first()
                 )
-                
+
                 if not latest_trade:
                     return
-                
+
                 entry_price = latest_trade.price
                 is_long = portfolio.position > 0
-                
+
                 # GLM'nin exit_plan'ı öncelikli olarak kullanılmalı
                 # Fallback mantık sadece exit_plan yoksa veya değerler geçersizse çalışacak
                 stop_loss_price = None
                 profit_target_price = None
-                
+
                 if latest_trade.exit_plan:
                     exit_plan = latest_trade.exit_plan
                     stop_loss_raw = exit_plan.get("stop_loss")
                     profit_target_raw = exit_plan.get("profit_target")
-                    
+
                     # GLM'nin exit_plan'ı varsa ve içinde geçerli değerler varsa kesinlikle kullan
                     if stop_loss_raw is not None and stop_loss_raw != 0.0:
                         stop_loss_price = stop_loss_raw
                     if profit_target_raw is not None and profit_target_raw != 0.0:
                         profit_target_price = profit_target_raw
-                
+
                 # Exit plan yoksa veya değerler geçersizse fallback mantığı kullan
                 if not stop_loss_price and not profit_target_price:
-                    logger.debug("GLM exit plan not found or values invalid, using fallback SL/TP logic")
+                    logger.debug(
+                        "GLM exit plan not found or values invalid, using fallback SL/TP logic"
+                    )
                     if is_long:
                         stop_loss_price = entry_price * 0.995  # %0.5 stop-loss
                         profit_target_price = entry_price * 1.015  # %1.5 take-profit
                     else:
                         stop_loss_price = entry_price * 1.005  # %0.5 stop-loss
                         profit_target_price = entry_price * 0.985  # %1.5 take-profit
-                
+
                 trigger_type = None
                 trigger_price = None
-                
+
                 # LONG pozisyon kontrolü
                 if is_long:
                     if stop_loss_price and current_price <= stop_loss_price:
@@ -2160,7 +2302,7 @@ class Executor:
                     elif profit_target_price and current_price <= profit_target_price:
                         trigger_type = "TAKE-PROFIT"
                         trigger_price = profit_target_price
-                
+
                 # Seviye tetiklendi mi kontrol et
                 if trigger_type:
                     logger.warning(
@@ -2170,11 +2312,13 @@ class Executor:
                         abs(portfolio.position),
                         entry_price,
                         current_price,
-                        trigger_price
+                        trigger_price,
                     )
-                    
+
                     # Pozisyonu kapat
-                    self._close_position_on_trigger(session, trigger_type, current_price, trigger_price)
+                    self._close_position_on_trigger(
+                        session, trigger_type, current_price, trigger_price
+                    )
                 else:
                     # Seviye tetiklenmedi, sadece log (debug için)
                     logger.debug(
@@ -2183,29 +2327,31 @@ class Executor:
                         entry_price,
                         current_price,
                         stop_loss_price or 0.0,
-                        profit_target_price or 0.0
+                        profit_target_price or 0.0,
                     )
-                        
+
         except Exception as e:
             logger.error("Error checking SL/TP: %s", e, exc_info=True)
-    
-    def _close_position_on_trigger(self, session: Session, trigger_type: str, current_price: float, trigger_price: float) -> None:
+
+    def _close_position_on_trigger(
+        self, session: Session, trigger_type: str, current_price: float, trigger_price: float
+    ) -> None:
         """Stop-loss veya take-profit tetiklendiğinde pozisyonu kapat"""
         try:
-            from app.executor.ledger import get_daily_pnl, Trade
+            from app.executor.ledger import Trade, get_daily_pnl
             from app.risk_manager.manager import RiskDecision
-            
+
             portfolio = get_synced_portfolio(session, self._symbol)
-            
+
             if abs(portfolio.position) < 0.0001:
                 logger.warning("Position already closed or no position")
                 return
-            
+
             # Pozisyon bilgilerini kaydet (kapatmadan önce)
             position_amount = abs(portfolio.position)
             entry_price = portfolio.average_price
             position_type = "LONG" if portfolio.position > 0 else "SHORT"
-            
+
             # En son trade'den leverage bilgisini al
             latest_trade = (
                 session.query(Trade)
@@ -2215,16 +2361,16 @@ class Executor:
                 .first()
             )
             leverage = latest_trade.leverage if latest_trade else self._leverage
-            
+
             logger.info(
                 "Closing position due to %s trigger: %.6f BTC %s @ %.2f, current %.2f",
                 trigger_type,
                 position_amount,
                 position_type,
                 entry_price,
-                current_price
+                current_price,
             )
-            
+
             # CLOSE kararı oluştur
             close_decision = RiskDecision(
                 action="CLOSE",
@@ -2235,9 +2381,9 @@ class Executor:
                 reason_primary=f"Risk Management: {trigger_type}",
                 reason_secondary=f"Triggered at ${trigger_price:,.2f}",
             )
-            
+
             daily_pnl = get_daily_pnl(session)
-            
+
             # Pozisyonu kapat
             result = self._execute_close_position(
                 session=session,
@@ -2246,12 +2392,12 @@ class Executor:
                 price=current_price,
                 decision=close_decision,
                 reason=trigger_type,
-                position_amount=position_amount
+                position_amount=position_amount,
             )
-            
+
             if result.status == "EXECUTED":
                 logger.info("✅ Position closed successfully due to %s", trigger_type)
-                
+
                 # Bildirim gönder
                 self._send_sl_tp_notification(
                     trigger_type=trigger_type,
@@ -2259,28 +2405,36 @@ class Executor:
                     amount=position_amount,
                     entry_price=entry_price,
                     current_price=current_price,
-                    trigger_price=trigger_price
+                    trigger_price=trigger_price,
                 )
             else:
                 logger.error("❌ Failed to close position: %s", result.status)
-                
+
         except Exception as e:
             logger.error("Error closing position on trigger: %s", e, exc_info=True)
 
-    def _send_sl_tp_notification(self, trigger_type: str, position_type: str, 
-                                 amount: float, entry_price: float, current_price: float, 
-                                 trigger_price: float) -> None:
+    def _send_sl_tp_notification(
+        self,
+        trigger_type: str,
+        position_type: str,
+        amount: float,
+        entry_price: float,
+        current_price: float,
+        trigger_price: float,
+    ) -> None:
         """Stop-loss veya take-profit bildirimi gönder"""
         try:
             # Aynı bildirimi tekrar tekrar göndermeyi önle
             notification_key = f"{trigger_type}_{position_type}_{current_price:.2f}"
             current_time = datetime.utcnow()
-            
-            if (self._last_sl_tp_notification and 
-                self._last_sl_tp_notification.get("key") == notification_key and
-                (current_time - self._last_sl_tp_notification["time"]).total_seconds() < 60):
+
+            if (
+                self._last_sl_tp_notification
+                and self._last_sl_tp_notification.get("key") == notification_key
+                and (current_time - self._last_sl_tp_notification["time"]).total_seconds() < 60
+            ):
                 return  # 1 dakika içinde aynı bildirimi gönderme
-            
+
             # PnL hesapla
             if position_type == "SHORT":
                 pnl_pct = (entry_price - current_price) / entry_price * 100
@@ -2288,7 +2442,7 @@ class Executor:
             else:  # LONG
                 pnl_pct = (current_price - entry_price) / entry_price * 100
                 pnl_amount = (current_price - entry_price) * amount
-            
+
             # Database'e bildirimi kaydet
             db_notification = None
             try:
@@ -2298,7 +2452,7 @@ class Executor:
                         orders = get_active_stop_loss_orders(session, self._symbol)
                     else:
                         orders = get_active_take_profit_orders(session, self._symbol)
-                    
+
                     # İlgili emri bul ve bildirimi oluştur
                     order_id = None
                     if orders:
@@ -2307,7 +2461,7 @@ class Executor:
                             if abs(order.entry_price - entry_price) < 1.0:  # $1 fark tolerance
                                 order_id = order.id
                                 break
-                    
+
                     if order_id:
                         db_notification = create_stop_loss_notification(
                             session=session,
@@ -2323,22 +2477,26 @@ class Executor:
                             pnl_percentage=pnl_pct,
                             telegram_sent=False,  # Henüz gönderilmedi
                         )
-                        
+
                         # Emri tetikle
                         if trigger_type == "STOP-LOSS":
-                            trigger_stop_loss_order(session, order_id, current_price, pnl_amount, pnl_pct)
+                            trigger_stop_loss_order(
+                                session, order_id, current_price, pnl_amount, pnl_pct
+                            )
                         else:
-                            trigger_take_profit_order(session, order_id, current_price, pnl_amount, pnl_pct)
-                        
+                            trigger_take_profit_order(
+                                session, order_id, current_price, pnl_amount, pnl_pct
+                            )
+
                         session.commit()
-                        
+
             except Exception as db_e:
                 logger.error("Database notification failed: %s", db_e)
-            
+
             # Telegram bildirimi formatla
             emoji = "🛑" if trigger_type == "STOP-LOSS" else "🎯"
             position_emoji = "📉" if position_type == "SHORT" else "📈"
-            
+
             message = f"""
 {emoji} *{trigger_type} TETİKLENDİ*
 
@@ -2355,94 +2513,119 @@ class Executor:
 
 ⏰ *{current_time.strftime('%H:%M:%S')}*
 """
-            
+
             # Telegram'a gönder
             telegram_sent = False
             try:
                 telegram_client.send_message(message)
                 telegram_sent = True
-                
+
                 # Database'de telegram gönderimini güncelle
                 if db_notification:
                     with Session(engine) as session:
-                        notification = session.query(StopLossNotification).filter_by(id=db_notification.id).first()
+                        notification = (
+                            session.query(StopLossNotification)
+                            .filter_by(id=db_notification.id)
+                            .first()
+                        )
                         if notification:
                             notification.telegram_sent = True
                             notification.telegram_sent_at = current_time
                             session.commit()
-                            
+
             except Exception as telegram_e:
                 logger.error("Telegram notification failed: %s", telegram_e)
-            
+
             # Bildirim kaydını güncelle
             self._last_sl_tp_notification = {
                 "key": notification_key,
                 "time": current_time,
                 "type": trigger_type,
-                "price": current_price
+                "price": current_price,
             }
-            
+
             logger.warning(
                 "%s notification sent: %s %s at %.2f (entry: %.2f, trigger: %.2f, telegram: %s)",
-                trigger_type, position_type, abs(amount), current_price, entry_price, trigger_price, 
-                "✅" if telegram_sent else "❌"
+                trigger_type,
+                position_type,
+                abs(amount),
+                current_price,
+                entry_price,
+                trigger_price,
+                "✅" if telegram_sent else "❌",
             )
-            
+
         except Exception as e:
             logger.error("Error sending SL/TP notification: %s", e)
 
-    def _validate_exit_plan(self, exit_plan: dict, position_side: str, entry_price: float) -> tuple[bool, str]:
+    def _validate_exit_plan(
+        self, exit_plan: dict, position_side: str, entry_price: float
+    ) -> tuple[bool, str]:
         """
         Exit planını doğrular ve mantıksal çatışmaları kontrol eder
-        
+
         Args:
             exit_plan: GLM'den gelen exit planı
             position_side: "LONG" veya "SHORT"
             entry_price: Giriş fiyatı
-            
+
         Returns:
             (is_valid, error_message)
         """
         if not exit_plan:
             return False, "Exit plan eksik"
-        
+
         profit_target = exit_plan.get("profit_target", 0.0)
         stop_loss = exit_plan.get("stop_loss", 0.0)
         invalidation_condition = exit_plan.get("invalidation_condition", "")
-        
+
         # Değerlerin geçerliliğini kontrol et
         if profit_target <= 0.0 or stop_loss <= 0.0:
             return False, "Profit target ve stop loss 0'dan büyük olmalı"
-        
+
         # Invalidation condition parse et (advanced_parser returns 4 values now)
-        direction, invalidation_price, time_frame, metadata = self._advanced_parser.parse(invalidation_condition)
-        
+        direction, invalidation_price, time_frame, metadata = self._advanced_parser.parse(
+            invalidation_condition
+        )
+
         # Mantıksal doğruluk kontrolü
         if position_side == "LONG":
             # LONG için: stop_loss < entry < profit_target olmalı
             if not (stop_loss < entry_price < profit_target):
-                return False, f"LONG için stop_loss({stop_loss}) < entry({entry_price}) < profit_target({profit_target}) olmalı"
-            
+                return (
+                    False,
+                    f"LONG için stop_loss({stop_loss}) < entry({entry_price}) < profit_target({profit_target}) olmalı",
+                )
+
             # Invalidation condition kontrolü - entry ile stop_loss ARASI olmalı (early warning)
             if direction and invalidation_price:
                 if direction == "below":
                     # LONG için "below" yönünde: stop_loss < invalidation < entry olmalı
                     if not (stop_loss < invalidation_price < entry_price):
-                        return False, f"LONG için invalidation({invalidation_price}) stop_loss({stop_loss}) ile entry({entry_price}) arasında olmalı (erken uyarı)"
+                        return (
+                            False,
+                            f"LONG için invalidation({invalidation_price}) stop_loss({stop_loss}) ile entry({entry_price}) arasında olmalı (erken uyarı)",
+                        )
                 elif direction == "above":
                     return False, f"LONG için invalidation 'above' yönünde olamaz, 'below' olmalı"
         else:  # SHORT
             # SHORT için: profit_target < entry < stop_loss olmalı
             if not (profit_target < entry_price < stop_loss):
-                return False, f"SHORT için profit_target({profit_target}) < entry({entry_price}) < stop_loss({stop_loss}) olmalı"
-            
+                return (
+                    False,
+                    f"SHORT için profit_target({profit_target}) < entry({entry_price}) < stop_loss({stop_loss}) olmalı",
+                )
+
             # Invalidation condition kontrolü - entry ile stop_loss ARASI olmalı (early warning)
             if direction and invalidation_price:
                 if direction == "above":
                     # SHORT için "above" yönünde: entry < invalidation < stop_loss olmalı
                     if not (entry_price < invalidation_price < stop_loss):
-                        return False, f"SHORT için invalidation({invalidation_price}) entry({entry_price}) ile stop_loss({stop_loss}) arasında olmalı (erken uyarı)"
+                        return (
+                            False,
+                            f"SHORT için invalidation({invalidation_price}) entry({entry_price}) ile stop_loss({stop_loss}) arasında olmalı (erken uyarı)",
+                        )
                 elif direction == "below":
                     return False, f"SHORT için invalidation 'below' yönünde olamaz, 'above' olmalı"
-        
+
         return True, ""

@@ -4,7 +4,6 @@ from datetime import datetime
 from typing import Deque, Dict, List
 
 import pandas as pd
-
 import ta
 
 from app.data_feeds.constants import HEALTH_CHANNEL, KLINE_CHANNEL
@@ -14,7 +13,6 @@ from app.utils.influx import write_measurement
 from app.utils.logging import get_logger
 from app.utils.redis import publish
 
-
 logger = get_logger(__name__)
 
 
@@ -23,13 +21,13 @@ class FeatureWorker:
         self._symbol = symbol
         self._interval = interval
         self._min_ta_history = min_ta_history
-        
+
         # 24 saatlik veri hedefi - dinamik hesaplama
         target_hours = 24
         interval_minutes = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240}
         minutes = interval_minutes.get(interval, 5)
         window_size = (target_hours * 60) // minutes
-        
+
         self._window: Deque[Dict[str, float]] = deque(maxlen=window_size)
         self._qlib = QLibConverter()
         try:
@@ -115,8 +113,16 @@ class FeatureWorker:
         macd = ta.trend.MACD(close, fillna=True)
         macd_value = macd.macd().iloc[-1]
         macd_signal = macd.macd_signal().iloc[-1]
-        atr_14 = ta.volatility.AverageTrueRange(high, low, close, window=14, fillna=True).average_true_range().iloc[-1]
-        vol_sma = ta.volume.VolumeWeightedAveragePrice(high, low, close, volume, window=20, fillna=True).volume_weighted_average_price().iloc[-1]
+        atr_14 = (
+            ta.volatility.AverageTrueRange(high, low, close, window=14, fillna=True)
+            .average_true_range()
+            .iloc[-1]
+        )
+        vol_sma = (
+            ta.volume.VolumeWeightedAveragePrice(high, low, close, volume, window=20, fillna=True)
+            .volume_weighted_average_price()
+            .iloc[-1]
+        )
 
         return {
             "ema_20": float(ema_20),
@@ -133,7 +139,9 @@ class FeatureWorker:
         ema_20 = float(close.ewm(span=20, adjust=False, min_periods=1).mean().iloc[-1])
         ema_50 = float(close.ewm(span=50, adjust=False, min_periods=1).mean().iloc[-1])
         rsi = self._simple_rsi(close, period=min(len(close), 14))
-        atr = float(close.diff().abs().rolling(window=min(14, len(close)), min_periods=1).mean().iloc[-1])
+        atr = float(
+            close.diff().abs().rolling(window=min(14, len(close)), min_periods=1).mean().iloc[-1]
+        )
         volume_series = df.get("volume", close)
         cum_volume = volume_series.cumsum().replace(0, pd.NA)
         vwap = float((close * volume_series).cumsum().div(cum_volume).fillna(close).iloc[-1])

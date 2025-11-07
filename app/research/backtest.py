@@ -36,33 +36,35 @@ class Backtester:
         """
         data_list = list(data)
         prices = [float(row.get("close", 0)) for row in data_list]
-        
+
         # Simple MA crossover strategy for backtesting simulation
         # This is just for portfolio simulation, not real trading
         for i, row in enumerate(data_list):
             price = float(row.get("close", 0))
             previous_price = self._last_price or price
-            
+
             # Simple strategy: buy when price increases, sell when decreases
             # This is a placeholder - backtest is for portfolio simulation only
             if i > 0 and i % 10 == 0:  # Trade every 10 candles
-                if price > prices[max(0, i-5)]:  # Price went up
+                if price > prices[max(0, i - 5)]:  # Price went up
                     direction = "BUY"
                     confidence = 0.3
                 else:  # Price went down
                     direction = "SELL"
                     confidence = 0.3
-                    
+
                 if direction in {"BUY", "SELL"} and confidence > 0:
                     self._execute_trade(direction, price, previous_price, confidence)
-            
+
             self._last_price = price
             equity = self._cash + self._position * price
             self._equity_history.append(equity)
-        
+
         return self._trades
 
-    def _execute_trade(self, direction: str, price: float, previous_price: float, confidence: float) -> None:
+    def _execute_trade(
+        self, direction: str, price: float, previous_price: float, confidence: float
+    ) -> None:
         amount = confidence
         if direction == "BUY":
             self._position += amount

@@ -10,7 +10,6 @@ from app.data_feeds.constants import FUTURES_CHANNEL, HEALTH_CHANNEL
 from app.utils.logging import get_logger
 from app.utils.redis import publish
 
-
 settings = get_settings()
 logger = get_logger(__name__)
 
@@ -31,9 +30,13 @@ class BinanceFuturesClient:
     async def fetch_metrics(self, symbol: str) -> FuturesSnapshot:
         # Use limit=1 to get only the most recent data (not historical)
         base_params = {"symbol": symbol.upper(), "period": "5m", "limit": 1}
-        long_short_ratio = await self._fetch_indicator("futures/data/globalLongShortAccountRatio", base_params)
+        long_short_ratio = await self._fetch_indicator(
+            "futures/data/globalLongShortAccountRatio", base_params
+        )
         open_interest = await self._fetch_indicator("futures/data/openInterestHist", base_params)
-        funding_rate = await self._fetch_indicator("fapi/v1/fundingRate", {"symbol": symbol.upper(), "limit": 1})
+        funding_rate = await self._fetch_indicator(
+            "fapi/v1/fundingRate", {"symbol": symbol.upper(), "limit": 1}
+        )
         return FuturesSnapshot(
             symbol=symbol,
             long_short_ratio=float(long_short_ratio[0]["longShortRatio"]),

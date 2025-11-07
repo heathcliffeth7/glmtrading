@@ -133,7 +133,9 @@ def parse_state_payload(payload: str) -> Dict[str, Any]:
             pass
 
     # More robust 4h arrays via section search
-    fourh_section = re.search(r"Longer[^\n]*4\-hour[^\n]*:\s*(.*?)(?:(?:\n\n)|\Z)", text, re.IGNORECASE | re.DOTALL)
+    fourh_section = re.search(
+        r"Longer[^\n]*4\-hour[^\n]*:\s*(.*?)(?:(?:\n\n)|\Z)", text, re.IGNORECASE | re.DOTALL
+    )
     if fourh_section:
         sec = fourh_section.group(1)
         # MACD indicators: [ ... ]

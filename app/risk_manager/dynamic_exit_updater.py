@@ -2,11 +2,12 @@ import json
 import logging
 from datetime import datetime
 from typing import Dict, Optional, Tuple
+
 from sqlalchemy.orm import Session
 
-from app.risk_manager.glm_client import GLMClient
-from app.risk_manager.risk_controls import validate_exit_plan_update, ValidationError
 from app.executor.ledger import Trade
+from app.risk_manager.glm_client import GLMClient
+from app.risk_manager.risk_controls import ValidationError, validate_exit_plan_update
 
 logger = logging.getLogger(__name__)
 
@@ -17,99 +18,89 @@ class DynamicExitUpdater:
         self.session = session
         self.min_update_interval_seconds = 360
         self.max_updates_per_position = 10
-    
+
     def evaluate_update_necessity(
-        self,
-        position_data: Dict,
-        market_data: Dict
+        self, position_data: Dict, market_data: Dict
     ) -> Tuple[bool, Optional[str]]:
         """
         Exit plan güncellemesi gerekli mi değerlendir
-        
+
         Returns:
             (should_update, reason)
         """
-        position_id = position_data.get('position_id')
-        exit_plan_history = position_data.get('exit_plan_history', {})
-        updates = exit_plan_history.get('updates', [])
-        
+        position_id = position_data.get("position_id")
+        exit_plan_history = position_data.get("exit_plan_history", {})
+        updates = exit_plan_history.get("updates", [])
+
         if len(updates) >= self.max_updates_per_position:
             logger.info(f"Position {position_id} max update limit reached")
             return False, "Max update limit reached"
-        
+
         if updates:
-            last_update_time = datetime.fromisoformat(updates[-1]['timestamp'])
+            last_update_time = datetime.fromisoformat(updates[-1]["timestamp"])
             seconds_since_last = (datetime.utcnow() - last_update_time).total_seconds()
-            
+
             if seconds_since_last < self.min_update_interval_seconds:
                 logger.debug(
                     f"Position {position_id} updated {seconds_since_last:.0f}s ago, "
                     f"min interval: {self.min_update_interval_seconds}s"
                 )
                 return False, "Too soon since last update"
-        
+
         volatility_change = abs(
-            market_data.get('current_volatility', 0) - 
-            position_data.get('initial_volatility', 0)
+            market_data.get("current_volatility", 0) - position_data.get("initial_volatility", 0)
         )
-        
+
         price_change_pct = abs(
-            (market_data.get('current_price', 0) - position_data.get('entry_price', 1)) /
-            position_data.get('entry_price', 1)
+            (market_data.get("current_price", 0) - position_data.get("entry_price", 1))
+            / position_data.get("entry_price", 1)
         )
-        
+
         if volatility_change > 0.1:
             return True, f"Volatility changed by {volatility_change:.2f}"
-        
+
         if price_change_pct > 0.01:
             return True, f"Price changed by {price_change_pct*100:.2f}%"
-        
+
         position_age_minutes = (
-            datetime.utcnow() - position_data.get('timestamp', datetime.utcnow())
+            datetime.utcnow() - position_data.get("timestamp", datetime.utcnow())
         ).total_seconds() / 60
-        
+
         if position_age_minutes > 30 and len(updates) == 0:
             return True, "Position older than 30 minutes, no updates yet"
-        
+
         return False, "No significant changes"
-    
-    def prepare_glm_context_for_update(
-        self,
-        position_data: Dict,
-        market_data: Dict
-    ) -> str:
+
+    def prepare_glm_context_for_update(self, position_data: Dict, market_data: Dict) -> str:
         """GLM'e gönderilecek exit plan review bağlamını hazırla"""
-        
-        entry_price = position_data['entry_price']
-        current_price = market_data['current_price']
-        position_type = position_data['position_side']
-        current_exit_plan = position_data['exit_plan']
-        
-        position_age_minutes = (
-            datetime.utcnow() - position_data['timestamp']
-        ).total_seconds() / 60
-        
-        volatility_change = (
-            market_data.get('current_volatility', 0) - 
-            position_data.get('initial_volatility', 0)
+
+        entry_price = position_data["entry_price"]
+        current_price = market_data["current_price"]
+        position_type = position_data["position_side"]
+        current_exit_plan = position_data["exit_plan"]
+
+        position_age_minutes = (datetime.utcnow() - position_data["timestamp"]).total_seconds() / 60
+
+        volatility_change = market_data.get("current_volatility", 0) - position_data.get(
+            "initial_volatility", 0
         )
-        
+
         price_change_pct = ((current_price - entry_price) / entry_price) * 100
-        
-        updates_history = position_data.get('exit_plan_history', {}).get('updates', [])
+
+        updates_history = position_data.get("exit_plan_history", {}).get("updates", [])
         history_text = ""
         if updates_history:
             history_text = "Past Exit Plan Updates:\n"
             for idx, update in enumerate(updates_history[-3:], 1):
                 minutes_ago = (
-                    datetime.utcnow() - datetime.fromisoformat(update['timestamp'])
+                    datetime.utcnow() - datetime.fromisoformat(update["timestamp"])
                 ).total_seconds() / 60
                 history_text += f"  - {minutes_ago:.0f} min ago: {update['trigger']} (reason: {update.get('reasoning', 'N/A')})\n"
         else:
             history_text = "Past Exit Plan Updates:\n  - No updates yet\n"
-        
+
         invalidation_rules = self._get_invalidation_rules(position_type)
-        
+
         context = f"""
 Current Position:
   Entry Price: ${entry_price:,.2f}
@@ -151,10 +142,10 @@ Response Format (STRICT JSON):
 }}
 """
         return context
-    
+
     def _get_invalidation_rules(self, position_type: str) -> str:
         """Invalidation kurallarını döndür"""
-        
+
         if position_type == "LONG":
             return """
 ⚠️ CRITICAL INVALIDATION CONDITION RULES:
@@ -183,170 +174,156 @@ SHORT Pozisyon için:
 Invalidation Condition Formülü:
   - SHORT: Invalidation = Entry + (SL - Entry) * 0.4  (Entry ile SL arasında %40 noktada)
 """
-    
-    def request_glm_exit_plan_update(
-        self,
-        context: str,
-        position_id: str
-    ) -> Optional[Dict]:
+
+    def request_glm_exit_plan_update(self, context: str, position_id: str) -> Optional[Dict]:
         """GLM'den exit plan güncellemesi iste"""
-        
+
         messages = [
             {
                 "role": "system",
-                "content": "You are a professional trading risk manager. Analyze position and market data to update exit plans dynamically."
+                "content": "You are a professional trading risk manager. Analyze position and market data to update exit plans dynamically.",
             },
-            {
-                "role": "user",
-                "content": context
-            }
+            {"role": "user", "content": context},
         ]
-        
+
         try:
             response = self.glm_client.request(messages, trace_id=f"exit_update_{position_id}")
-            
-            if not response or 'choices' not in response:
+
+            if not response or "choices" not in response:
                 logger.error(f"Invalid GLM response for position {position_id}")
                 return None
-            
-            content = response['choices'][0]['message']['content']
-            
+
+            content = response["choices"][0]["message"]["content"]
+
             json_match = content
-            if '```json' in content:
-                json_match = content.split('```json')[1].split('```')[0].strip()
-            elif '```' in content:
-                json_match = content.split('```')[1].split('```')[0].strip()
-            
+            if "```json" in content:
+                json_match = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                json_match = content.split("```")[1].split("```")[0].strip()
+
             data = json.loads(json_match)
-            
-            if not data.get('update_needed'):
-                logger.info(f"GLM decided no update needed for {position_id}: {data.get('reasoning')}")
+
+            if not data.get("update_needed"):
+                logger.info(
+                    f"GLM decided no update needed for {position_id}: {data.get('reasoning')}"
+                )
                 return None
-            
+
             return data
-            
+
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse GLM JSON response: {e}")
             return None
         except Exception as e:
             logger.error(f"GLM request failed for position {position_id}: {e}", exc_info=True)
             return None
-    
+
     def apply_exit_plan_update(
-        self,
-        position_id: str,
-        new_exit_plan: Dict,
-        trigger: str,
-        reasoning: str
+        self, position_id: str, new_exit_plan: Dict, trigger: str, reasoning: str
     ) -> bool:
         """Exit plan güncellemesini database'e uygula"""
-        
+
         try:
-            trade = self.session.query(Trade).filter_by(
-                position_id=position_id,
-                close_price=None
-            ).first()
-            
+            trade = (
+                self.session.query(Trade)
+                .filter_by(position_id=position_id, close_price=None)
+                .first()
+            )
+
             if not trade:
                 logger.error(f"Trade not found for position {position_id}")
                 return False
-            
+
             old_exit_plan = trade.exit_plan or {}
-            
+
             is_valid, error_msg = validate_exit_plan_update(
                 old_plan=old_exit_plan,
                 new_plan=new_exit_plan,
                 entry_price=trade.price,
-                position_side=trade.position_side
+                position_side=trade.position_side,
             )
-            
+
             if not is_valid:
-                logger.warning(
-                    f"Exit plan validation failed for {position_id}: {error_msg}"
-                )
+                logger.warning(f"Exit plan validation failed for {position_id}: {error_msg}")
                 return False
-            
+
             if not trade.exit_plan_history:
                 trade.exit_plan_history = {"updates": []}
-            
+
             update_record = {
                 "timestamp": datetime.utcnow().isoformat(),
                 "trigger": trigger,
                 "old_exit_plan": old_exit_plan,
                 "new_exit_plan": new_exit_plan,
-                "reasoning": reasoning
+                "reasoning": reasoning,
             }
-            
-            trade.exit_plan_history['updates'].append(update_record)
-            
+
+            trade.exit_plan_history["updates"].append(update_record)
+
             trade.exit_plan = new_exit_plan
-            
+
             self.session.commit()
-            
+
             logger.info(
                 f"Exit plan updated for {position_id} | "
                 f"old_sl={old_exit_plan.get('stop_loss'):.2f} new_sl={new_exit_plan.get('stop_loss'):.2f} | "
                 f"old_tp={old_exit_plan.get('profit_target'):.2f} new_tp={new_exit_plan.get('profit_target'):.2f} | "
                 f"reason={trigger}"
             )
-            
+
             # Enhanced logging: Güncellenen değerleri detaylı göster
             logger.info(
                 "✅ Exit plan committed to DB | position_id=%s | "
                 "new_sl=%.2f new_tp=%.2f new_inv='%s'",
                 position_id,
-                new_exit_plan.get('stop_loss'),
-                new_exit_plan.get('profit_target'),
-                new_exit_plan.get('invalidation_condition', 'N/A')[:50]
+                new_exit_plan.get("stop_loss"),
+                new_exit_plan.get("profit_target"),
+                new_exit_plan.get("invalidation_condition", "N/A")[:50],
             )
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to apply exit plan update for {position_id}: {e}", exc_info=True)
             self.session.rollback()
             return False
-    
-    def process_position_update(
-        self,
-        position_data: Dict,
-        market_data: Dict
-    ) -> Optional[Dict]:
+
+    def process_position_update(self, position_data: Dict, market_data: Dict) -> Optional[Dict]:
         """Pozisyon için exit plan güncellemesi yap (ana orchestrator)"""
-        
-        position_id = position_data.get('position_id')
-        
+
+        position_id = position_data.get("position_id")
+
         should_update, reason = self.evaluate_update_necessity(position_data, market_data)
-        
+
         if not should_update:
             logger.debug(f"Position {position_id} update skipped: {reason}")
             return None
-        
+
         logger.info(f"Position {position_id} update evaluation: {reason}")
-        
+
         context = self.prepare_glm_context_for_update(position_data, market_data)
-        
+
         glm_response = self.request_glm_exit_plan_update(context, position_id)
-        
+
         if not glm_response:
             return None
-        
-        new_exit_plan = glm_response.get('new_exit_plan')
-        reasoning = glm_response.get('reasoning', 'GLM decision')
-        
+
+        new_exit_plan = glm_response.get("new_exit_plan")
+        reasoning = glm_response.get("reasoning", "GLM decision")
+
         success = self.apply_exit_plan_update(
             position_id=position_id,
             new_exit_plan=new_exit_plan,
             trigger=reason,
-            reasoning=reasoning
+            reasoning=reasoning,
         )
-        
+
         if success:
             return {
                 "position_id": position_id,
-                "old_exit_plan": position_data['exit_plan'],
+                "old_exit_plan": position_data["exit_plan"],
                 "new_exit_plan": new_exit_plan,
-                "reasoning": reasoning
+                "reasoning": reasoning,
             }
-        
+
         return None

@@ -1,11 +1,22 @@
 from datetime import date, datetime
-from typing import Optional, List
+from typing import List, Optional
 
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, String, create_engine, text, JSON
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    create_engine,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Session
 
 from app.config.settings import get_settings
-
 
 settings = get_settings()
 
@@ -18,7 +29,9 @@ class Trade(Base):
     __tablename__ = "trades"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    position_id = Column(String(20), nullable=True)  # Her pozisyona unique ID (örn: POS-20251024-001)
+    position_id = Column(
+        String(20), nullable=True
+    )  # Her pozisyona unique ID (örn: POS-20251024-001)
     symbol = Column(String(20), nullable=False)
     side = Column(String(4), nullable=False)  # BUY/SELL (trade direction)
     position_side = Column(String(5), nullable=True)  # LONG/SHORT (position type)
@@ -30,8 +43,12 @@ class Trade(Base):
     notional_value = Column(Float, nullable=True)  # price × amount × leverage
     fees = Column(Float, default=0.0)  # İşlem ücreti
     pnl = Column(Float, default=0.0)  # Realized PnL (kapanışta hesaplanır)
-    exit_plan = Column(JSON, nullable=True)  # Nof1.ai style exit plan: {profit_target, stop_loss, invalidation_condition}
-    exit_plan_history = Column(JSON, nullable=True)  # Tüm exit plan güncellemelerin logu: {"updates": [...]}
+    exit_plan = Column(
+        JSON, nullable=True
+    )  # Nof1.ai style exit plan: {profit_target, stop_loss, invalidation_condition}
+    exit_plan_history = Column(
+        JSON, nullable=True
+    )  # Tüm exit plan güncellemelerin logu: {"updates": [...]}
     timestamp = Column(DateTime, default=datetime.utcnow)
 
 
@@ -64,6 +81,7 @@ class DailyPnL(Base):
 
 class PredictionLog(Base):
     """Active Learning: Her prediction'ı feature'larıyla birlikte kaydet"""
+
     __tablename__ = "prediction_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -75,13 +93,13 @@ class PredictionLog(Base):
     long_short_ratio = Column(Float)
     open_interest = Column(Float)
     funding_rate = Column(Float)
-    
+
     # Features - Spot indicators (TA-Lib)
     ema_20 = Column(Float)
     ema_50 = Column(Float)
     rsi_14 = Column(Float)
     close_price = Column(Float)
-    
+
     # Features - Twelve Data indicators
     rsi_twelvedata = Column(Float, nullable=True)
     macd_twelvedata = Column(Float, nullable=True)
@@ -114,85 +132,89 @@ class PredictionLog(Base):
 
 class StopLossOrder(Base):
     """Stop-loss emirlerini takip et"""
+
     __tablename__ = "stop_loss_orders"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     trade_id = Column(Integer, ForeignKey("trades.id"), nullable=False)
     position_id = Column(String(50), nullable=False)
     symbol = Column(String(20), nullable=False)
-    
+
     entry_price = Column(Float, nullable=False)
     stop_loss_price = Column(Float, nullable=False)
     stop_loss_pct = Column(Float, nullable=False)  # % olarak
-    
+
     is_active = Column(Boolean, default=True)
     triggered = Column(Boolean, default=False)
     triggered_at = Column(DateTime, nullable=True)
     triggered_price = Column(Float, nullable=True)
-    
+
     # Trigger anında PnL bilgileri
     pnl_at_trigger = Column(Float, nullable=True)
     pnl_pct_at_trigger = Column(Float, nullable=True)
-    
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class TakeProfitOrder(Base):
     """Take-profit emirlerini takip et"""
+
     __tablename__ = "take_profit_orders"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     trade_id = Column(Integer, ForeignKey("trades.id"), nullable=False)
     position_id = Column(String(50), nullable=False)
     symbol = Column(String(20), nullable=False)
-    
+
     entry_price = Column(Float, nullable=False)
     take_profit_price = Column(Float, nullable=False)
     take_profit_pct = Column(Float, nullable=False)  # % olarak
-    
+
     is_active = Column(Boolean, default=True)
     triggered = Column(Boolean, default=False)
     triggered_at = Column(DateTime, nullable=True)
     triggered_price = Column(Float, nullable=True)
-    
+
     # Trigger anında PnL bilgileri
     pnl_at_trigger = Column(Float, nullable=True)
     pnl_pct_at_trigger = Column(Float, nullable=True)
-    
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class StopLossNotification(Base):
     """Stop-loss/take-profit bildirimlerini kaydet"""
+
     __tablename__ = "stop_loss_notifications"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     order_id = Column(Integer, nullable=False)  # SL veya TP order ID
     symbol = Column(String(20), nullable=False)
-    
+
     notification_type = Column(String(20), nullable=False)  # STOP-LOSS, TAKE-PROFIT
     position_type = Column(String(10), nullable=False)  # LONG, SHORT
-    
+
     position_amount = Column(Float, nullable=False)
     entry_price = Column(Float, nullable=False)
     trigger_price = Column(Float, nullable=False)
     current_price = Column(Float, nullable=False)
-    
+
     # PnL bilgileri
     pnl_amount = Column(Float, nullable=False)
     pnl_percentage = Column(Float, nullable=False)
-    
+
     # Telegram bildirim durumu
     telegram_sent = Column(Boolean, default=False)
     telegram_sent_at = Column(DateTime, nullable=True)
-    
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class FeedbackSummary(Base):
     """GLM'in genel feedback'ini kaydet (retrain için)"""
+
     __tablename__ = "feedback_summary"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -221,10 +243,11 @@ def get_portfolio(session: Session, symbol: str) -> Portfolio:
     This function does NOT synchronize with trades table and may return stale data.
     """
     import warnings
+
     warnings.warn(
         "get_portfolio is deprecated, use get_synced_portfolio from app.executor.portfolio_sync",
         DeprecationWarning,
-        stacklevel=2
+        stacklevel=2,
     )
     portfolio = session.query(Portfolio).filter_by(symbol=symbol).first()
     if portfolio is None:
@@ -247,15 +270,18 @@ def get_daily_pnl(session: Session, current_date: Optional[date] = None) -> Dail
 def generate_position_id() -> str:
     """Yeni pozisyon için unique ID üret"""
     from datetime import datetime
+
     # Format: POS-YYYYMMDD-NNN
     date_str = datetime.utcnow().strftime("%Y%m%d")
     # Basit sayaç - son pozisyon ID'sini bul ve artır
     try:
         with Session(engine) as counter_session:
-            latest_trade = counter_session.query(Trade)\
-                .filter(Trade.position_id.like(f"POS-{date_str}-%"))\
-                .order_by(Trade.timestamp.desc())\
+            latest_trade = (
+                counter_session.query(Trade)
+                .filter(Trade.position_id.like(f"POS-{date_str}-%"))
+                .order_by(Trade.timestamp.desc())
                 .first()
+            )
             if latest_trade and latest_trade.position_id:
                 # Son pozisyon ID'sini parçala ve artır
                 parts = latest_trade.position_id.split("-")
@@ -267,16 +293,16 @@ def generate_position_id() -> str:
                 counter = 1
     except Exception:
         counter = 1
-    
+
     return f"POS-{date_str}-{counter:03d}"
 
 
 def record_trade(
-    session: Session, 
-    symbol: str, 
-    side: str, 
-    amount: float, 
-    price: float, 
+    session: Session,
+    symbol: str,
+    side: str,
+    amount: float,
+    price: float,
     pnl: float,
     leverage: float = 1.0,
     fees: float = 0.0,
@@ -287,7 +313,7 @@ def record_trade(
 ) -> Trade:
     """
     Record a trade
-    
+
     Args:
         side: Trade direction (BUY/SELL)
         position_side: Position type (LONG/SHORT) - for futures
@@ -298,14 +324,14 @@ def record_trade(
     """
     # Standardize notional as unleveraged position value (amount × price)
     notional_value = price * amount if price and amount else None
-    
+
     trade = Trade(
         position_id=position_id,
-        symbol=symbol, 
-        side=side, 
+        symbol=symbol,
+        side=side,
         position_side=position_side,
-        amount=amount, 
-        price=price, 
+        amount=amount,
+        price=price,
         close_price=close_price,
         leverage=leverage,
         notional_value=notional_value,
@@ -327,19 +353,19 @@ def close_open_trades(
 ) -> tuple[int, float, float]:
     """
     FIFO mantığıyla açık pozisyonları kapat ve close_price'larını güncelle.
-    
+
     Args:
         symbol: Sembol (örn: BTCUSDT)
         close_side: Kapanış trade'inin yönü (BUY veya SELL)
         close_amount: Kapatılan miktar
         close_price: Kapanış fiyatı
-    
+
     Returns:
         Tuple(updated_trade_count, realized_pnl_delta, total_closing_fee)
     """
     # Karşı yönü belirle (BUY ise SELL'leri kapat, SELL ise BUY'ları kapat)
     opposite_side = "SELL" if close_side == "BUY" else "BUY"
-    
+
     # Açık olan karşı trade'leri bul (FIFO: en eskiden yeniye)
     open_trades = (
         session.query(Trade)
@@ -348,14 +374,15 @@ def close_open_trades(
         .order_by(Trade.timestamp.asc())
         .all()
     )
-    
+
     from datetime import datetime as _dt
+
     remaining_amount = close_amount
     updated_count = 0
     realized_delta = 0.0
     closing_fee_total = 0.0
     fee_rate = float(taker_fee_rate or 0.0)
-    
+
     for trade in open_trades:
         if remaining_amount <= 0:
             break
@@ -387,7 +414,11 @@ def close_open_trades(
             closing_fee = close_price * close_part * fee_rate
             closing_fee_total += closing_fee
 
-        gross_pnl = (close_price - trade.price) * close_part if trade.side == "BUY" else (trade.price - close_price) * close_part
+        gross_pnl = (
+            (close_price - trade.price) * close_part
+            if trade.side == "BUY"
+            else (trade.price - close_price) * close_part
+        )
         new_pnl = gross_pnl - closed_open_fee - closing_fee
 
         # Trade değerlerini güncelle (kapalı kısım)
@@ -413,7 +444,9 @@ def close_open_trades(
                 close_price=close_price,  # Kapanış fiyatı (kısmi kapanışta da aynı fiyat kullanılır)
                 close_time=None,  # Bu kısım henüz kapanmadı
                 leverage=trade.leverage,
-                notional_value=(trade.price * open_remainder) if trade.price and open_remainder else None,
+                notional_value=(
+                    (trade.price * open_remainder) if trade.price and open_remainder else None
+                ),
                 fees=remaining_open_fee,
                 pnl=remaining_pnl,
                 timestamp=trade.timestamp,
@@ -446,22 +479,25 @@ def get_recent_trades(session: Session, symbol: str, limit: int = 5) -> list[Tra
 def get_open_position_details(session: Session, symbol: str, current_price: float = None) -> dict:
     # ÖNCE PORTFOLIO'YU SENKRONİZE ET
     from app.executor.portfolio_sync import get_synced_portfolio
-    
+
     portfolio = get_synced_portfolio(session, symbol)
-    
+
     # Eğer current_price verilmemişse, Binance'den al
     if current_price is None:
         try:
             import httpx
+
             response = httpx.get(
                 "https://fapi.binance.com/fapi/v1/ticker/price",
                 params={"symbol": symbol},
-                timeout=5.0
+                timeout=5.0,
             )
             current_price = float(response.json()["price"])
         except Exception:
-            current_price = portfolio.average_price if portfolio.average_price > 0 else 0.0  # Fallback
-    
+            current_price = (
+                portfolio.average_price if portfolio.average_price > 0 else 0.0
+            )  # Fallback
+
     if portfolio.position == 0:
         return {
             "position": 0.0,
@@ -471,11 +507,15 @@ def get_open_position_details(session: Session, symbol: str, current_price: floa
             "unrealized_pnl_pct": 0.0,
             "position_value": 0.0,
         }
-    
+
     unrealized_pnl = (current_price - portfolio.average_price) * portfolio.position
-    unrealized_pnl_pct = ((current_price - portfolio.average_price) / portfolio.average_price) * 100 if portfolio.average_price > 0 else 0.0
+    unrealized_pnl_pct = (
+        ((current_price - portfolio.average_price) / portfolio.average_price) * 100
+        if portfolio.average_price > 0
+        else 0.0
+    )
     position_value = portfolio.position * current_price
-    
+
     return {
         "position": portfolio.position,
         "average_price": portfolio.average_price,
@@ -529,12 +569,14 @@ def record_prediction(
     return prediction
 
 
-def get_pending_predictions(session: Session, minutes_after: int = 15, limit: int = 100) -> list[PredictionLog]:
+def get_pending_predictions(
+    session: Session, minutes_after: int = 15, limit: int = 100
+) -> list[PredictionLog]:
     """Actual result toplanmamış prediction'ları getir"""
     from datetime import timedelta
-    
+
     cutoff_time = datetime.utcnow() - timedelta(minutes=minutes_after)
-    
+
     return (
         session.query(PredictionLog)
         .filter(
@@ -602,7 +644,7 @@ def create_stop_loss_order(
 ) -> "StopLossOrder":
     """Yeni stop-loss emri oluştur"""
     stop_loss_price = entry_price * (1 + stop_loss_pct)  # SHORT için entry'nin üstü
-    
+
     order = StopLossOrder(
         trade_id=trade_id,
         position_id=position_id,
@@ -626,7 +668,7 @@ def create_take_profit_order(
 ) -> "TakeProfitOrder":
     """Yeni take-profit emri oluştur"""
     take_profit_price = entry_price * (1 - take_profit_pct)  # SHORT için entry'nin altı
-    
+
     order = TakeProfitOrder(
         trade_id=trade_id,
         position_id=position_id,
@@ -757,11 +799,11 @@ def get_open_position_with_exit_plan(session: Session, symbol: str) -> Optional[
     """
     Açık pozisyonu exit plan ile birlikte getir
     Position monitor için kullanılır
-    
+
     Args:
         session: Database session
         symbol: Trading symbol (e.g., BTCUSDT)
-    
+
     Returns:
         {
             'position_id': str,
@@ -777,17 +819,17 @@ def get_open_position_with_exit_plan(session: Session, symbol: str) -> Optional[
         } or None if no open position
     """
     from app.executor.portfolio_sync import get_synced_portfolio
-    
+
     # FIX: Session cache'i temizle - güncel veriyi DB'den çek
     # Bu, dynamic exit plan güncellemelerinin görünmesini sağlar
     session.expire_all()
-    
+
     # Portfolio'yu kontrol et
     portfolio = get_synced_portfolio(session, symbol)
-    
+
     if abs(portfolio.position) < 0.0001:  # Pozisyon yok
         return None
-    
+
     # En son açık trade'i bul
     open_trade = (
         session.query(Trade)
@@ -796,12 +838,12 @@ def get_open_position_with_exit_plan(session: Session, symbol: str) -> Optional[
         .order_by(Trade.timestamp.desc())
         .first()
     )
-    
+
     if not open_trade:
         return None
-    
+
     is_long = portfolio.position > 0
-    
+
     return {
         "position_id": open_trade.position_id,
         "trade_id": open_trade.id,

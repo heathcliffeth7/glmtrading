@@ -1,11 +1,11 @@
 """Prediction logging for active learning"""
+
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
 from app.executor.ledger import engine, record_prediction
 from app.utils.logging import get_logger
-
 
 logger = get_logger(__name__)
 
@@ -20,7 +20,7 @@ def log_prediction(
 ) -> int:
     """
     Active Learning: Agent prediction'ını kaydet
-    
+
     Args:
         symbol: Trading symbol (e.g., "BTCUSDT")
         features: Feature dictionary with keys:
@@ -33,7 +33,7 @@ def log_prediction(
         predicted_direction: BUY/SELL/HOLD
         confidence: Confidence level (0-1)
         trade_id: Optional trade ID if trade was executed
-    
+
     Returns:
         prediction_id: Created prediction log ID
     """
@@ -49,7 +49,7 @@ def log_prediction(
                 trade_id=trade_id,
             )
             session.commit()
-            
+
             logger.info(
                 "Prediction logged: id=%d symbol=%s direction=%s score=%.4f confidence=%.4f",
                 prediction.id,
@@ -58,9 +58,9 @@ def log_prediction(
                 model_score,
                 confidence,
             )
-            
+
             return prediction.id
-            
+
     except Exception as exc:
         logger.error("Failed to log prediction: %s", exc, exc_info=True)
         return -1

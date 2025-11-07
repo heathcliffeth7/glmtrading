@@ -1,7 +1,6 @@
 import logging
 from typing import Optional
 
-
 _base_configured = False
 
 
@@ -50,8 +49,12 @@ def configure_logging(level: str = "INFO") -> None:
 
     handler_exists = any(isinstance(h, TelegramLogHandler) for h in app_logger.handlers)
     if not handler_exists:
-        handler = TelegramLogHandler(level=logging.WARNING)  # Only send WARNING and ERROR to Telegram
-        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
+        handler = TelegramLogHandler(
+            level=logging.WARNING
+        )  # Only send WARNING and ERROR to Telegram
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+        )
         app_logger.addHandler(handler)
 
 

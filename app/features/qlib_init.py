@@ -7,7 +7,6 @@ import qlib
 from app.config.settings import get_settings
 from app.utils.logging import configure_logging, get_logger
 
-
 settings = get_settings()
 configure_logging(settings.log_level)
 logger = get_logger(__name__)

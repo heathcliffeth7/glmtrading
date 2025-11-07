@@ -12,5 +12,4 @@ class AgentSignal:
 
 
 class Agent(Protocol):
-    def generate_signal(self) -> AgentSignal:
-        ...
+    def generate_signal(self) -> AgentSignal: ...

@@ -16,19 +16,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
-from app.executor.executor import Executor
-from app.executor.ledger import engine, Portfolio
 from sqlalchemy.orm import Session
-from app.utils.influx import (
-    query_latest_snapshot,
-    query_historical_snapshots,
-)
 
+from app.executor.executor import Executor
+from app.executor.ledger import Portfolio, engine
+from app.utils.influx import query_historical_snapshots, query_latest_snapshot
 
 SYMBOL = "BTCUSDT"
 
 
-def _get_arrays(measurement: str, interval: str, fields: List[str], limit: int = 10) -> Dict[str, List[float]]:
+def _get_arrays(
+    measurement: str, interval: str, fields: List[str], limit: int = 10
+) -> Dict[str, List[float]]:
     snaps = query_historical_snapshots(measurement, SYMBOL, interval, limit=limit)
     arrays: Dict[str, List[float]] = {k: [] for k in fields}
     for s in snaps:
@@ -56,7 +55,9 @@ def _effective_leverage(exposure: float, margin_used: float) -> float:
     return abs(exposure) / max(margin_used, eps)
 
 
-def _estimate_liquidation_price(entry: float, qty: float, eff_lev: float, mmr: float = 0.004) -> float | None:
+def _estimate_liquidation_price(
+    entry: float, qty: float, eff_lev: float, mmr: float = 0.004
+) -> float | None:
     """
     Approximate liquidation price for linear USDT-M futures ignoring fees/funding.
     Long:  Liq ≈ entry * (1 - 1/lev + mmr)
@@ -71,7 +72,9 @@ def _estimate_liquidation_price(entry: float, qty: float, eff_lev: float, mmr: f
         return entry * (1.0 + (1.0 / eff_lev) - mmr)
 
 
-def _suggest_tp_sl(entry: float, qty: float, atr: float | None, ema50: float | None) -> Dict[str, Any]:
+def _suggest_tp_sl(
+    entry: float, qty: float, atr: float | None, ema50: float | None
+) -> Dict[str, Any]:
     """
     Suggest TP/SL based on ATR14 (30m). Defaults: TP = entry ± 1.5*ATR, SL = entry ∓ 1.0*ATR.
     Also include an invalidation condition using EMA50 (30m).
@@ -86,17 +89,26 @@ def _suggest_tp_sl(entry: float, qty: float, atr: float | None, ema50: float | N
     if qty > 0:  # LONG
         tp = entry + k_tp * atr
         sl = max(0.0, entry - k_sl * atr)
-        inval = "If the price closes below EMA50 (30m)" if ema50 and ema50 > 0 else "If 30m closes below prior swing low"
+        inval = (
+            "If the price closes below EMA50 (30m)"
+            if ema50 and ema50 > 0
+            else "If 30m closes below prior swing low"
+        )
     else:  # SHORT
         tp = max(0.0, entry - k_tp * atr)
         sl = entry + k_sl * atr
-        inval = "If the price closes above EMA50 (30m)" if ema50 and ema50 > 0 else "If 30m closes above prior swing high"
+        inval = (
+            "If the price closes above EMA50 (30m)"
+            if ema50 and ema50 > 0
+            else "If 30m closes above prior swing high"
+        )
     return {"profit_target": tp, "stop_loss": sl, "invalidation_condition": inval}
 
 
 def _compute_sharpe_from_prices(prices: List[float]) -> float | None:
     """Compute annualized Sharpe from 30m close prices (log returns)."""
     import math
+
     if not prices or len(prices) < 5:
         return None
     rets: List[float] = []
@@ -157,11 +169,13 @@ def generate_btc_report() -> Tuple[Dict[str, Any], str]:
         fields=["close", "ema_20", "macd", "rsi_7", "rsi_14"],
         limit=30,
     )
+
     def _downsample_3m(d: Dict[str, List[float]]) -> Dict[str, List[float]]:
         out: Dict[str, List[float]] = {}
         for k, v in d.items():
             out[k] = v[::3] if v else []
         return out
+
     arr_1m = _downsample_3m(arr_1m_full)
 
     # Main 30m snapshot
@@ -178,19 +192,40 @@ def generate_btc_report() -> Tuple[Dict[str, Any], str]:
     fut = {}
     try:
         import httpx
+
         base = "https://fapi.binance.com"
         with httpx.Client(base_url=base, timeout=5.0) as client:
-            oi = client.get("/futures/data/openInterestHist", params={"symbol": SYMBOL, "period": "5m", "limit": 20}).json()
+            oi = client.get(
+                "/futures/data/openInterestHist",
+                params={"symbol": SYMBOL, "period": "5m", "limit": 20},
+            ).json()
             fr = client.get("/fapi/v1/fundingRate", params={"symbol": SYMBOL, "limit": 1}).json()
-            lsr = client.get("/futures/data/globalLongShortAccountRatio", params={"symbol": SYMBOL, "period": "5m", "limit": 1}).json()
-        oi_vals = [float(x.get("sumOpenInterestValue", 0) or 0) for x in oi] if isinstance(oi, list) else []
+            lsr = client.get(
+                "/futures/data/globalLongShortAccountRatio",
+                params={"symbol": SYMBOL, "period": "5m", "limit": 1},
+            ).json()
+        oi_vals = (
+            [float(x.get("sumOpenInterestValue", 0) or 0) for x in oi]
+            if isinstance(oi, list)
+            else []
+        )
         oi_latest = oi_vals[-1] if oi_vals else 0.0
         oi_avg = sum(oi_vals) / len(oi_vals) if oi_vals else 0.0
         funding = float(fr[0].get("fundingRate", 0.0)) if isinstance(fr, list) and fr else 0.0
         lsr_v = float(lsr[0].get("longShortRatio", 0.0)) if isinstance(lsr, list) and lsr else 0.0
-        fut = {"open_interest": oi_latest, "open_interest_avg": oi_avg, "funding_rate": funding, "long_short_ratio": lsr_v}
+        fut = {
+            "open_interest": oi_latest,
+            "open_interest_avg": oi_avg,
+            "funding_rate": funding,
+            "long_short_ratio": lsr_v,
+        }
     except Exception:
-        fut = {"open_interest": 0.0, "open_interest_avg": 0.0, "funding_rate": 0.0, "long_short_ratio": 0.0}
+        fut = {
+            "open_interest": 0.0,
+            "open_interest_avg": 0.0,
+            "funding_rate": 0.0,
+            "long_short_ratio": 0.0,
+        }
 
     report: Dict[str, Any] = {
         "current_price": float(price),
@@ -283,7 +318,9 @@ def generate_btc_report() -> Tuple[Dict[str, Any], str]:
     fr = report["futures"]
     lines.append("In addition, here is the latest BTC open interest and funding rate for perps:")
     lines.append("")
-    lines.append(f"Open Interest: Latest: {fr['open_interest']:.2f} Average: {fr['open_interest_avg']:.2f}")
+    lines.append(
+        f"Open Interest: Latest: {fr['open_interest']:.2f} Average: {fr['open_interest_avg']:.2f}"
+    )
     lines.append("")
     lines.append(f"Funding Rate: {fr['funding_rate']}")
     lines.append("")
@@ -351,14 +388,19 @@ def generate_btc_report() -> Tuple[Dict[str, Any], str]:
     symbols = ["ETHUSDT", "SOLUSDT", "XRPUSDT", "BTCUSDT", "DOGEUSDT", "BNBUSDT"]
     positions_txt = []
     positions_json: List[Dict[str, Any]] = []
+
     def _resolve_price_simple(sym: str) -> float:
         try:
             import httpx
-            r = httpx.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": sym}, timeout=5.0)
+
+            r = httpx.get(
+                "https://api.binance.com/api/v3/ticker/price", params={"symbol": sym}, timeout=5.0
+            )
             r.raise_for_status()
             return float(r.json()["price"])
         except Exception:
             return 0.0
+
     with Session(engine) as session:
         for sym in symbols:
             # Portfolio row (may be absent)
@@ -370,7 +412,9 @@ def generate_btc_report() -> Tuple[Dict[str, Any], str]:
             # leverage approx via exposure/margin for that symbol
             exe_sym = Executor(symbol=sym)
             pm_sym = exe_sym.portfolio_metrics()
-            eff_lev_sym = _effective_leverage(pm_sym.get("exposure", 0.0), pm_sym.get("margin_used", 0.0))
+            eff_lev_sym = _effective_leverage(
+                pm_sym.get("exposure", 0.0), pm_sym.get("margin_used", 0.0)
+            )
             liq_sym = _estimate_liquidation_price(entry, qty, eff_lev_sym)
             # ATR(30m) for TP/SL
             snap30 = query_latest_snapshot("enriched_30min", sym, "30min") or {}
@@ -409,7 +453,9 @@ def generate_btc_report() -> Tuple[Dict[str, Any], str]:
 
 
 def main() -> None:
-    import argparse, json
+    import argparse
+    import json
+
     parser = argparse.ArgumentParser(description="BTC single-asset report")
     parser.add_argument("--json", action="store_true", help="Print JSON report")
     parser.add_argument("--text", action="store_true", help="Print text report")

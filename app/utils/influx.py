@@ -10,7 +10,6 @@ from influxdb_client.rest import ApiException
 from app.config.settings import get_settings
 from app.utils.logging import get_logger
 
-
 settings = get_settings()
 logger = get_logger(__name__)
 
@@ -32,14 +31,19 @@ def _influx_retry(func):
                 if attempt == max_retries - 1:
                     logger.error("InfluxDB API error after %d attempts: %s", max_retries, e)
                     raise
-                logger.warning("InfluxDB API error (attempt %d/%d): %s", attempt + 1, max_retries, e)
-                time.sleep(retry_delay * (2 ** attempt))
+                logger.warning(
+                    "InfluxDB API error (attempt %d/%d): %s", attempt + 1, max_retries, e
+                )
+                time.sleep(retry_delay * (2**attempt))
             except Exception as e:
                 if attempt == max_retries - 1:
                     logger.error("InfluxDB connection error after %d attempts: %s", max_retries, e)
                     raise
-                logger.warning("InfluxDB connection error (attempt %d/%d): %s", attempt + 1, max_retries, e)
-                time.sleep(retry_delay * (2 ** attempt))
+                logger.warning(
+                    "InfluxDB connection error (attempt %d/%d): %s", attempt + 1, max_retries, e
+                )
+                time.sleep(retry_delay * (2**attempt))
+
     return wrapper
 
 
@@ -48,9 +52,9 @@ def _ensure_client() -> None:
     if _client is None:
         # Only log once per process to avoid noise from multiple worker processes
         if not _client_initialized_logged:
-            logger.info("InfluxDB client initializing (PID: %d)", __import__('os').getpid())
+            logger.info("InfluxDB client initializing (PID: %d)", __import__("os").getpid())
             _client_initialized_logged = True
-        
+
         _client = InfluxDBClient(
             url=str(settings.influx.url),
             token=settings.influx.token,
@@ -60,36 +64,40 @@ def _ensure_client() -> None:
         _query_api = _client.query_api()
     elif not _client_initialized_logged:
         # Client exists but we haven't logged yet (shouldn't happen, but defensive)
-        logger.debug("InfluxDB client already initialized (PID: %d)", __import__('os').getpid())
+        logger.debug("InfluxDB client already initialized (PID: %d)", __import__("os").getpid())
         _client_initialized_logged = True
 
 
 @_influx_retry
-def write_measurement(measurement: str, tags: Dict[str, str], fields: Dict[str, Any], timestamp: datetime) -> None:
+def write_measurement(
+    measurement: str, tags: Dict[str, str], fields: Dict[str, Any], timestamp: datetime
+) -> None:
     _ensure_client()
     point = Point(measurement)
     for key, value in tags.items():
         point = point.tag(key, value)
-    
+
     # Debug: Log fields being written
-    if 'high' in fields or 'low' in fields:
-        logger.debug("Writing %s with OHLCV: close=%.2f high=%.2f low=%.2f volume=%.2f",
-                   measurement, 
-                   fields.get('close', 0), 
-                   fields.get('high', 0), 
-                   fields.get('low', 0), 
-                   fields.get('volume', 0))
-    
+    if "high" in fields or "low" in fields:
+        logger.debug(
+            "Writing %s with OHLCV: close=%.2f high=%.2f low=%.2f volume=%.2f",
+            measurement,
+            fields.get("close", 0),
+            fields.get("high", 0),
+            fields.get("low", 0),
+            fields.get("volume", 0),
+        )
+
     for key, value in fields.items():
         # Skip None values and non-numeric timestamp fields
         if value is None:
             logger.warning("Skipping None field: %s in measurement %s", key, measurement)
             continue
-        if key == 'timestamp' and isinstance(value, str):
+        if key == "timestamp" and isinstance(value, str):
             # Skip timestamp field - it's already set via point.time()
             continue
         point = point.field(key, value)
-    
+
     point = point.time(timestamp, WritePrecision.NS)
     _write_api.write(bucket=settings.influx.bucket, record=point)
     logger.debug("Successfully wrote measurement %s with tags %s", measurement, tags)
@@ -99,7 +107,7 @@ def write_measurement(measurement: str, tags: Dict[str, str], fields: Dict[str, 
 def write_point(point_dict: Dict[str, Any]) -> None:
     """
     Write a point to InfluxDB using dict-based API
-    
+
     Args:
         point_dict: Dict with keys: 'measurement', 'tags', 'fields', 'time'
     """
@@ -107,7 +115,7 @@ def write_point(point_dict: Dict[str, Any]) -> None:
     tags = point_dict.get("tags", {})
     fields = point_dict["fields"]
     timestamp = point_dict.get("time", datetime.utcnow())
-    
+
     write_measurement(measurement, tags, fields, timestamp)
 
 
@@ -124,7 +132,12 @@ def query_latest(measurement: str, symbol: str, interval: str) -> Dict[str, Any]
     """
     tables = _query_api.query(query)
     if not tables:
-        logger.debug("No data found for measurement %s, symbol %s, interval %s", measurement, symbol, interval)
+        logger.debug(
+            "No data found for measurement %s, symbol %s, interval %s",
+            measurement,
+            symbol,
+            interval,
+        )
         return None
     record = tables[0].records[0]
     result = {
@@ -177,7 +190,9 @@ def query_latest_snapshot(measurement: str, symbol: str, interval: str) -> Dict[
         return None
 
 
-def query_range(measurement: str, symbol: str, interval: str, minutes: int = 120) -> List[Dict[str, Any]]:
+def query_range(
+    measurement: str, symbol: str, interval: str, minutes: int = 120
+) -> List[Dict[str, Any]]:
     _ensure_client()
     query = f"""
     from(bucket: "{settings.influx.bucket}")
@@ -221,20 +236,25 @@ def query_historical_snapshots(
       |> limit(n: {limit})
       |> sort(columns: ["_time"], desc: false)
     """
-    
+
     try:
         tables = _query_api.query(query)
         snapshots = []
-        
+
         for table in tables:
             for record in table.records:
                 snapshot = {"timestamp": record.get_time().isoformat()}
                 # Extract all fields
                 for key, value in record.values.items():
-                    if not key.startswith("_") and key not in ("result", "table", "symbol", "interval"):
+                    if not key.startswith("_") and key not in (
+                        "result",
+                        "table",
+                        "symbol",
+                        "interval",
+                    ):
                         snapshot[key] = value
                 snapshots.append(snapshot)
-        
+
         return snapshots
     except Exception as exc:
         logger.warning("Failed to fetch historical snapshots: %s", exc)
@@ -253,7 +273,7 @@ def query_range_between(
     # Format timestamps for Flux (RFC3339)
     start_str = start.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_str = end.strftime("%Y-%m-%dT%H:%M:%SZ")
-    
+
     query = f"""
 from(bucket: "{settings.influx.bucket}")
   |> range(start: {start_str}, stop: {end_str})
@@ -300,7 +320,9 @@ def check_health() -> Dict[str, Any]:
 def test_connection() -> bool:
     try:
         _ensure_client()
-        query = f'buckets() |> filter(fn: (r) => r.name == "{settings.influx.bucket}") |> limit(n:1)'
+        query = (
+            f'buckets() |> filter(fn: (r) => r.name == "{settings.influx.bucket}") |> limit(n:1)'
+        )
         tables = _query_api.query(query)
         success = len(tables) > 0
         if success:
@@ -316,50 +338,50 @@ def test_connection() -> bool:
 def _fetch_binance_historical_price(symbol: str, target_time: datetime) -> float | None:
     """
     Fallback: Fetch historical price from Binance Spot API
-    
+
     Args:
         symbol: Trading symbol (e.g., BTCUSDT)
         target_time: Target timestamp
-    
+
     Returns:
         Close price at that time, or None if not found
     """
     try:
         import httpx
-        
+
         # Convert to milliseconds timestamp
         target_ms = int(target_time.timestamp() * 1000)
-        
+
         # Fetch 5-minute klines around target time (±10 minutes = 4 klines)
         # Binance klines endpoint: /api/v3/klines
         params = {
             "symbol": symbol,
             "interval": "5m",
             "startTime": target_ms - (10 * 60 * 1000),  # 10 min before
-            "endTime": target_ms + (10 * 60 * 1000),    # 10 min after
+            "endTime": target_ms + (10 * 60 * 1000),  # 10 min after
             "limit": 10,
         }
-        
+
         response = httpx.get("https://api.binance.com/api/v3/klines", params=params, timeout=10.0)
         response.raise_for_status()
         klines = response.json()
-        
+
         if not klines:
             logger.warning("Binance returned no klines for %s at %s", symbol, target_time)
             return None
-        
+
         # Find closest kline to target time
         # Kline format: [open_time, open, high, low, close, volume, close_time, ...]
         closest_kline = None
-        min_diff = float('inf')
-        
+        min_diff = float("inf")
+
         for kline in klines:
             kline_time_ms = int(kline[0])
             time_diff = abs(kline_time_ms - target_ms)
             if time_diff < min_diff:
                 min_diff = time_diff
                 closest_kline = kline
-        
+
         if closest_kline:
             close_price = float(closest_kline[4])  # Close price is 5th element
             logger.info(
@@ -373,7 +395,7 @@ def _fetch_binance_historical_price(symbol: str, target_time: datetime) -> float
         else:
             logger.warning("Could not find closest kline from Binance for %s", symbol)
             return None
-            
+
     except Exception as e:
         logger.error("Binance fallback failed: %s", e)
         return None
@@ -387,25 +409,25 @@ def query_price_at_time(
 ) -> float | None:
     """
     Query price at a specific time (for feedback collection)
-    
+
     Args:
         symbol: Trading symbol
         target_time: Target timestamp
         interval: Data interval
         window_minutes: Time window to search around target
-    
+
     Returns:
         Close price at that time, or None if not found
     """
     _ensure_client()
-    
+
     # Search window around target time
     start = target_time - timedelta(minutes=window_minutes)
     end = target_time + timedelta(minutes=window_minutes)
-    
+
     start_str = start.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_str = end.strftime("%Y-%m-%dT%H:%M:%SZ")
-    
+
     query = f"""
 from(bucket: "{settings.influx.bucket}")
   |> range(start: {start_str}, stop: {end_str})
@@ -415,15 +437,22 @@ from(bucket: "{settings.influx.bucket}")
   |> sort(columns: ["_time"], desc: false)
   |> limit(n: 1)
     """
-    
+
     try:
         tables = _query_api.query(query)
         if tables and tables[0].records:
             price = float(tables[0].records[0].get_value())
-            logger.debug("Found price %.2f at %s (±%d min window)", price, target_time, window_minutes)
+            logger.debug(
+                "Found price %.2f at %s (±%d min window)", price, target_time, window_minutes
+            )
             return price
         else:
-            logger.warning("No price found in InfluxDB for %s at %s (±%d min), trying Binance fallback", symbol, target_time, window_minutes)
+            logger.warning(
+                "No price found in InfluxDB for %s at %s (±%d min), trying Binance fallback",
+                symbol,
+                target_time,
+                window_minutes,
+            )
             # Fallback: Fetch from Binance historical klines
             return _fetch_binance_historical_price(symbol, target_time)
     except Exception as e:
@@ -457,13 +486,16 @@ def detect_htf_support_resistance(symbol, htf_interval="1h", current_price=None)
     try:
         _ensure_client()
         settings = get_settings()
-        
+
         # Gerçek fiyatı al
         if current_price is None:
             try:
                 import httpx
+
                 with httpx.Client() as client:
-                    response = client.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}")
+                    response = client.get(
+                        f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+                    )
                     if response.status_code == 200:
                         data = response.json()
                         current_price = float(data["price"])
@@ -471,23 +503,23 @@ def detect_htf_support_resistance(symbol, htf_interval="1h", current_price=None)
             except Exception as e:
                 logger.warning(f"Binance API fiyat alınamadı: {e}")
                 current_price = 110000.0  # Güncel fallback
-        
+
         # Gerçek veriyi çek - basit query ile
         try:
-            snapshot = query_latest_snapshot('enriched_15min', symbol, '15min')
+            snapshot = query_latest_snapshot("enriched_15min", symbol, "15min")
             if snapshot:
                 # Gerçek veri varsa kullan
-                price = current_price or snapshot.get('close', current_price)
-                high = snapshot.get('high', price)
-                low = snapshot.get('low', price)
-                
+                price = current_price or snapshot.get("close", current_price)
+                high = snapshot.get("high", price)
+                low = snapshot.get("low", price)
+
                 # Basit destek/direnç analizi - mevcut veriye göre
                 # Eğer fiyat close'a yakınsa nötr, low'a yakınsa destek, high'a yakınsa direnç
-                close_price = snapshot.get('close', price)
-                
+                close_price = snapshot.get("close", price)
+
                 in_support = abs(price - low) / price < 0.02  # %2 içinde low'a yakın
                 in_resistance = abs(price - high) / price < 0.02  # %2 içinde high'a yakın
-                
+
                 result = {
                     "status": "success",
                     "current_price": price,
@@ -496,33 +528,35 @@ def detect_htf_support_resistance(symbol, htf_interval="1h", current_price=None)
                     "nearest_support": low,
                     "nearest_resistance": high,
                     "htf_interval": htf_interval,
-                    "note": "real_data_simple"
+                    "note": "real_data_simple",
                 }
             else:
                 # Fallback: gerçek fiyat ile dummy sonuç
                 result = {
-                    "status": "success", 
+                    "status": "success",
                     "current_price": current_price,
                     "in_support_zone": False,
                     "in_resistance_zone": False,
                     "htf_interval": htf_interval,
-                    "note": "fallback_mode_real_price"
+                    "note": "fallback_mode_real_price",
                 }
         except Exception as query_error:
             logger.warning(f"HTF query hatası: {query_error}")
             # Fallback: gerçek fiyat ile dummy sonuç
             result = {
-                "status": "success", 
+                "status": "success",
                 "current_price": current_price,
                 "in_support_zone": False,
                 "in_resistance_zone": False,
                 "htf_interval": htf_interval,
-                "note": "fallback_mode_real_price"
+                "note": "fallback_mode_real_price",
             }
-        
-        logger.debug("HTF analiz tamamlandı: %s - Fiyat: %.2f", symbol, result.get('current_price', 0))
+
+        logger.debug(
+            "HTF analiz tamamlandı: %s - Fiyat: %.2f", symbol, result.get("current_price", 0)
+        )
         return result
-        
+
     except Exception as e:
         logger.error("HTF analiz hatası: %s", e)
         return {"status": "error", "error": str(e)}

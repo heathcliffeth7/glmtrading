@@ -9,6 +9,7 @@ This migration adds support for:
 Usage:
     python migrations/multi_position_hedge_support.py
 """
+
 import sys
 from pathlib import Path
 
@@ -17,6 +18,7 @@ sys.path.insert(0, str(project_root))
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
 from app.executor.ledger import engine
 from app.utils.logging import get_logger
 
@@ -25,7 +27,7 @@ logger = get_logger(__name__)
 
 def run_migration():
     """Run the multi-position hedge support migration"""
-    
+
     migration_sql = """
     DO $$
     BEGIN
@@ -144,37 +146,37 @@ def run_migration():
         )
     WHERE p.last_trade_price IS NULL;
     """
-    
+
     try:
         with Session(engine) as session:
             logger.info("Running migration: multi_position_hedge_support")
-            
+
             session.execute(text(migration_sql))
             session.commit()
-            
+
             logger.info("✅ Migration completed successfully")
             logger.info("   - New columns added to 'portfolio' table:")
             logger.info("     * long_position, long_avg_price")
             logger.info("     * short_position, short_avg_price")
             logger.info("     * net_position")
             logger.info("     * last_trade_price, last_trade_timestamp")
-            
+
             # Verify migration
-            count_result = session.execute(
-                text("SELECT COUNT(*) FROM portfolio")
-            )
+            count_result = session.execute(text("SELECT COUNT(*) FROM portfolio"))
             portfolio_count = count_result.scalar()
-            
+
             migrated_result = session.execute(
-                text("SELECT COUNT(*) FROM portfolio WHERE net_position != 0 OR long_position != 0 OR short_position != 0")
+                text(
+                    "SELECT COUNT(*) FROM portfolio WHERE net_position != 0 OR long_position != 0 OR short_position != 0"
+                )
             )
             migrated_count = migrated_result.scalar()
-            
+
             logger.info(f"   - Total portfolios: {portfolio_count}")
             logger.info(f"   - Migrated portfolios: {migrated_count}")
-            
+
             return True
-            
+
     except Exception as e:
         logger.error(f"❌ Migration failed: {e}", exc_info=True)
         return False
@@ -184,9 +186,9 @@ if __name__ == "__main__":
     logger.info("=" * 70)
     logger.info("DATABASE MIGRATION: Multi-Position Hedge Support + Fee Tracking")
     logger.info("=" * 70)
-    
+
     success = run_migration()
-    
+
     if success:
         logger.info("=" * 70)
         logger.info("MIGRATION SUCCESSFUL")

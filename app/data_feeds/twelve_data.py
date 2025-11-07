@@ -11,7 +11,6 @@ from app.data_feeds.constants import HEALTH_CHANNEL, KLINE_CHANNEL, TWELVEDATA_C
 from app.utils.logging import get_logger
 from app.utils.redis import publish
 
-
 settings = get_settings()
 logger = get_logger(__name__)
 
@@ -20,8 +19,8 @@ logger = get_logger(__name__)
 # All standard indicators (RSI, MACD, EMA, BB, Stoch, ATR, etc.) are now calculated from Binance klines
 # This reduces API calls by 80% (15 → 3 indicators)
 INDICATORS: List[str] = [
-    "ichimoku",         # Ichimoku Cloud - complex calculation with future projections
-    "sar",              # Parabolic SAR - complex trailing stop algorithm
+    "ichimoku",  # Ichimoku Cloud - complex calculation with future projections
+    "sar",  # Parabolic SAR - complex trailing stop algorithm
     "pivot_points_hl",  # Pivot Points - requires daily high/low (not available from 5min klines)
 ]
 
@@ -125,11 +124,11 @@ class TwelveDataClient:
             else:
                 del self._rate_limited_keys[key]  # Block expired
                 logger.info("Rate limit block expired for key")
-        
+
         # Check daily quota
         if self._usage[key] >= self._quota_per_key:
             return False
-        
+
         return True
 
     def _get_key(self) -> str:
@@ -140,7 +139,7 @@ class TwelveDataClient:
             self._rate_limited_keys.clear()  # Reset all blocks
             self._window_start = datetime.utcnow()
             logger.info("Daily quota reset, all keys available")
-        
+
         # Try all keys
         for _ in range(len(self._keys)):
             key = self._keys[0]
@@ -149,15 +148,15 @@ class TwelveDataClient:
                 self._keys.rotate(-1)
                 return key
             self._keys.rotate(-1)
-        
+
         # No key available
         available = sum(1 for k in self._keys if self._is_key_available(k))
         blocked = len(self._rate_limited_keys)
         quota_exhausted = sum(1 for k in self._keys if self._usage.get(k, 0) >= self._quota_per_key)
-        
+
         detail = f"No usable keys: {available}/{len(self._keys)} available, {blocked} rate-limited, {quota_exhausted} quota-exhausted"
         logger.error(detail)
-        
+
         publish(
             HEALTH_CHANNEL,
             {
@@ -169,11 +168,13 @@ class TwelveDataClient:
         )
         raise RuntimeError("All Twelve Data API keys exhausted or rate limited")
 
-    async def fetch_indicator(self, symbol: str, indicator: str, interval: str = "30min") -> IndicatorPayload:
+    async def fetch_indicator(
+        self, symbol: str, indicator: str, interval: str = "30min"
+    ) -> IndicatorPayload:
         max_retries = len(self._keys)  # Try all available keys
         last_error = None
         used_key = None
-        
+
         for attempt in range(max_retries):
             try:
                 used_key = self._get_key()
@@ -184,7 +185,7 @@ class TwelveDataClient:
                 }
                 url = f"/{indicator}"
                 response = await self._client.get(url, params=params)
-                
+
                 # Check for rate limit in response body first
                 data = response.json()
                 if isinstance(data, dict) and data.get("code") == 429:
@@ -197,14 +198,14 @@ class TwelveDataClient:
                     )
                     await asyncio.sleep(0.5)  # Brief pause before retry
                     continue
-                
+
                 response.raise_for_status()
-                
+
                 if "status" in data and data["status"] != "ok":
                     raise ValueError(f"Twelve Data error: {data}")
-                
+
                 return IndicatorPayload(indicator=indicator, symbol=symbol, data=data)
-                
+
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429 and used_key:
                     self._mark_rate_limited(used_key, block_duration_seconds=60)
@@ -226,7 +227,7 @@ class TwelveDataClient:
                 last_error = exc
                 if attempt == max_retries - 1:
                     raise
-        
+
         # If all retries failed
         if last_error:
             raise last_error
@@ -241,7 +242,7 @@ class TwelveDataClient:
         max_retries = len(self._keys)  # Try all available keys
         last_error = None
         used_key = None
-        
+
         for attempt in range(max_retries):
             try:
                 used_key = self._get_key()
@@ -252,7 +253,7 @@ class TwelveDataClient:
                     "apikey": used_key,
                 }
                 response = await self._client.get("/time_series", params=params)
-                
+
                 # Check for rate limit in response body first
                 data = response.json()
                 if isinstance(data, dict) and data.get("code") == 429:
@@ -264,17 +265,17 @@ class TwelveDataClient:
                     )
                     await asyncio.sleep(0.5)
                     continue
-                
+
                 response.raise_for_status()
-                
+
                 if data.get("status") != "ok":
                     raise ValueError(f"Twelve Data error: {data}")
-                
+
                 values = data.get("values", [])
                 if not values:
                     return []
                 return [TimeSeriesBar.from_api(symbol, item) for item in values]
-                
+
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429 and used_key:
                     self._mark_rate_limited(used_key, block_duration_seconds=60)
@@ -295,7 +296,7 @@ class TwelveDataClient:
                 last_error = exc
                 if attempt == max_retries - 1:
                     raise
-        
+
         if last_error:
             raise last_error
         raise RuntimeError("All API keys exhausted for time_series")
@@ -307,7 +308,9 @@ async def poll(symbol: str, interval: int, handler: Callable[[IndicatorPayload],
     while True:
         for indicator in INDICATORS:
             try:
-                payload = await client.fetch_indicator(symbol=symbol, indicator=indicator, interval="5min")
+                payload = await client.fetch_indicator(
+                    symbol=symbol, indicator=indicator, interval="5min"
+                )
                 handler(payload)
                 publish(
                     TWELVEDATA_CHANNEL,
@@ -358,8 +361,12 @@ async def poll_time_series(
 
     while True:
         try:
-            bars = await client.fetch_time_series(symbol=symbol, interval=interval, outputsize=outputsize)
-            new_bars = [bar for bar in bars if last_timestamp is None or bar.timestamp > last_timestamp]
+            bars = await client.fetch_time_series(
+                symbol=symbol, interval=interval, outputsize=outputsize
+            )
+            new_bars = [
+                bar for bar in bars if last_timestamp is None or bar.timestamp > last_timestamp
+            ]
             new_bars.sort(key=lambda bar: bar.timestamp)
             for bar in new_bars:
                 handler(bar)

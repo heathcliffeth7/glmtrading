@@ -9,7 +9,6 @@ from app.utils.latency import get_latency_tracker
 from app.utils.logging import get_logger
 from app.utils.rate_limiter import SlidingWindowRateLimiter
 
-
 settings = get_settings()
 logger = get_logger(__name__)
 
@@ -26,20 +25,22 @@ class GLMClient:
         # Optimized timeout: 300s total, 270s read - 5 minute timeout for very slow GLM API responses
         self._client = httpx.Client(timeout=httpx.Timeout(300.0, connect=5.0, read=270.0))
 
-    def request(self, messages: List[Dict[str, str]], trace_id: Optional[str] = None) -> Dict[str, Any]:
+    def request(
+        self, messages: List[Dict[str, str]], trace_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Send request to GLM API with latency tracking
-        
+
         Args:
             messages: List of message dicts for GLM
             trace_id: Optional trace ID for latency tracking
-        
+
         Returns:
             GLM API response
         """
         if not self._limiter.hit():
             raise RuntimeError("GLM API kotası aşıldı")
-        
+
         # LATENCY TRACKING: Stage 5d - GLM Request Submitted
         if trace_id:
             tracker = get_latency_tracker()
@@ -49,14 +50,14 @@ class GLMClient:
                 # Write final latency metrics
                 tracker.write_latency_metrics(trace)
                 logger.info("📊 End-to-end latency trace completed: %s", trace.get_summary())
-        
+
         payload = {
             "model": self._model,
             "messages": messages,
             "stream": False,
             "max_tokens": 32768,  # 32K output tokens - tam yanıt için yeterli
         }
-        
+
         # === PAYLOAD LOGGING VE DOĞRULAMA ===
         # Her message'ın content uzunluğunu kontrol et
         total_content_length = 0
@@ -70,11 +71,11 @@ class GLMClient:
                 msg.get("role", "unknown"),
                 content_len,
             )
-        
+
         # JSON serialization sonrası body size kontrolü
         try:
             json_body = json.dumps(payload, ensure_ascii=False)
-            body_size_bytes = len(json_body.encode('utf-8'))
+            body_size_bytes = len(json_body.encode("utf-8"))
             body_size_kb = body_size_bytes / 1024
             logger.info(
                 "📤 GLM Payload Stats: %d messages, %d total content chars, "
@@ -83,23 +84,21 @@ class GLMClient:
                 total_content_length,
                 body_size_kb,
             )
-            
+
             # Body size kontrolü - eğer çok büyükse uyarı ver
             if body_size_kb > 100:  # 100 KB üzeri
                 logger.warning(
-                    "⚠️ GLM Payload çok büyük: %.2f KB. "
-                    "API limit aşımı riski var!",
+                    "⚠️ GLM Payload çok büyük: %.2f KB. " "API limit aşımı riski var!",
                     body_size_kb,
                 )
             elif body_size_kb > 50:  # 50 KB üzeri
                 logger.warning(
-                    "⚠️ GLM Payload büyük: %.2f KB. "
-                    "İzlenmesi gerekiyor.",
+                    "⚠️ GLM Payload büyük: %.2f KB. " "İzlenmesi gerekiyor.",
                     body_size_kb,
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Payload logging hatası: %s", exc)
-        
+
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -110,17 +109,17 @@ class GLMClient:
             response = self._client.post(self._base_url, json=payload, headers=headers)
             glm_latency_ms = (time.time() - glm_start) * 1000
             response.raise_for_status()
-            
+
             result = response.json()
-            result['_glm_latency_ms'] = glm_latency_ms
-            
+            result["_glm_latency_ms"] = glm_latency_ms
+
             # Response token kullanımını logla
             try:
                 usage = result.get("usage", {})
                 prompt_tokens = usage.get("prompt_tokens", 0)
                 completion_tokens = usage.get("completion_tokens", 0)
                 total_tokens = usage.get("total_tokens", 0)
-                
+
                 if prompt_tokens > 0 or completion_tokens > 0:
                     logger.info(
                         "📥 GLM Token Usage: prompt=%d, completion=%d, total=%d",
@@ -128,7 +127,7 @@ class GLMClient:
                         completion_tokens,
                         total_tokens,
                     )
-                    
+
                     # Response içeriğini logla (ilk 500 karakter)
                     choices = result.get("choices", [])
                     if choices:
@@ -141,7 +140,7 @@ class GLMClient:
                             )
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Response logging hatası: %s", exc)
-            
+
             logger.debug("GLM API response received in %.0fms", glm_latency_ms)
             return result
         except httpx.ReadTimeout as exc:

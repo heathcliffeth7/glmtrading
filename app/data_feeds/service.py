@@ -10,7 +10,6 @@ from app.data_feeds.twelve_data import poll_time_series
 from app.utils.logging import configure_logging, get_logger
 from app.utils.redis import publish
 
-
 settings = get_settings()
 configure_logging(settings.log_level)
 logger = get_logger(__name__)

@@ -44,11 +44,13 @@ if not price_df.empty:
 
 st.header("Ajan Sinyalleri")
 st.caption("Gerçek zamanlı sinyal izlemesi için Redis/Influx entegrasyonu gereklidir.")
-st.table([
-    {"Ajan": "Kısa Vadeli", "Sinyal": "HOLD", "Güven": 0.0},
-    {"Ajan": "Uzun Vadeli", "Sinyal": "HOLD", "Güven": 0.0},
-    {"Ajan": "Türev", "Sinyal": "HOLD", "Güven": 0.0},
-])
+st.table(
+    [
+        {"Ajan": "Kısa Vadeli", "Sinyal": "HOLD", "Güven": 0.0},
+        {"Ajan": "Uzun Vadeli", "Sinyal": "HOLD", "Güven": 0.0},
+        {"Ajan": "Türev", "Sinyal": "HOLD", "Güven": 0.0},
+    ]
+)
 
 st.header("PnL ve İşlem Geçmişi")
 trades_df, pnl_df = load_ledger()

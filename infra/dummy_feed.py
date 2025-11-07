@@ -1,5 +1,4 @@
 import json
-import json
 import os
 import random
 import signal
@@ -10,7 +9,6 @@ import pandas as pd
 import redis
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
-
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 INFLUX_URL = os.environ.get("INFLUX_URL", "http://localhost:8086")
