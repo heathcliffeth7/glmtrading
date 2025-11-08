@@ -515,12 +515,10 @@ Timeframes note: Unless stated otherwise in a section title, the primary timefra
                 ])
                 
                 if long_exit_plan:
-                    pt = long_exit_plan.get('profit_target', 0)
                     sl = long_exit_plan.get('stop_loss', 0)
                     inv = long_exit_plan.get('invalidation_condition', 'N/A')
                     lines.extend([
                         f"    'exit_plan': {{",
-                        f"      'profit_target': ${pt:.2f},",
                         f"      'stop_loss': ${sl:.2f},",
                         f"      'invalidation': '{inv}'",
                         f"    }}",
@@ -530,6 +528,32 @@ Timeframes note: Unless stated otherwise in a section title, the primary timefra
                     f"  }}",
                     "",
                 ])
+                
+                # CRITICAL WARNING for Turkish reasoning when LONG position exists
+                if not has_short:
+                    lines.extend([
+                        "=" * 80,
+                        "⚠️⚠️⚠️ CRITICAL FOR TURKISH REASONING (gerekçe) ⚠️⚠️⚠️",
+                        "=" * 80,
+                        "",
+                        "🟢 YOU HAVE A **LONG** POSITION (NOT SHORT!)",
+                        f"   Position: {long_position:.6f} BTC **LONG**",
+                        f"   Entry: ${long_entry:.2f}",
+                        f"   Current PnL: ${long_pnl_usd:.2f} ({long_pnl:+.2f}%)",
+                        "",
+                        "📝 WHEN WRITING YOUR 'gerekçe' IN TURKISH:",
+                        "   ✅ CORRECT: \"Mevcut LONG pozisyonu...\"",
+                        "   ❌ WRONG: \"Mevcut SHORT pozisyonu...\" ← DO NOT WRITE THIS!",
+                        "",
+                        "🎯 REMEMBER:",
+                        "   • LONG means you bet price goes UP",
+                        "   • If price rises = profit for LONG",
+                        "   • If price drops = loss for LONG",
+                        "",
+                        "⚠️ DO NOT CONFUSE THIS WITH SHORT POSITION!",
+                        "⚠️ RE-READ THIS SECTION BEFORE WRITING YOUR 'gerekçe'!",
+                        "",
+                    ])
             
             if has_short:
                 short_entry = portfolio_metrics.get("short_avg_price", 0)
@@ -556,12 +580,10 @@ Timeframes note: Unless stated otherwise in a section title, the primary timefra
                 ])
                 
                 if short_exit_plan:
-                    pt = short_exit_plan.get('profit_target', 0)
                     sl = short_exit_plan.get('stop_loss', 0)
                     inv = short_exit_plan.get('invalidation_condition', 'N/A')
                     lines.extend([
                         f"    'exit_plan': {{",
-                        f"      'profit_target': ${pt:.2f},",
                         f"      'stop_loss': ${sl:.2f},",
                         f"      'invalidation': '{inv}'",
                         f"    }}",
@@ -571,6 +593,32 @@ Timeframes note: Unless stated otherwise in a section title, the primary timefra
                     f"  }}",
                     "",
                 ])
+                
+                # CRITICAL WARNING for Turkish reasoning when SHORT position exists
+                if not has_long:
+                    lines.extend([
+                        "=" * 80,
+                        "⚠️⚠️⚠️ CRITICAL FOR TURKISH REASONING (gerekçe) ⚠️⚠️⚠️",
+                        "=" * 80,
+                        "",
+                        "🔴 YOU HAVE A **SHORT** POSITION (NOT LONG!)",
+                        f"   Position: {abs(short_position):.6f} BTC **SHORT**",
+                        f"   Entry: ${short_entry:.2f}",
+                        f"   Current PnL: ${short_pnl_usd:.2f} ({short_pnl:+.2f}%)",
+                        "",
+                        "📝 WHEN WRITING YOUR 'gerekçe' IN TURKISH:",
+                        "   ✅ CORRECT: \"Mevcut SHORT pozisyonu...\"",
+                        "   ❌ WRONG: \"Mevcut LONG pozisyonu...\" ← DO NOT WRITE THIS!",
+                        "",
+                        "🎯 REMEMBER:",
+                        "   • SHORT means you bet price goes DOWN",
+                        "   • If price drops = profit for SHORT",
+                        "   • If price rises = loss for SHORT",
+                        "",
+                        "⚠️ DO NOT CONFUSE THIS WITH LONG POSITION!",
+                        "⚠️ RE-READ THIS SECTION BEFORE WRITING YOUR 'gerekçe'!",
+                        "",
+                    ])
             
             # Net exposure
             lines.extend([
@@ -645,14 +693,32 @@ Analyze market data and your current position. Decide on ONE of these actions:
 1. **HOLD** - Keep current position (if you have one) or stay flat
 2. **BUY** - Enter a new LONG position (only if FLAT)
 3. **SELL** - Enter a new SHORT position (only if FLAT)
+4. **CLOSE** - Close existing position (LONG or SHORT) - ONLY with STRICT CONDITIONS!
 
-⚠️ **IMPORTANT: DO NOT USE CLOSE ACTION!**
-- Positions are AUTOMATICALLY closed by system when:
-  1. Profit target is reached
-  2. Stop loss is triggered  
-  3. Invalidation condition occurs
-- Your exit_plan (profit_target, stop_loss, invalidation_condition) controls when to close
-- You can ONLY choose: BUY, SELL, or HOLD
+⚠️ **CLOSE ACTION KURALLARI (ÇOK KATI - ERKEN KAPATMAYI ÖNLEMEK İÇİN):**
+
+❌ CLOSE YAPMA EĞER:
+- Küçük negatif PnL (<%5) ve stop-loss tetiklenmemiş → MUTLAKA HOLD
+- Kârlı pozisyon (>%2) ve sadece 1-2 timeframe'de reversal → HOLD (tüm timeframe'ler gerekli)
+- Kârlı pozisyon ve confidence <%98 → HOLD (çok yüksek güven gerekli)
+- Küçük fiyat dalgalanmaları (%3-5) → HOLD (normal dalgalanmalar)
+- Tek bir indikatörün sinyali → HOLD (tüm timeframe'lerde reversal gerekli)
+
+✅ CLOSE YAP SADECE EĞER:
+- Stop-loss tetiklendi (otomatik kapanır zaten - bu durumda CLOSE gerekmez)
+- TÜM timeframe'lerde (1m, 30m, 4h) güçlü trend reversal + confidence ≥%95
+- Pozisyon zararlı (<-%5) ve trend reversal tüm timeframe'lerde + confidence ≥%95
+- Kârlı pozisyon (>%2) için: TÜM timeframe'lerde reversal + confidence ≥%98 (daha katı)
+
+🔍 CLOSE İÇİN MUTLAKA GEREKLİ KOŞULLAR:
+1. Tüm timeframe'lerde (1m, 30m, 4h) trend reversal OLMALI
+2. Minimum confidence: %95 (çok yüksek güven gerekli)
+3. Pozisyon kârlıysa (>%2): Minimum confidence %98 (daha katı)
+4. Küçük negatif PnL (<%5) ve stop-loss tetiklenmemişse → MUTLAKA HOLD, CLOSE YAPMA
+
+⚠️ NOT: Profit target otomatik kapatma kaldırılmıştır. Pozisyonlar sadece stop loss veya 
+invalidation condition tetiklendiğinde otomatik kapanır. CLOSE action manuel olarak 
+kullanılabilir ama yukarıdaki katı kurallara uymalıdır.
 
 🎯 TRADING STRATEGY: QUALITY OVER QUANTITY
 
@@ -729,19 +795,35 @@ KARAR VERME SÜRECİ (ADIM ADIM)
 **🔥 KRİTİK**: Göstergeler kârlı bir pozisyonu erken kapatmak için bahane DEĞİLDİR! Çıkış planına güven!
 
 ================================================================================
-GEREKÇE FORMATI
+GEREKÇE FORMATI - POZİSYON YÖNÜNÜ DOĞRU BELİRT!
 ================================================================================
 
-**HOLD (Kârlı Pozisyon İçin)**: Neden kâr hedefine ulaşılmadığını açıkla.
-- Örnek: 'BTC SHORT pozisyonu kârlı ve büyümeye bırakılıyor. Mevcut fiyat 102,807, 
-  giriş 103,138. Kâr hedefi 101,500'a henüz ulaşılmadı. Mevcut kâr +$337, 
-  ancak ana trend hala aşağı yönlü. Kâr hedefine ulaşana kadar pozisyon sabit tutuluyor.'
+⚠️ BEFORE WRITING 'gerekçe': 
+   → RE-READ "CURRENT LIVE POSITIONS" section above
+   → IDENTIFY position type: LONG or SHORT or NONE
+   → USE CORRECT terminology in Turkish!
 
-**HOLD (Zararlı Pozisyon İçin)**: Neden stop-loss tetiklenmediğini açıkla.
-- Örnek: 'BTC pozisyonu kararlı tutuluyor. Mevcut fiyat 109967, giriş 107343, 
-  kâr/zarar +314.94. Çıkış planı: kâr hedefi 118136 (ulaşılmadı), stop-loss 102026 
-  (tetiklenmedi), geçersiz kılma 105000 altı (tetiklenmedi). RSI aşırı satımda (29.7) 
-  ama geçersiz kılma koşulu karşılanmadığı için çıkış planına göre tutuluyor.'
+**HOLD (SHORT Pozisyon İçin - Zararlı)**: 
+- ✅ DOĞRU: 'Mevcut SHORT pozisyonu -0.20% zararda ve stop-loss seviyesi olan 
+  105,861.21 henüz tetiklenmedi. KATI KURAL gereği, stop-loss tetiklenmediği 
+  sürece küçük zararlı pozisyonlar MUTLAKA tutulmalı.'
+- ❌ YANLIŞ: 'Mevcut LONG pozisyonu...' ← Pozisyon SHORT ise LONG yazma!
+
+**HOLD (SHORT Pozisyon İçin - Kârlı)**: 
+- ✅ DOĞRU: 'Mevcut SHORT pozisyonu kârlı ve büyümeye bırakılıyor. Mevcut fiyat 
+  102,807, giriş 103,138. Kâr hedefi 101,500'a henüz ulaşılmadı...'
+- ❌ YANLIŞ: 'Mevcut LONG pozisyonu...' ← Pozisyon SHORT ise LONG yazma!
+
+**HOLD (LONG Pozisyon İçin - Kârlı)**: 
+- ✅ DOĞRU: 'Mevcut LONG pozisyonu +2.30% kârda ve büyümeye bırakılıyor...'
+- ❌ YANLIŞ: 'Mevcut SHORT pozisyonu...' ← Pozisyon LONG ise SHORT yazma!
+
+**HOLD (LONG Pozisyon İçin - Zararlı)**: 
+- ✅ DOĞRU: 'Mevcut LONG pozisyonu -1.50% zararda ama stop-loss tetiklenmedi...'
+- ❌ YANLIŞ: 'Mevcut SHORT pozisyonu...' ← Pozisyon LONG ise SHORT yazma!
+
+**HOLD (Pozisyon Yok - FLAT)**:
+- ✅ DOĞRU: 'Pozisyon yok, piyasa sinyalleri karışık...'
 
 ================================================================================
 WHEN TO HOLD (NOT TRADE)
@@ -799,15 +881,15 @@ If you're unsure → Choose HOLD and wait for better clarity!
 🔍 **YOUR EXIT PLAN WILL BE VALIDATED BEFORE EXECUTION!**
 
 The system will check your exit plan for:
-1. **Logical Consistency**: profit_target, stop_loss, and invalidation_condition must be logically consistent
+1. **Logical Consistency**: stop_loss and invalidation_condition must be logically consistent
 2. **Price Levels**: All values must be realistic price levels (not 0.0 or null)
 3. **Position Type**: Exit levels must match your position type (LONG/SHORT)
 
 🚫 **INVALID EXIT PLANS WILL BE REJECTED AND CONVERTED TO HOLD!**
 
 **VALIDATION RULES:**
-- For LONG positions: entry_price < stop_loss < profit_target
-- For SHORT positions: profit_target < stop_loss < entry_price
+- For LONG positions: entry_price < invalidation < stop_loss (invalidation acts as early warning)
+- For SHORT positions: stop_loss < invalidation < entry_price (invalidation acts as early warning)
 - Invalidation condition must be DIFFERENT from stop_loss level
 - Invalidation for LONG: price level BELOW stop_loss
 - Invalidation for SHORT: price level ABOVE stop_loss
@@ -841,6 +923,23 @@ For SHORT @ $110,000 with high volatility:
 ```
 
 ================================================================================
+⚠️ FINAL CHECKLIST BEFORE RESPONDING ⚠️
+================================================================================
+
+Before you write your JSON response, VERIFY these:
+
+1. ✅ Did I check "CURRENT LIVE POSITIONS" section?
+2. ✅ Did I identify correctly: LONG, SHORT, or NONE?
+3. ✅ In my Turkish 'gerekçe', did I use the CORRECT position type?
+   - If position is SHORT → I must write "SHORT pozisyonu" (NOT "LONG"!)
+   - If position is LONG → I must write "LONG pozisyonu" (NOT "SHORT"!)
+4. ✅ Did I double-check my gerekçe text before submitting?
+
+⚠️ COMMON MISTAKE TO AVOID:
+   Having a SHORT position but writing "Mevcut LONG pozisyonu" ← WRONG!
+   Having a LONG position but writing "Mevcut SHORT pozisyonu" ← WRONG!
+
+================================================================================
 OUTPUT FORMAT:
 ================================================================================
 
@@ -856,9 +955,8 @@ Respond with a JSON object in this exact format:
       "coin": "BTCUSDT",
       "signal": "<BUY|SELL|HOLD>",     ⚠️ ONLY these 3 options! NO CLOSE!
       "quantity": <float>,
-      "profit_target": <float>,         ⚠️ REQUIRED! Must be a number (price level)
-      "stop_loss": <float>,             ⚠️ REQUIRED! Must be a number (price level)
-      "invalidation_condition": "<string>",  ⚠️ REQUIRED! Describe the exit condition
+      "stop_loss": <float>,             ⚠️ REQUIRED! Must be a number (price level) - auto-closes position
+      "invalidation_condition": "<string>",  ⚠️ REQUIRED! Describe the exit condition - auto-closes position
       "leverage": <int 1-20>,
       "confidence": <0.0-1.0>,
       "risk_usd": <float>
@@ -872,16 +970,13 @@ Respond with a JSON object in this exact format:
 
 **CRITICAL REQUIREMENT - YOUR TRADE WILL BE REJECTED IF YOU DON'T COMPLY:**
 
-For ALL BUY/SELL actions, you **MUST** provide these three values:
+For ALL BUY/SELL actions, you **MUST** provide these two values:
 
-1. **profit_target**: A SPECIFIC PRICE NUMBER (NOT 0.0, NOT null)
-2. **stop_loss**: A SPECIFIC PRICE NUMBER (NOT 0.0, NOT null)
-3. **invalidation_condition**: A CLEAR CONDITION STRING (NOT empty, NOT "N/A")
+1. **stop_loss**: A SPECIFIC PRICE NUMBER (NOT 0.0, NOT null) - auto-closes position when hit
+2. **invalidation_condition**: A CLEAR CONDITION STRING (NOT empty, NOT "N/A") - auto-closes position when met
 
 ❌ **FORBIDDEN VALUES - THESE WILL CAUSE TRADE REJECTION:**
-  • profit_target: 0.0 ← WRONG! Your trade will be REJECTED!
   • stop_loss: 0.0 ← WRONG! Your trade will be REJECTED!
-  • profit_target: null or undefined ← WRONG! Your trade will be REJECTED!
   • invalidation_condition: "" or "N/A" ← WEAK! Provide specific condition!
 
 ⚠️⚠️⚠️ CRITICAL: INVALIDATION AS EARLY WARNING SYSTEM ⚠️⚠️⚠️
@@ -917,37 +1012,33 @@ Invalidation acts as an **EARLY WARNING** - it should trigger BEFORE stop loss!
 
 **For LONG @ $110,000:**
 ```json
-"profit_target": 115000.0,  // +4.5% upside target
 "stop_loss": 105000.0,      // -4.5% downside protection (hard stop)
 "invalidation_condition": "If price closes below 107000 on 3-minute candle"  // Between entry and SL (early warning)
 ```
-→ Order: SL (105000) < Invalidation (107000) < Entry (110000) < TP (115000) ✅
+→ Order: SL (105000) < Invalidation (107000) < Entry (110000) ✅
 
 **For SHORT @ $110,000:**
 ```json
-"profit_target": 105000.0,  // -4.5% downside (profit for SHORT)
 "stop_loss": 115000.0,      // +4.5% upside (loss for SHORT, hard stop)
 "invalidation_condition": "If price closes above 113000 on 3-minute candle"  // Between entry and SL (early warning)
 ```
-→ Order: TP (105000) < Entry (110000) < Invalidation (113000) < SL (115000) ✅
+→ Order: Entry (110000) < Invalidation (113000) < SL (115000) ✅
 
 **AUTOMATIC POSITION CLOSING RULES:**
 
-Your positions will be AUTOMATICALLY CLOSED when any of these 3 conditions are met:
+Your positions will be AUTOMATICALLY CLOSED when any of these 2 conditions are met:
 
-1. **Profit Target Reached:**
-   - When price reaches your specified profit_target level, position closes automatically
-   - System checks every 3 minutes (on each 3-minute candle close)
-   
-2. **Stop Loss Triggered:**
+1. **Stop Loss Triggered:**
    - When price reaches your specified stop_loss level, position closes automatically
    - System checks every 3 minutes (on each 3-minute candle close)
    
-3. **Invalidation Condition Met:**
+2. **Invalidation Condition Met:**
    - When your special condition is met, position closes immediately
    - Example: "If price closes below $105,000 on a 3-minute candle"
 
-Until one of these conditions is met, your position stays open. The system ONLY checks these 3 rules.
+**NOT:** Profit target does NOT auto-close position. When profit_target is reached, you can decide to CLOSE manually if CLOSE ACTION KURALLARI are met (see above).
+
+Until one of these conditions is met, your position stays open. The system ONLY checks these 2 rules (stop_loss and invalidation_condition).
 
 ⚠️ **REMEMBER:** If you provide invalid exit plan (0.0 values or null), your BUY/SELL trade will be AUTOMATICALLY REJECTED and converted to HOLD!
 
@@ -1003,7 +1094,6 @@ EXAMPLES:
       "coin": "BTCUSDT",
       "signal": "SELL",
       "quantity": 0.08,
-      "profit_target": 105000.0,
       "stop_loss": 112000.0,
       "invalidation_condition": "If price closes above 111000 on 30m candle",
       "leverage": 8,
@@ -1018,15 +1108,15 @@ EXAMPLES:
 IMPORTANT:
 - For HOLD: Provide gerekçe explaining why you're holding (400-600 characters recommended)
 - For BUY/SELL: Provide full entry plan with exit_plan (400-600 characters recommended)
-  - profit_target MUST be a realistic price level where you expect profit
   - stop_loss MUST be a price level that protects against losses
   - invalidation_condition MUST describe scenario when trade is invalid (e.g., "If price closes below X on 3m candle")
 - Confidence should reflect your conviction (0.5-1.0 range)
 - Risk should be proportional to confidence and account size
 - ⚠️ CRITICAL: Gerekçe MUST be written in TURKISH language - no English allowed
 - ⚠️ Gerekçe should be DETAILED with specific indicator values from multiple timeframes
-- ⚠️ CRITICAL: profit_target, stop_loss, and invalidation_condition are MANDATORY for BUY/SELL - do NOT leave them as 0 or empty!
-- ⚠️ NO CLOSE ACTION ALLOWED - positions close automatically via exit_plan!
+- ⚠️ CRITICAL: stop_loss and invalidation_condition are MANDATORY for BUY/SELL - do NOT leave them as 0 or empty!
+- ⚠️ CLOSE ACTION: Can be used but ONLY with STRICT CONDITIONS (see CLOSE ACTION KURALLARI above)
+- ⚠️ Profit target otomatik kapatma kaldırılmıştır - pozisyonlar sadece stop loss veya invalidation condition ile otomatik kapanır
 
 Think step by step and make your decision based on:
 1. Current market state across all timeframes

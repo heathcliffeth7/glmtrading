@@ -1,4 +1,5 @@
 import json
+import json
 import time
 from typing import Any, Dict, List, Optional
 
@@ -132,13 +133,40 @@ class GLMClient:
                     # Response içeriğini logla (ilk 500 karakter)
                     choices = result.get("choices", [])
                     if choices:
-                        content = choices[0].get("message", {}).get("content", "")
+                        choice = choices[0]
+                        message = choice.get("message", {})
+                        content = message.get("content", "")
+                        
                         if content:
                             logger.info(
                                 "📥 GLM Response: %d chars (first 500: %s)",
                                 len(content),
                                 content[:500],
                             )
+                        else:
+                            # EMPTY CONTENT BUG - log full response structure
+                            logger.error(
+                                "🚨 GLM API BUG: %d completion tokens but empty content!",
+                                completion_tokens
+                            )
+                            logger.error(
+                                "🔍 Full response structure: %s",
+                                json.dumps(result, indent=2, ensure_ascii=False)[:3000]
+                            )
+                            
+                            # Try alternative fields
+                            content_alt = choice.get("text") or choice.get("delta", {}).get("content") or ""
+                            if content_alt:
+                                logger.warning(
+                                    "📍 Found content in alternative field (%d chars): %s",
+                                    len(content_alt),
+                                    content_alt[:200]
+                                )
+                                # Patch it back into standard field
+                                message["content"] = content_alt
+                                logger.info("✅ Patched content from alternative field")
+                            else:
+                                logger.error("❌ No content found in any field - this is a GLM API issue")
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Response logging hatası: %s", exc)
             

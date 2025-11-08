@@ -1,20 +1,20 @@
 """
 Exit Condition Checker - Pozisyon kapatma koşullarını kontrol eder
 
-3 dakikalık mum kapanışlarında 3 temel exit koşulunu kontrol eder:
+3 dakikalık mum kapanışlarında 2 temel exit koşulunu kontrol eder:
 
-1. **Profit Target (Kâr Hedefi):**
-   - Fiyat belirlenen kâr hedefine ulaştığında pozisyon kapanır
-   - Örnek: BTC LONG, profit_target=$118,136 → Fiyat $118,136'ya çıkarsa kapat
-   
-2. **Stop Loss (Zarar Durdurma):**
+1. **Stop Loss (Zarar Durdurma):**
    - Fiyat belirlenen zarar seviyesine düştüğünde pozisyon kapanır
    - Örnek: BTC LONG, stop_loss=$102,027 → Fiyat $102,027'ye düşerse kapat
 
-3. **Invalidation Condition (Geçersizleştirme Koşulu):**
+2. **Invalidation Condition (Geçersizleştirme Koşulu):**
    - Özel bir koşul gerçekleştiğinde pozisyon kapanır
    - Örnek: "If price closes below $105,000 on 3m candle"
    - 3-minute candle close fiyatı $105,000'ın altındaysa kapat
+
+**NOT:** Profit Target otomatik kapatma kaldırılmıştır. Pozisyonlar sadece stop loss veya 
+invalidation condition tetiklendiğinde otomatik kapanır. GLM'nin CLOSE kararı ile manuel 
+kapatma mümkündür.
 
 Position Monitor her 3 dakikada bir (candle close) bu kontrolleri çalıştırır.
 """
@@ -247,7 +247,10 @@ def check_all_exit_conditions(
     is_long: bool
 ) -> Tuple[bool, str, str]:
     """
-    Tüm exit koşullarını kontrol et (profit target, stop loss, invalidation)
+    Tüm exit koşullarını kontrol et (stop loss, invalidation)
+    
+    NOT: Profit target kontrolü kaldırılmıştır. Pozisyonlar sadece stop loss veya
+    invalidation condition tetiklendiğinde otomatik kapanır.
     
     Args:
         entry_price: Giriş fiyatı
@@ -257,21 +260,30 @@ def check_all_exit_conditions(
     
     Returns:
         (should_close: bool, trigger_type: str, reason: str)
-        trigger_type: "profit_target" | "stop_loss" | "invalidation" | ""
+        trigger_type: "stop_loss" | "invalidation" | ""
     """
-    profit_target = exit_plan.get("profit_target")
     stop_loss = exit_plan.get("stop_loss")
     invalidation_condition = exit_plan.get("invalidation_condition", "")
     
-    # 1. Profit Target kontrolü (öncelikli)
-    if profit_target and check_profit_target(entry_price, current_price, profit_target, is_long):
-        return True, "profit_target", f"Profit target reached: {profit_target:.2f}"
+    # Profit target kontrolü kaldırıldı - GLM CLOSE kararı ile manuel kapatma yapılabilir
+    profit_target = exit_plan.get("profit_target")
+    if profit_target:
+        # Profit target seviyesine ulaşıldıysa bilgilendirme log'u gönder ama pozisyonu kapatma
+        if check_profit_target(entry_price, current_price, profit_target, is_long):
+            logger.info(
+                "ℹ️ Profit target reached (no auto-close): %s | entry=%.2f current=%.2f target=%.2f | "
+                "Position remains open - GLM can decide to CLOSE manually",
+                "LONG" if is_long else "SHORT",
+                entry_price,
+                current_price,
+                profit_target
+            )
     
-    # 2. Stop Loss kontrolü
+    # 1. Stop Loss kontrolü
     if stop_loss and check_stop_loss(entry_price, current_price, stop_loss, is_long):
         return True, "stop_loss", f"Stop loss triggered: {stop_loss:.2f}"
     
-    # 3. Invalidation Condition kontrolü
+    # 2. Invalidation Condition kontrolü
     if invalidation_condition and invalidation_condition != "N/A":
         triggered, reason = check_invalidation_condition(current_price, invalidation_condition, is_long)
         if triggered:

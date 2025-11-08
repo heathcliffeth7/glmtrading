@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Dict, Optional
 
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.executor.ledger import (
     DailyPnL, Portfolio, Trade, engine, get_daily_pnl, get_portfolio, record_trade, get_recent_trades, 
@@ -227,23 +228,81 @@ class Executor:
             reason,
         )
         
-        # ALLOW CLOSE ACTION: Only when GLM has 100% confidence
+        # CLOSE ACTION: Strict validation with PnL-based rules
         if decision.action == "CLOSE":
-            if decision.glm_confidence >= 100.0:
-                logger.info(
-                    "✅ CLOSE action allowed: GLM has 100%% confidence (%.1f%%) - closing position",
-                    decision.glm_confidence
-                )
-                # Continue to execution - CLOSE doesn't need exit_plan validation
-            else:
+            from app.executor.ledger import Trade
+            
+            # Get current position PnL for validation
+            portfolio = get_synced_portfolio(session, self._symbol)
+            current_pnl_pct = 0.0
+            has_position = abs(portfolio.position) > 0.0001
+            
+            if has_position:
+                # Calculate current PnL percentage
+                entry_price = portfolio.long_avg_price if portfolio.position > 0 else portfolio.short_avg_price
+                if entry_price > 0:
+                    if portfolio.position > 0:  # LONG
+                        current_pnl_pct = ((price - entry_price) / entry_price) * 100
+                    else:  # SHORT
+                        current_pnl_pct = ((entry_price - price) / entry_price) * 100
+            
+            # 1. Confidence kontrolü (PnL durumuna göre)
+            min_confidence = 95.0  # Default minimum
+            if has_position and current_pnl_pct > 2.0:  # Kârlı pozisyon (>%2)
+                min_confidence = 98.0  # Daha katı kural
+            
+            if decision.glm_confidence < min_confidence:
                 logger.warning(
-                    "❌ CLOSE action rejected: GLM confidence %.1f%% < 100%% - positions close automatically via exit_plan",
-                    decision.glm_confidence
+                    "❌ CLOSE action rejected: GLM confidence %.1f%% < %.1f%% (required: %.1f%% for %s position)",
+                    decision.glm_confidence,
+                    min_confidence,
+                    min_confidence,
+                    "profitable" if current_pnl_pct > 2.0 else "normal"
                 )
                 return ExecutionResult(
                     status="INVALID",
-                    details=f"GLM CLOSE action rejected - confidence {decision.glm_confidence:.1f}% < 100% (use exit_plan instead)"
+                    details=f"CLOSE action rejected - confidence {decision.glm_confidence:.1f}% < {min_confidence:.1f}% required"
                 )
+            
+            # 2. Küçük negatif PnL kontrolü (<%5 ve stop-loss tetiklenmemişse)
+            if has_position and -5.0 < current_pnl_pct < 0:
+                # Stop-loss kontrolü yap
+                stop_loss_triggered = False
+                latest_trade = (
+                    session.query(Trade)
+                    .filter_by(symbol=self._symbol)
+                    .filter(Trade.close_price.is_(None))
+                    .order_by(Trade.timestamp.desc())
+                    .first()
+                )
+                
+                if latest_trade and latest_trade.exit_plan:
+                    stop_loss = latest_trade.exit_plan.get("stop_loss")
+                    if stop_loss:
+                        if portfolio.position > 0:  # LONG
+                            if price <= stop_loss:
+                                stop_loss_triggered = True
+                        else:  # SHORT
+                            if price >= stop_loss:
+                                stop_loss_triggered = True
+                
+                if not stop_loss_triggered:
+                    logger.warning(
+                        "❌ CLOSE action rejected: Small negative PnL (%.2f%%) and stop-loss NOT triggered - must HOLD",
+                        current_pnl_pct
+                    )
+                    return ExecutionResult(
+                        status="INVALID",
+                        details=f"CLOSE rejected - small negative PnL ({current_pnl_pct:.2f}%) and stop-loss not triggered - must HOLD"
+                    )
+            
+            logger.info(
+                "✅ CLOSE action validated: confidence=%.1f%% (min=%.1f%%), PnL=%.2f%% - proceeding to close",
+                decision.glm_confidence,
+                min_confidence,
+                current_pnl_pct
+            )
+            # Continue to execution - CLOSE doesn't need exit_plan validation
         
         # VALIDATE EXIT PLAN: BUY/SELL requires valid exit_plan (CLOSE doesn't need it)
         if decision.action in ["BUY", "SELL"]:
@@ -255,17 +314,9 @@ class Executor:
                     details="Exit plan eksik - GLM hatası"
                 )
             
-            # Exit plan values must be valid
-            profit_target = decision.exit_plan.get("profit_target")
+            # Exit plan values must be valid (profit_target removed - not required)
             stop_loss = decision.exit_plan.get("stop_loss")
             invalidation = decision.exit_plan.get("invalidation_condition")
-            
-            if not profit_target or profit_target == 0.0:
-                logger.error("BLOCKED: Invalid profit_target=%s for %s", profit_target, decision.action)
-                return ExecutionResult(
-                    status="BLOCKED",
-                    details="Profit target geçersiz veya eksik"
-                )
             
             if not stop_loss or stop_loss == 0.0:
                 logger.error("BLOCKED: Invalid stop_loss=%s for %s", stop_loss, decision.action)
@@ -275,8 +326,7 @@ class Executor:
                 )
             
             logger.info(
-                "✅ Exit plan validated: PT=%.2f SL=%.2f INV=%s",
-                profit_target,
+                "✅ Exit plan validated: SL=%.2f INV=%s",
                 stop_loss,
                 invalidation or "N/A"
             )
@@ -595,8 +645,15 @@ class Executor:
                 # DOĞRU MARGIN HESABI: Portfolio sync ile doğru pozisyon kullanılıyor
                 used_margin = calculate_correct_margin_usage(portfolio, price, leverage)
                 
-                # ÖNEMLİ: Equity'yi makul sınırlara çek
-                safe_equity = self._starting_cash + daily_pnl.realized_pnl
+                # Realized PnL = Sadece kapalı pozisyonların net PnL'i (Trade tablosundan gerçek zamanlı)
+                closed_trades_net_pnl = session.query(
+                    func.coalesce(func.sum(Trade.pnl), 0.0)
+                ).filter(
+                    Trade.symbol == self._symbol,
+                    Trade.close_price.isnot(None)  # Sadece kapalı pozisyonlar
+                ).scalar() or 0.0
+                
+                safe_equity = self._starting_cash + closed_trades_net_pnl
                 safe_equity = max(100, min(safe_equity, self._starting_cash * 10))  # Max 10x büyüme
                 
                 free_equity = safe_equity - used_margin
@@ -820,44 +877,42 @@ class Executor:
             # EXIT PLAN: GLM'in verdiği exit_plan MUTLAKA kullanılmalı
             is_long = position_side == "LONG"
             
-            # Extract exit plan values (manager.py ensures exit_plan dict always exists)
-            profit_target = decision.exit_plan.get("profit_target") if decision.exit_plan else None
+            # Extract exit plan values
             stop_loss = decision.exit_plan.get("stop_loss") if decision.exit_plan else None
+            profit_target = decision.exit_plan.get("profit_target") if decision.exit_plan else None
             
             # Değerler geçersizse fallback exit plan kullan
-            has_valid_profit_target = profit_target is not None and profit_target != 0.0
             has_valid_stop_loss = stop_loss is not None and stop_loss != 0.0
             
-            if not (has_valid_profit_target and has_valid_stop_loss):
+            if not has_valid_stop_loss:
                 logger.error(
-                    "CRITICAL: GLM exit_plan has invalid values (profit_target: %s, stop_loss: %s)",
-                    profit_target,
+                    "CRITICAL: GLM exit_plan has invalid stop_loss: %s",
                     stop_loss
                 )
                 logger.warning("⚠️ Using FALLBACK exit plan calculation (GLM failed to provide valid exit plan)")
                 
                 # FALLBACK: Calculate default exit plan
-                # Simple volatility-based risk: 2% stop loss, 4% profit target (2:1 risk/reward)
+                # Simple volatility-based risk: 2% stop loss, 3% profit target
                 sl_pct = 0.02  # 2% stop loss
-                tp_pct = 0.04  # 4% profit target
+                pt_pct = 0.03  # 3% profit target
                 
                 if position_side == "LONG":
-                    profit_target = price * (1 + tp_pct)
                     stop_loss = price * (1 - sl_pct)
+                    profit_target = price * (1 + pt_pct)
                     # Invalidation BETWEEN stop_loss and entry (50% distance = early warning)
                     invalidation_price = stop_loss + (price - stop_loss) * 0.5
                     invalidation_condition = f"If price closes below {invalidation_price:.2f} on 3-minute candle"
                 else:  # SHORT
-                    profit_target = price * (1 - tp_pct)
                     stop_loss = price * (1 + sl_pct)
+                    profit_target = price * (1 - pt_pct)
                     # Invalidation BETWEEN entry and stop_loss (50% distance = early warning)
                     invalidation_price = price + (stop_loss - price) * 0.5
                     invalidation_condition = f"If price closes above {invalidation_price:.2f} on 3-minute candle"
                 
                 logger.warning(
-                    "✅ FALLBACK exit plan created: TP=%.2f (%.1f%%), SL=%.2f (%.1f%%), Invalidation=%s",
+                    "✅ FALLBACK exit plan created: PT=%.2f (+%.1f%%), SL=%.2f (-%.1f%%), Invalidation=%s",
                     profit_target,
-                    tp_pct * 100,
+                    pt_pct * 100,
                     stop_loss,
                     sl_pct * 100,
                     invalidation_condition
@@ -871,10 +926,10 @@ class Executor:
                         "⚠️ *FALLBACK EXIT PLAN USED*\n\n"
                         f"GLM did not provide valid exit plan for {decision.action} action.\n\n"
                         "*GLM provided:*\n"
-                        f"  • Profit Target: {decision.exit_plan.get('profit_target') if decision.exit_plan else 'None'}\n"
-                        f"  • Stop Loss: {decision.exit_plan.get('stop_loss') if decision.exit_plan else 'None'}\n\n"
+                        f"  • Stop Loss: {decision.exit_plan.get('stop_loss') if decision.exit_plan else 'None'}\n"
+                        f"  • Profit Target: {decision.exit_plan.get('profit_target') if decision.exit_plan else 'None'}\n\n"
                         "*System calculated fallback:*\n"
-                        f"  • Profit Target: ${profit_target:,.2f} (+{tp_pct*100:.1f}%)\n"
+                        f"  • Profit Target: ${profit_target:,.2f} (+{pt_pct*100:.1f}%)\n"
                         f"  • Stop Loss: ${stop_loss:,.2f} (-{sl_pct*100:.1f}%)\n"
                         f"  • Invalidation: {invalidation_condition}\n\n"
                         f"*Action:* {decision.action} {position_side}\n"
@@ -981,6 +1036,7 @@ class Executor:
                 price=price,
                 pnl=pnl,
                 leverage=leverage,
+                fees=fee,
                 position_side=position_side,
                 position_id=current_position_id,
                 exit_plan=exit_plan,
@@ -1525,11 +1581,50 @@ class Executor:
             total_notional = 0.0
             position_details = []
 
-            # Get latest open trade for exit plan (Nof1.ai style)
+            # MULTI-POSITION SUPPORT: Separate LONG and SHORT trades by position_side
+            # position_side field explicitly stores "LONG" or "SHORT"
+            long_trades = [t for t in open_trades if t.position_side == "LONG"]
+            short_trades = [t for t in open_trades if t.position_side == "SHORT"]
+
+            # Get latest open trade for exit plan (Nof1.ai style) - kept for backward compatibility
             latest_trade = None
             if open_trades:
                 latest_trade = sorted(open_trades, key=lambda t: t.timestamp, reverse=True)[0]
 
+            # Calculate LONG position metrics
+            long_position = sum(t.amount for t in long_trades)
+            long_avg_price = 0.0
+            long_exit_plan = None
+            long_leverage = 1.0
+            
+            if long_trades:
+                # Weighted average price for LONG positions
+                total_long_value = sum(t.amount * t.price for t in long_trades)
+                long_avg_price = total_long_value / long_position if long_position > 0 else 0.0
+                
+                # Use most recent LONG trade's exit plan
+                long_trade = sorted(long_trades, key=lambda t: t.timestamp, reverse=True)[0]
+                long_exit_plan = long_trade.exit_plan
+                long_leverage = long_trade.leverage if long_trade.leverage and long_trade.leverage > 0 else 1.0
+            
+            # Calculate SHORT position metrics
+            short_position = sum(t.amount for t in short_trades)  # Will be negative
+            short_avg_price = 0.0
+            short_exit_plan = None
+            short_leverage = 1.0
+            
+            if short_trades:
+                # Weighted average price for SHORT positions (use absolute amounts for weighting)
+                total_short_value = sum(abs(t.amount) * t.price for t in short_trades)
+                total_short_amount = sum(abs(t.amount) for t in short_trades)
+                short_avg_price = total_short_value / total_short_amount if total_short_amount > 0 else 0.0
+                
+                # Use most recent SHORT trade's exit plan
+                short_trade = sorted(short_trades, key=lambda t: t.timestamp, reverse=True)[0]
+                short_exit_plan = short_trade.exit_plan
+                short_leverage = short_trade.leverage if short_trade.leverage and short_trade.leverage > 0 else 1.0
+
+            # Calculate margin and notional for all positions
             for trade in open_trades:
                 leverage = trade.leverage if trade.leverage and trade.leverage > 0 else 1.0
                 trade_notional = abs(trade.price * trade.amount)
@@ -1546,12 +1641,12 @@ class Executor:
                     "position_side": trade.position_side,
                 })
             
-            # Get exit plan from latest trade (Nof1.ai style)
+            # Get exit plan from latest trade (Nof1.ai style) - kept for backward compatibility
             exit_plan = None
             if latest_trade and latest_trade.exit_plan:
                 exit_plan = latest_trade.exit_plan
             
-            # Get order IDs for latest trade (Nof1.ai style)
+            # Get order IDs for latest trade (Nof1.ai style) - kept for backward compatibility
             sl_oid = -1
             tp_oid = -1
             entry_oid = -1
@@ -1598,7 +1693,18 @@ class Executor:
         # Equity sanity check - astronomik değerleri sınırla
         equity = max(0, min(equity, self._starting_cash * 10))
 
-        free_cash = equity - margin_used
+        # DÜZELTME: Serbest sermaye sadece realized PnL ile hesaplanmalı (unrealized dahil değil)
+        # Realized PnL = Sadece kapalı pozisyonların net PnL'i (Trade tablosundan gerçek zamanlı)
+        closed_trades_net_pnl = session.query(
+            func.coalesce(func.sum(Trade.pnl), 0.0)
+        ).filter(
+            Trade.symbol == self._symbol,
+            Trade.close_price.isnot(None)  # Sadece kapalı pozisyonlar
+        ).scalar() or 0.0
+        
+        safe_equity = self._starting_cash + closed_trades_net_pnl
+        safe_equity = max(100, min(safe_equity, self._starting_cash * 10))  # Max 10x büyüme
+        free_cash = safe_equity - margin_used
         
         # Calculate notional_usd for latest trade (Nof1.ai style)
         notional_usd = 0.0
@@ -1624,9 +1730,19 @@ class Executor:
             "last_trade_price": portfolio.last_trade_price,
             "last_trade_timestamp": portfolio.last_trade_timestamp,
             "current_price": price,
+            # MULTI-POSITION SUPPORT: Add LONG and SHORT specific fields for GLM
+            "long_position": long_position,
+            "short_position": short_position,
+            "net_position": portfolio.position,  # Net position = long + short
+            "long_avg_price": long_avg_price,
+            "short_avg_price": short_avg_price,
+            "long_exit_plan": long_exit_plan,
+            "short_exit_plan": short_exit_plan,
+            "long_leverage": long_leverage,
+            "short_leverage": short_leverage,
         }
         
-        # Add exit plan info (Nof1.ai style)
+        # Add exit plan info (Nof1.ai style) - kept for backward compatibility
         if exit_plan:
             result["exit_plan"] = exit_plan
             # Also add entry price for easy comparison
@@ -1721,7 +1837,6 @@ class Executor:
                     "notional": entry_notional,
                     "real_pnl": real_pnl,  # ✅ Real PnL bilgisi (brüt, net, fee)
                     "stop_loss": exit_plan.get("stop_loss"),  # ✅ Stop loss ekle
-                    "take_profit": exit_plan.get("profit_target"),  # ✅ Take profit ekle
                     "invalidation_condition": exit_plan.get("invalidation_condition"),  # ✅ Invalidation condition ekle
                 })
             else:
@@ -1762,7 +1877,6 @@ class Executor:
                     "notional": entry_notional,
                     "real_pnl": real_pnl,  # ✅ Real PnL bilgisi (açık pozisyon)
                     "stop_loss": exit_plan.get("stop_loss"),  # ✅ Stop loss ekle
-                    "take_profit": exit_plan.get("profit_target"),  # ✅ Take profit ekle
                     "invalidation_condition": exit_plan.get("invalidation_condition"),  # ✅ Invalidation condition ekle
                 })
 
@@ -2090,7 +2204,11 @@ class Executor:
             logger.error("Failed to start WebSocket monitoring: %s", e)
 
     def _check_and_notify_sl_tp(self, current_price: float) -> None:
-        """Stop-loss ve take-profit seviyelerini kontrol et ve pozisyonu kapat (exit_plan'dan değerleri kullan)"""
+        """Stop-loss seviyesini kontrol et ve pozisyonu kapat (exit_plan'dan değerleri kullan)
+        
+        NOT: Take profit kontrolü kaldırılmıştır. Sadece stop loss kontrolü yapılır.
+        Profit target seviyesine ulaşıldığında bilgilendirme log'u gönderilir ama pozisyon kapatılmaz.
+        """
         try:
             # Mevcut pozisyonu kontrol et
             with Session(engine) as session:
@@ -2131,35 +2249,49 @@ class Executor:
                     if profit_target_raw is not None and profit_target_raw != 0.0:
                         profit_target_price = profit_target_raw
                 
-                # Exit plan yoksa veya değerler geçersizse fallback mantığı kullan
-                if not stop_loss_price and not profit_target_price:
-                    logger.debug("GLM exit plan not found or values invalid, using fallback SL/TP logic")
+                # Exit plan yoksa veya değerler geçersizse fallback mantığı kullan (sadece stop loss için)
+                if not stop_loss_price:
+                    logger.debug("GLM exit plan not found or values invalid, using fallback SL logic")
                     if is_long:
                         stop_loss_price = entry_price * 0.995  # %0.5 stop-loss
-                        profit_target_price = entry_price * 1.015  # %1.5 take-profit
                     else:
                         stop_loss_price = entry_price * 1.005  # %0.5 stop-loss
-                        profit_target_price = entry_price * 0.985  # %1.5 take-profit
+                
+                # Profit target bilgilendirme (pozisyonu kapatmadan)
+                if profit_target_price:
+                    if is_long:
+                        if current_price >= profit_target_price:
+                            logger.info(
+                                "ℹ️ Profit target reached (no auto-close): LONG position %.6f BTC @ %.2f, "
+                                "current %.2f, target %.2f | Position remains open - GLM can decide to CLOSE manually",
+                                abs(portfolio.position),
+                                entry_price,
+                                current_price,
+                                profit_target_price
+                            )
+                    else:  # SHORT
+                        if current_price <= profit_target_price:
+                            logger.info(
+                                "ℹ️ Profit target reached (no auto-close): SHORT position %.6f BTC @ %.2f, "
+                                "current %.2f, target %.2f | Position remains open - GLM can decide to CLOSE manually",
+                                abs(portfolio.position),
+                                entry_price,
+                                current_price,
+                                profit_target_price
+                            )
                 
                 trigger_type = None
                 trigger_price = None
                 
-                # LONG pozisyon kontrolü
+                # Sadece stop loss kontrolü (take profit kaldırıldı)
                 if is_long:
                     if stop_loss_price and current_price <= stop_loss_price:
                         trigger_type = "STOP-LOSS"
                         trigger_price = stop_loss_price
-                    elif profit_target_price and current_price >= profit_target_price:
-                        trigger_type = "TAKE-PROFIT"
-                        trigger_price = profit_target_price
-                # SHORT pozisyon kontrolü
-                else:
+                else:  # SHORT
                     if stop_loss_price and current_price >= stop_loss_price:
                         trigger_type = "STOP-LOSS"
                         trigger_price = stop_loss_price
-                    elif profit_target_price and current_price <= profit_target_price:
-                        trigger_type = "TAKE-PROFIT"
-                        trigger_price = profit_target_price
                 
                 # Seviye tetiklendi mi kontrol et
                 if trigger_type:
@@ -2178,7 +2310,7 @@ class Executor:
                 else:
                     # Seviye tetiklenmedi, sadece log (debug için)
                     logger.debug(
-                        "SL/TP check: %s @ %.2f, current %.2f, SL=%.2f, TP=%.2f",
+                        "SL check: %s @ %.2f, current %.2f, SL=%.2f, TP=%.2f (TP monitoring only, no auto-close)",
                         "LONG" if is_long else "SHORT",
                         entry_price,
                         current_price,
@@ -2406,11 +2538,14 @@ class Executor:
         if not exit_plan:
             return False, "Exit plan eksik"
         
-        profit_target = exit_plan.get("profit_target", 0.0)
-        stop_loss = exit_plan.get("stop_loss", 0.0)
+        profit_target = exit_plan.get("profit_target")
+        stop_loss = exit_plan.get("stop_loss")
         invalidation_condition = exit_plan.get("invalidation_condition", "")
         
         # Değerlerin geçerliliğini kontrol et
+        if profit_target is None or stop_loss is None:
+            return False, "Profit target ve stop loss boş olamaz"
+        
         if profit_target <= 0.0 or stop_loss <= 0.0:
             return False, "Profit target ve stop loss 0'dan büyük olmalı"
         

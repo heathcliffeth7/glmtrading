@@ -30,7 +30,7 @@ class Trade(Base):
     notional_value = Column(Float, nullable=True)  # price × amount × leverage
     fees = Column(Float, default=0.0)  # İşlem ücreti
     pnl = Column(Float, default=0.0)  # Realized PnL (kapanışta hesaplanır)
-    exit_plan = Column(JSON, nullable=True)  # Nof1.ai style exit plan: {profit_target, stop_loss, invalidation_condition}
+    exit_plan = Column(JSON, nullable=True)  # Nof1.ai style exit plan: {stop_loss, invalidation_condition} (profit_target removed - not required)
     exit_plan_history = Column(JSON, nullable=True)  # Tüm exit plan güncellemelerin logu: {"updates": [...]}
     timestamp = Column(DateTime, default=datetime.utcnow)
 

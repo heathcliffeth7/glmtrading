@@ -19,6 +19,7 @@ from app.utils.logging import configure_logging, get_logger
 from app.utils.telegram import format_markdown, telegram_client
 from app.monitoring.service_monitor import monitor_all, verify_htf_data
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from app.risk_manager.nof1_prompt_builder import Nof1PromptBuilder
 from app.risk_manager.dynamic_risk_manager import DynamicRiskManager
 from app.risk_manager.advanced_parser import AdvancedInvalidationParser
@@ -340,7 +341,10 @@ class AutomatedRunner:
     ) -> None:
         """Tek Telegram bildirimi - döngü tamamlandı"""
         if not telegram_client.enabled():
+            logger.warning("Telegram client is not enabled, skipping notification")
             return
+        
+        logger.info("📨 Preparing Telegram notification - telegram_client enabled: %s", telegram_client.enabled())
 
         starting_capital = 10000.0
         total_pnl = metrics['total_pnl']
@@ -469,11 +473,10 @@ class AutomatedRunner:
             stop_loss = decision.exit_plan.get("stop_loss", 0.0)
             invalidation = decision.exit_plan.get("invalidation_condition", "")
             
-            if profit_target and stop_loss:
+            if stop_loss:
                 exit_plan_lines = [
                     "",
                     "*🎯 Çıkış Planı*",
-                    f"💰 Kar Hedefi: ${profit_target:,.2f}",
                     f"🛑 Stop Loss: ${stop_loss:,.2f}",
                 ]
                 # Always show invalidation condition (even if N/A or empty)
@@ -514,9 +517,50 @@ class AutomatedRunner:
 
         # Calculate real PnL (gross PnL is already net of fees in realized_pnl)
         # But we want to show: Gross PnL (before fees) + Total Fees + Net PnL
-        total_fees = metrics.get('total_fees', 0.0)
-        gross_pnl = total_pnl + total_fees  # Geriye fee'leri ekleyerek brüt PnL'i bul
+        
+        # Calculate gross PnL from Trade table: Sum of (pnl + fees) for all closed trades
+        # + unrealized gross PnL for open positions
+        with Session(engine) as session:
+            # Sum of (pnl + fees) for all closed trades
+            # Handle NULL values properly: coalesce each field to 0 before summing
+            closed_gross_pnl = (
+                session.query(
+                    func.coalesce(
+                        func.sum(func.coalesce(Trade.pnl, 0.0) + func.coalesce(Trade.fees, 0.0)), 
+                        0.0
+                    )
+                )
+                .filter(Trade.symbol == self._symbol)
+                .filter(Trade.close_price.isnot(None))
+                .scalar()
+            ) or 0.0
+            
+            # Calculate unrealized gross PnL for open positions
+            # Note: metrics['unrealized_pnl'] is already GROSS (no fees deducted in calculation)
+            # It's calculated as: (current_price - entry_price) * position_amount
+            unrealized_pnl_gross = metrics.get('unrealized_pnl', 0.0)
+            # No need to add fees again - unrealized_pnl is already gross
+            unrealized_gross_pnl = unrealized_pnl_gross
+            
+            # Total gross PnL = closed trades gross PnL + open positions unrealized gross PnL
+            gross_pnl = float(closed_gross_pnl or 0.0) + unrealized_gross_pnl
+            
+            # Calculate total fees including both closed and open positions
+            total_fees_all = (
+                session.query(func.coalesce(func.sum(Trade.fees), 0.0))
+                .filter(Trade.symbol == self._symbol)
+                .scalar()
+            ) or 0.0
+            total_fees = float(total_fees_all)
+            
+            logger.info("💰 Gross PnL calculation - closed_gross_pnl: %.2f, unrealized_pnl_gross: %.2f, total_fees: %.2f, total_gross_pnl: %.2f",
+                       float(closed_gross_pnl or 0.0), unrealized_pnl_gross, total_fees, gross_pnl)
+        
         gross_pnl_pct = (gross_pnl / starting_cash) * 100
+        
+        # Calculate NET PnL correctly: Gross PnL - Total Fees
+        net_pnl = gross_pnl - total_fees
+        net_pnl_pct = (net_pnl / starting_cash) * 100
         
         portfolio_lines.extend([
             f"🏦 Toplam Equity: ${equity:,.2f}",
@@ -524,7 +568,7 @@ class AutomatedRunner:
             f"💰 Başlangıç Sermayesi: ${starting_cash:,.2f}",
             f"Pozisyon: {position_type} {abs(position):.4f} BTC",
             f"BTC Fiyat: ${metrics['price']:,.2f}",
-            f"Brüt PnL: ${gross_pnl:,.2f} ({gross_pnl_pct:+.2f}%) | Fee: ${total_fees:,.2f} → Net: ${total_pnl:,.2f} ({pnl_pct:+.2f}%)",
+            f"Brüt PnL: ${gross_pnl:,.2f} ({gross_pnl_pct:+.2f}%) | Fee: ${total_fees:,.2f} → Net: ${net_pnl:,.2f} ({net_pnl_pct:+.2f}%)",
             "",
             f"*📝 Son 5 İşlem* (Toplam: {displayed_trade_count})" + (f" | {skipped_anomalies} anomali saklandı" if skipped_anomalies else ""),
         ])
@@ -553,10 +597,10 @@ class AutomatedRunner:
                 logger.info("🔍 Exit Plan from Open Trade: profit_target=%s, stop_loss=%s, invalidation=%s",
                            profit_target, stop_loss, invalidation)
             
-            if profit_target and stop_loss:
+            if stop_loss:
                 # Insert exit plan right after "Pozisyon:" line (before BTC Fiyat)
                 position_line_idx = len(portfolio_lines) - 4  # 4 lines back from current end
-                portfolio_lines.insert(position_line_idx, f"  ├─ 🎯 Take Profit: ${profit_target:,.2f} | 🛑 Stop Loss: ${stop_loss:,.2f}")
+                portfolio_lines.insert(position_line_idx, f"  ├─ 🛑 Stop Loss: ${stop_loss:,.2f}")
                 
                 if invalidation and invalidation.strip() and invalidation.strip().upper() not in ["N/A", "NA", "NONE", ""]:
                     invalidation_escaped = format_markdown(invalidation)
@@ -653,18 +697,11 @@ class AutomatedRunner:
                     # Show gross PnL, fees, and net PnL
                     lines.append(f"   Brüt PnL: {gross_pnl_sign}${gross_pnl:,.2f} {pct_text}{fee_text} → Net: {pnl_sign}${net_pnl:.2f}")
                     
-                    # Add stop loss and take profit for open positions
+                    # Add stop loss for open positions (take profit removed - no auto-close)
                     if not trade['is_closed']:
                         stop_loss = trade.get('stop_loss')
-                        take_profit = trade.get('take_profit')
-                        if stop_loss or take_profit:
-                            exit_info = []
-                            if take_profit:
-                                exit_info.append(f"🎯 Take Profit: ${take_profit:,.2f}")
-                            if stop_loss:
-                                exit_info.append(f"🛑 Stop Loss: ${stop_loss:,.2f}")
-                            if exit_info:
-                                lines.append(f"   {' | '.join(exit_info)}")
+                        if stop_loss:
+                            lines.append(f"   🛑 Stop Loss: ${stop_loss:,.2f}")
         
         # Add reasoning header
         # CLOSE, LONG, SHORT durumunda veya PAPER durumunda Son İşlem Detayları göster
@@ -772,9 +809,40 @@ class AutomatedRunner:
         main_message = "\n".join(lines)
         
         # Escape markdown for reasoning
-        reasoning_escaped = decision.reasoning.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
+        reasoning_text = decision.reasoning if decision.reasoning else ""
+        reasoning_escaped = reasoning_text.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
+        
+        logger.info("📨 Message prepared - main_message length: %d, reasoning length: %d", len(main_message), len(reasoning_escaped))
         
         # Telegram has 4096 char limit - ilk mesajda mümkün olduğunca uzun gönder, kalanı parçalara böl
+        # Send GLM response JSON if available (before main message)
+        if decision.glm_response_json:
+            try:
+                import json
+                from app.risk_manager.manager import _json_serializer
+                
+                # Update response time in JSON if available
+                if decision.glm_response_time_ms > 0:
+                    decision.glm_response_json["karar"]["yanit_suresi_ms"] = decision.glm_response_time_ms
+                
+                # Format the complete GLM response as JSON for telegram
+                telegram_message = "```json\n" + json.dumps(decision.glm_response_json, indent=2, ensure_ascii=False, default=_json_serializer) + "\n```"
+                
+                # Add summary header
+                action = decision.action
+                quantity = decision.glm_response_json["karar"]["miktar_btc"]
+                leverage = decision.glm_response_json["karar"]["kaldirac"]
+                confidence = decision.glm_response_json["karar"]["guven"]
+                header_message = f"*🤖 GLM TAM YANITI*\n📊 Karar: {action} | Miktar: {quantity:.6f} BTC | Kaldıraç: {leverage:.1f}x | Güven: {confidence:.1f}%\n\n📝 JSON Yanıt:"
+                
+                # Send header and JSON separately to avoid size limits
+                telegram_client.send_message(header_message)
+                telegram_client.send_message(telegram_message)
+                
+                logger.info("✅ Complete GLM response JSON sent to Telegram")
+            except Exception as json_exc:
+                logger.error("❌ Failed to send GLM response JSON to Telegram: %s", json_exc)
+        
         try:
             available_space = 4096 - len(main_message) - 10  # 10 chars buffer
             
@@ -804,7 +872,11 @@ class AutomatedRunner:
                 logger.info("Telegram cycle notification sent in %d parts (total %d chars): action=%s trades=%d", 
                            total_parts, len(main_message) + len(reasoning_escaped), decision.action, total_trades)
         except Exception as exc:
-            logger.error("Telegram cycle notify failed: %s", exc)
+            logger.error("❌ Telegram cycle notify failed: %s", exc, exc_info=True)
+            logger.error("❌ Failed message details - main_message length: %d, reasoning length: %d, action: %s", 
+                        len(main_message) if 'main_message' in locals() else 0, 
+                        len(reasoning_escaped) if 'reasoning_escaped' in locals() else 0,
+                        decision.action if decision else "N/A")
     
     async def _daily_retraining_scheduler(self) -> None:
         """

@@ -41,6 +41,7 @@ class RiskDecision:
     glm_response_time_ms: float = 0.0  # GLM API response time in milliseconds
     exit_plan: Optional[dict] = None  # GLM's exit plan: {profit_target, stop_loss, invalidation_condition}
     close_side: Optional[str] = None  # YENİ: "LONG" veya "SHORT" (CLOSE action için hangi pozisyon kapatılacak)
+    glm_response_json: Optional[dict] = None  # GLM response JSON for Telegram notification
     # Timing and staleness detection
     decision_timestamp: Optional[datetime] = None  # When GLM made this decision
     market_snapshot_timestamp: Optional[datetime] = None  # Timestamp of market data used
@@ -328,14 +329,13 @@ class RiskManager:
                     f"  Current Price: ${current_price_val:,.2f}",
                     f"  Unrealized PnL: ${pnl:,.2f} ({pnl_pct:+.2f}%)",
                     "",
-                    f"  Profit Target: ${profit_target:,.2f}" if profit_target else "  Profit Target: N/A",
                     f"  Stop Loss: ${stop_loss:,.2f}" if stop_loss else "  Stop Loss: N/A",
                     f"  Invalidation Condition: {invalidation_condition}",
                     "",
                     "⚠️ DECISION RULES:",
-                    "  - Check if current price has hit profit_target, stop_loss, or invalidation_condition",
+                    "  - Check if current price has hit stop_loss or invalidation_condition",
                     "  - If exit plan conditions NOT met → HOLD (even if indicators show concern)",
-                    "  - If exit plan conditions met → CLOSE",
+                    "  - If stop_loss or invalidation_condition met → CLOSE (automatic)",
                     "  - Technical indicators (RSI, MACD) are for CONTEXT only, not for overriding exit plan",
                     "",
                 ])
@@ -350,9 +350,29 @@ class RiskManager:
                 "",
                 "🎯 NOF1.AI HOLDING STEADY STRATEGY:",
                 "  - If position exists and has small negative PnL (< 5%) but stop-loss NOT triggered → HOLD, do NOT close!",
-                "  - Only CLOSE if exit plan stop-loss/take-profit is triggered OR strong trend reversal confirmed",
                 "  - Do NOT open new position if current position exists! Wait for current position to close first.",
                 "  - Trust your exit plan! Small fluctuations are normal, do not panic.",
+                "",
+                "⚠️ CLOSE ACTION KURALLARI (ÇOK KATI - ERKEN KAPATMAYI ÖNLEMEK İÇİN):",
+                "",
+                "❌ CLOSE YAPMA EĞER:",
+                "  - Küçük negatif PnL (<%5) ve stop-loss tetiklenmemiş → MUTLAKA HOLD",
+                "  - Kârlı pozisyon (>%2) ve sadece 1-2 timeframe'de reversal → HOLD (tüm timeframe'ler gerekli)",
+                "  - Kârlı pozisyon ve confidence <%95 → HOLD (çok yüksek güven gerekli)",
+                "  - Küçük fiyat dalgalanmaları (%3-5) → HOLD (normal dalgalanmalar)",
+                "  - Tek bir indikatörün sinyali → HOLD (tüm timeframe'lerde reversal gerekli)",
+                "",
+                "✅ CLOSE YAP SADECE EĞER:",
+                "  - Stop-loss tetiklendi (otomatik kapanır zaten - bu durumda CLOSE gerekmez)",
+                "  - TÜM timeframe'lerde (1m, 30m, 4h) güçlü trend reversal + confidence ≥%95",
+                "  - Pozisyon zararlı (<-%5) ve trend reversal tüm timeframe'lerde + confidence ≥%95",
+                "  - Kârlı pozisyon (>%2) için: TÜM timeframe'lerde reversal + confidence ≥%98 (daha katı)",
+                "",
+                "🔍 CLOSE İÇİN MUTLAKA GEREKLİ KOŞULLAR:",
+                "  1. Tüm timeframe'lerde (1m, 30m, 4h) trend reversal OLMALI",
+                "  2. Minimum confidence: %95 (çok yüksek güven gerekli)",
+                "  3. Pozisyon kârlıysa (>%2): Minimum confidence %98 (daha katı)",
+                "  4. Küçük negatif PnL (<%5) ve stop-loss tetiklenmemişse → MUTLAKA HOLD, CLOSE YAPMA",
                 "",
             ])
         
@@ -509,19 +529,17 @@ class RiskManager:
             "",
             "STEP 1: CHECK EXISTING POSITION AND EXIT PLAN",
             "  - First, check if you have an existing position in BTC",
-            "  - If position exists, retrieve its exit plan: {profit_target, stop_loss, invalidation_condition}",
+            "  - If position exists, retrieve its exit plan: {stop_loss, invalidation_condition}",
             "  - Review current price vs entry price, calculate unrealized PnL",
-            "  - Check if current price has hit profit_target, stop_loss, or invalidation_condition",
+            "  - Check if current price has hit stop_loss or invalidation_condition",
             "",
             "STEP 2: EVALUATE EXIT PLAN CONDITIONS",
             "  - For LONG position:",
-            "    * Check if price >= profit_target → CLOSE (take profit)",
-            "    * Check if price <= stop_loss → CLOSE (stop loss)",
-            "    * Check if invalidation condition met (e.g., 'price closes below X on 3-minute candle') → CLOSE",
+            "    * Check if price <= stop_loss → CLOSE (stop loss - automatic)",
+            "    * Check if invalidation condition met (e.g., 'price closes below X on 3-minute candle') → CLOSE (automatic)",
             "  - For SHORT position:",
-            "    * Check if price <= profit_target → CLOSE (take profit)",
-            "    * Check if price >= stop_loss → CLOSE (stop loss)",
-            "    * Check if invalidation condition met (e.g., 'price closes above X on 3-minute candle') → CLOSE",
+            "    * Check if price >= stop_loss → CLOSE (stop loss - automatic)",
+            "    * Check if invalidation condition met (e.g., 'price closes above X on 3-minute candle') → CLOSE (automatic)",
             "",
             "STEP 3: TECHNICAL INDICATORS (FOR CONTEXT ONLY)",
             "  - Review RSI, MACD, EMA indicators",
@@ -540,9 +558,8 @@ class RiskManager:
             "STEP 5: REASONING FORMAT",
             "  - For HOLD: Explain why exit plan conditions not met",
             "    Example: 'BTC position holding steady. Current price 109967, entry 107343, unrealized PnL +314.94. '",
-            "            'Exit plan: profit_target 118136 (not hit), stop_loss 102026 (not hit), '",
-            "            'invalidation below 105000 (not triggered). RSI oversold at 29.7 but invalidation condition '",
-            "            'not met, so holding per exit plan.'",
+            "            'Exit plan: stop_loss 102026 (not hit), invalidation below 105000 (not triggered). '",
+            "            'RSI oversold at 29.7 but invalidation condition not met, so holding per exit plan.'",
             "  - For CLOSE: Explain which exit plan condition was triggered",
             "    Example: 'BTC position closing. Stop-loss triggered at 102026, current price 101800.'",
             "",
@@ -610,9 +627,24 @@ class RiskManager:
             '  - CLOSE: Close existing position (LONG or SHORT) - NO new position opened!',
             '  - HOLD: Do nothing, wait for better opportunity',
             '',
-            'WHEN TO USE CLOSE:',
-            '  - Current position is LONG and market shows bearish signals → CLOSE (not SELL!)',
-            '  - Current position is SHORT and market shows bullish signals → CLOSE (not BUY!)',
+            'WHEN TO USE CLOSE (ÇOK KATI KURALLAR):',
+            '',
+            '❌ CLOSE YAPMA EĞER:',
+            '  - Küçük negatif PnL (<%5) ve stop-loss tetiklenmemiş → MUTLAKA HOLD',
+            '  - Kârlı pozisyon (>%2) ve sadece 1-2 timeframe\'de reversal → HOLD',
+            '  - Kârlı pozisyon ve confidence <%98 → HOLD',
+            '  - Küçük fiyat dalgalanmaları (%3-5) → HOLD',
+            '',
+            '✅ CLOSE YAP SADECE EĞER:',
+            '  - TÜM timeframe\'lerde (1m, 30m, 4h) güçlü trend reversal + confidence ≥%95',
+            '  - Pozisyon zararlı (<-%5) ve trend reversal tüm timeframe\'lerde + confidence ≥%95',
+            '  - Kârlı pozisyon (>%2) için: TÜM timeframe\'lerde reversal + confidence ≥%98',
+            '',
+            '⚠️ CLOSE İÇİN MUTLAKA GEREKLİ:',
+            '  1. Tüm timeframe\'lerde (1m, 30m, 4h) trend reversal',
+            '  2. Minimum confidence: %95 (kârlı pozisyonlar için %98)',
+            '  3. Küçük negatif PnL (<%5) ve stop-loss tetiklenmemişse → HOLD, CLOSE YAPMA',
+            '',
             '  - CLOSE directly exits position without opening opposite direction trade',
             '',
             "🎯 NOF1.AI AGGRESSIVE TRADING STYLE: COMPLETE FREEDOM",
@@ -666,7 +698,7 @@ class RiskManager:
         return [
             {
                 "role": "system",
-                "content": "Sen profesyonel bir kripto türev piyasası risk yöneticisisin. **NOF1.AI DEEPSEEK STYLE: HOLDING STEADY STRATEGY** - Pozisyonları sabit tut, küçük dalgalanmalarda panik yapma! **MULTI-TIMEFRAME ANALİZİ ÖNCELİKLİ**: 3 farklı timeframe'i (1m intraday, 30m ana, 4h uzun vade) değerlendiriyorsun. Önce tüm timeframe'lerin uyumunu kontrol et - hepsi aynı yönde mi? Sonra 25 indikatörü (Futures + Momentum + Trend + Volatilite) analiz et. **ZAMAN SERİSİ ANALİZİ**: Her timeframe için son 10 verilik dizilere bakarak trend değişimlerini, dip/tepe formasyonlarını ve momentum dönüşlerini tespit et. **POZİSYON YÖNETİMİ KURALLARI** (ÇOK ÖNEMLİ!): (1) **HOLDING STEADY PRINCIPLE**: Mevcut pozisyon varsa ve küçük negatif PnL'de (< %5) ama stop-loss tetiklenmemişse → MUTLAKA **HOLD** kararı ver, CLOSE yapma! (2) **CLOSE KARARI**: Sadece exit plan'daki stop-loss veya take-profit seviyeleri tetiklendiğinde veya güçlü trend değişimi tüm timeframe'lerde doğrulandığında CLOSE yap. Küçük dalgalanmalarda panik yapma! (3) Mevcut pozisyon LONG (+pozitif BTC miktarı) ve piyasa düşüş sinyali veriyorsa → Exit plan stop-loss tetiklenmedikçe **HOLD**, sadece ciddi trend değişimi varsa **CLOSE**. (4) Mevcut pozisyon SHORT (-negatif BTC miktarı) ve piyasa yükseliş sinyali veriyorsa → Exit plan stop-loss tetiklenmedikçe **HOLD**, sadece ciddi trend değişimi varsa **CLOSE**. (5) **CLOSE action**: Mevcut pozisyonu DİREK kapatır, karşı yönde yeni pozisyon AÇMAZ. Miktar: tam kapatma için 1.0, kısmi kapatma için 0.5-0.8 kullan. (6) **BUY/SELL action**: Sadece YENİ pozisyon açmak veya mevcut pozisyonu artırmak için kullan. Mevcut pozisyon varsa yeni pozisyon açma! (7) Pozisyon = 0 ise BUY/SELL ile yeni pozisyon açabilirsin. Gerekçende MUTLAKA belirt: (1) Timeframe uyumu (1m/30m/4h), (2) Her timeframe'deki pattern'ler, (3) Momentum göstergeleri (RSI, WillR, MFI, CCI, Stoch), (4) Trend göstergeleri (EMA, MACD, SAR), (5) Volatilite (ATR, BB), (6) Futures metrikleri (L/S, FR, OI), (7) **Mevcut pozisyon durumu ve holding steady kararı - Exit plan tetiklenmiş mi? Küçük negatif PnL'de mi?**. Timeframe'ler uyumluysa yüksek güven, uyumsuzsa HOLD veya düşük güven ver."
+                "content": "Sen profesyonel bir kripto türev piyasası risk yöneticisisin. **NOF1.AI DEEPSEEK STYLE: HOLDING STEADY STRATEGY** - Pozisyonları sabit tut, küçük dalgalanmalarda panik yapma! **MULTI-TIMEFRAME ANALİZİ ÖNCELİKLİ**: 3 farklı timeframe'i (1m intraday, 30m ana, 4h uzun vade) değerlendiriyorsun. Önce tüm timeframe'lerin uyumunu kontrol et - hepsi aynı yönde mi? Sonra 25 indikatörü (Futures + Momentum + Trend + Volatilite) analiz et. **ZAMAN SERİSİ ANALİZİ**: Her timeframe için son 10 verilik dizilere bakarak trend değişimlerini, dip/tepe formasyonlarını ve momentum dönüşlerini tespit et. **POZİSYON YÖNETİMİ KURALLARI** (ÇOK ÖNEMLİ!): (1) **HOLDING STEADY PRINCIPLE**: Mevcut pozisyon varsa ve küçük negatif PnL'de (< %5) ama stop-loss tetiklenmemişse → MUTLAKA **HOLD** kararı ver, CLOSE yapma! (2) **CLOSE KARARI**: Sadece exit plan'daki stop-loss veya invalidation_condition tetiklendiğinde (otomatik kapanır) veya güçlü trend değişimi tüm timeframe'lerde doğrulandığında CLOSE yap. Küçük dalgalanmalarda panik yapma! (3) Mevcut pozisyon LONG (+pozitif BTC miktarı) ve piyasa düşüş sinyali veriyorsa → Exit plan stop-loss tetiklenmedikçe **HOLD**, sadece ciddi trend değişimi varsa **CLOSE**. (4) Mevcut pozisyon SHORT (-negatif BTC miktarı) ve piyasa yükseliş sinyali veriyorsa → Exit plan stop-loss tetiklenmedikçe **HOLD**, sadece ciddi trend değişimi varsa **CLOSE**. (5) **CLOSE action**: Mevcut pozisyonu DİREK kapatır, karşı yönde yeni pozisyon AÇMAZ. Miktar: tam kapatma için 1.0, kısmi kapatma için 0.5-0.8 kullan. (6) **BUY/SELL action**: Sadece YENİ pozisyon açmak veya mevcut pozisyonu artırmak için kullan. Mevcut pozisyon varsa yeni pozisyon açma! (7) Pozisyon = 0 ise BUY/SELL ile yeni pozisyon açabilirsin. Gerekçende MUTLAKA belirt: (1) Timeframe uyumu (1m/30m/4h), (2) Her timeframe'deki pattern'ler, (3) Momentum göstergeleri (RSI, WillR, MFI, CCI, Stoch), (4) Trend göstergeleri (EMA, MACD, SAR), (5) Volatilite (ATR, BB), (6) Futures metrikleri (L/S, FR, OI), (7) **Mevcut pozisyon durumu ve holding steady kararı - Exit plan tetiklenmiş mi? Küçük negatif PnL'de mi?**. Timeframe'ler uyumluysa yüksek güven, uyumsuzsa HOLD veya düşük güven ver."
             },
             {"role": "user", "content": prompt_content},
         ]
@@ -1830,6 +1862,16 @@ IMPORTANT:
         raw_market_data = signal.metadata.get("raw_market_data", {})
         htf_analysis = signal.metadata.get("htf_analysis")
         
+        # DEBUG: Log portfolio metrics content to verify multi-position support
+        if portfolio_metrics:
+            logger.info("🔍 DEBUG Portfolio Metrics Keys: %s", list(portfolio_metrics.keys()))
+            logger.info("🔍 DEBUG long_position: %s", portfolio_metrics.get("long_position"))
+            logger.info("🔍 DEBUG short_position: %s", portfolio_metrics.get("short_position"))
+            logger.info("🔍 DEBUG long_exit_plan: %s", portfolio_metrics.get("long_exit_plan"))
+            logger.info("🔍 DEBUG short_exit_plan: %s", portfolio_metrics.get("short_exit_plan"))
+        else:
+            logger.warning("⚠️ DEBUG: portfolio_metrics is None or empty!")
+        
         # Use NOF1.AI prompt builder for professional format
         if raw_market_data:
             content = self._nof1_prompt_builder.build_prompt(
@@ -2099,7 +2141,7 @@ IMPORTANT:
             "",
             "You must output your decision in JSON format:",
             "",
-            '{\n  "BTCUSDT": {\n    "trade_signal_args": {\n      "coin": "BTCUSDT",\n      "signal": "hold|close_position|buy|sell",\n      "quantity": 0.12,\n      "profit_target": 118136.15,\n      "stop_loss": 102026.675,\n      "invalidation_condition": "If the price closes below 105000 on a 3-minute candle",\n      "leverage": 10,\n      "confidence": 0.75,\n      "risk_usd": 619.2345,\n      "justification": "..." // Only for entry/close\n    }\n  }\n}',
+            '{\n  "BTCUSDT": {\n    "trade_signal_args": {\n      "coin": "BTCUSDT",\n      "signal": "hold|close_position|buy|sell",\n      "quantity": 0.12,\n      "stop_loss": 102026.675,\n      "invalidation_condition": "If the price closes below 105000 on a 3-minute candle",\n      "leverage": 10,\n      "confidence": 0.75,\n      "risk_usd": 619.2345,\n      "justification": "..." // Only for entry/close\n    }\n  }\n}',
             "",
             "Signal types:",
             "- hold: Keep current position, monitor",
@@ -2291,23 +2333,21 @@ IMPORTANT:
             invalidation_condition = trade_signal_args.get("invalidation_condition", "")
             risk_usd = trade_signal_args.get("risk_usd", 0.0)
             
-            # 🔍 DEBUG: GLM Exit Plan
+            # 🔍 DEBUG: GLM Exit Plan (profit_target removed - not required)
             logger.info("🔍 GLM Exit Plan Debug:")
-            logger.info("  └─ profit_target: %s (type: %s)", profit_target, type(profit_target).__name__)
             logger.info("  └─ stop_loss: %s (type: %s)", stop_loss, type(stop_loss).__name__)
             logger.info("  └─ invalidation_condition: '%s'", invalidation_condition)
             
-            # Build exit_plan dict if GLM provided exit plan values
+            # Build exit_plan dict if GLM provided exit plan values (profit_target removed - not required)
             exit_plan = None
-            if profit_target is not None or stop_loss is not None:
+            if stop_loss is not None:
                 exit_plan = {
-                    "profit_target": profit_target,
                     "stop_loss": stop_loss,
                     "invalidation_condition": invalidation_condition,
                 }
                 logger.info("✅ GLM Exit Plan created: %s", exit_plan)
             else:
-                logger.warning("⚠️ GLM Exit Plan MISSING in JSON - profit_target and stop_loss are both None")
+                logger.warning("⚠️ GLM Exit Plan MISSING in JSON - stop_loss is None")
                 
                 # FALLBACK: Try to extract exit plan from justification text
                 # Sometimes GLM provides exit plan in text but not in JSON fields
@@ -2315,27 +2355,13 @@ IMPORTANT:
                     logger.info("🔍 Attempting to extract exit plan from justification text...")
                     import re
                     
-                    # Turkish patterns: "Kar hedefi: 108500" or "Stop loss: 111200"
-                    tp_patterns = [
-                        r'[Kk]ar\s+hedef[ıi][:\s]+(\d+\.?\d*)',  # Kar hedefi: 108500
-                        r'profit[_\s]*target[:\s]+(\d+\.?\d*)',   # profit_target: 108500
-                        r'hedef[:\s]+(\d+\.?\d*)',                # hedef: 108500
-                    ]
-                    
+                    # Turkish patterns: "Stop loss: 111200"
                     sl_patterns = [
                         r'[Ss]top\s+loss[:\s]+(\d+\.?\d*)',       # Stop loss: 111200
                         r'zarar\s+dur[:\s]+(\d+\.?\d*)',          # zarar dur: 111200
                     ]
                     
-                    extracted_tp = None
                     extracted_sl = None
-                    
-                    for pattern in tp_patterns:
-                        match = re.search(pattern, justification)
-                        if match:
-                            extracted_tp = float(match.group(1))
-                            logger.info("✅ Extracted profit_target from text: %.2f", extracted_tp)
-                            break
                     
                     for pattern in sl_patterns:
                         match = re.search(pattern, justification)
@@ -2344,17 +2370,15 @@ IMPORTANT:
                             logger.info("✅ Extracted stop_loss from text: %.2f", extracted_sl)
                             break
                     
-                    if extracted_tp and extracted_sl:
+                    if extracted_sl:
                         # Successfully extracted from text!
                         exit_plan = {
-                            "profit_target": extracted_tp,
                             "stop_loss": extracted_sl,
                             "invalidation_condition": invalidation_condition or "Gerekçede belirtilen koşul",
                         }
                         logger.info("✅ GLM Exit Plan extracted from justification text: %s", exit_plan)
                         
                         # Update the trade_signal_args for consistency
-                        profit_target = extracted_tp
                         stop_loss = extracted_sl
                     else:
                         logger.warning("⚠️ Could not extract exit plan from justification text")
@@ -2364,7 +2388,6 @@ IMPORTANT:
                     logger.warning("⚠️ No valid exit plan for %s action - executor will use fallback", action)
                     # Don't force HOLD here - let executor create fallback exit plan
                     exit_plan = {
-                        "profit_target": None,  # Executor will calculate fallback
                         "stop_loss": None,      # Executor will calculate fallback
                         "invalidation_condition": invalidation_condition or "",
                     }
@@ -2386,8 +2409,6 @@ IMPORTANT:
                 if not justification:  # Sadece justification yoksa ekle
                     reasoning_parts.append("Mevcut pozisyonu koruyorum")
             
-            if profit_target:
-                reasoning_parts.append(f"Kar hedefi: {profit_target:.2f}")
             if stop_loss:
                 reasoning_parts.append(f"Stop loss: {stop_loss:.2f}")
             if invalidation_condition and invalidation_condition.strip() and invalidation_condition.strip().upper() not in ["N/A", "NA", "NONE", ""]:
@@ -2395,43 +2416,25 @@ IMPORTANT:
             
             reasoning = " | ".join(reasoning_parts) if reasoning_parts else "Gerekçe belirtilmedi"
             
-            # === SEND COMPLETE GLM RESPONSE TO TELEGRAM ===
-            try:
-                if telegram_client.enabled():
-                    # Format the complete GLM response as JSON for telegram
-                    telegram_data = {
-                        "type": "GLM_TAM_YANITI",
-                        "karar": {
-                            "action": action,
-                            "miktar_btc": quantity,
-                            "kaldirac": leverage,
-                            "guven": confidence,
-                            "yanit_suresi_ms": 0  # Will be set after decision creation
-                        },
-                        "glm_yaniti": {
-                            "tam_json": payload,
-                            "gerekce_uzunluk": len(justification)
-                        },
-                        "portfoy": portfolio_metrics if portfolio_metrics else {},
-                        "timestamp": response.get("timestamp", ""),
-                        "token_kullanimi": response.get("usage", {})
-                    }
-                    
-                    # Convert to formatted JSON string (handle datetime objects)
-                    telegram_message = "```json\n" + json.dumps(telegram_data, indent=2, ensure_ascii=False, default=_json_serializer) + "\n```"
-                    
-                    # Add summary header
-                    header_message = f"*🤖 GLM TAM YANITI*\n📊 Karar: {action} | Miktar: {quantity:.6f} BTC | Kaldıraç: {leverage:.1f}x | Güven: {confidence:.1f}%\n\n📝 JSON Yanıt:"
-                    
-                    # Send header and JSON separately to avoid size limits
-                    telegram_client.send_message(header_message)
-                    telegram_client.send_message(telegram_message)
-                    
-                    logger.info("✅ Complete GLM response sent to Telegram as JSON")
-                else:
-                    logger.debug("Telegram disabled, skipping GLM response notification")
-            except Exception as telegram_exc:
-                logger.error("❌ Failed to send GLM response to Telegram: %s", telegram_exc)
+            # Prepare GLM response JSON for Telegram notification
+            # This will be sent in _notify_cycle_complete to avoid duplicate messages
+            glm_response_json_data = {
+                "type": "GLM_TAM_YANITI",
+                "karar": {
+                    "action": action,
+                    "miktar_btc": quantity,
+                    "kaldirac": leverage,
+                    "guven": confidence,
+                    "yanit_suresi_ms": 0  # Will be updated with actual response time
+                },
+                "glm_yaniti": {
+                    "tam_json": payload,
+                    "gerekce_uzunluk": len(justification)
+                },
+                "portfoy": portfolio_metrics if portfolio_metrics else {},
+                "timestamp": response.get("timestamp", ""),
+                "token_kullanimi": response.get("usage", {})
+            }
             
             # Create decision object
             decision = RiskDecision(
@@ -2443,17 +2446,11 @@ IMPORTANT:
                 reason_primary=justification[:100] if justification else "",
                 reason_secondary="",
                 exit_plan=exit_plan,  # GLM's exit plan
+                glm_response_json=glm_response_json_data,  # Store JSON for Telegram notification
             )
             
-            # Update telegram data with response time if available
-            if telegram_client.enabled() and hasattr(response, '_glm_latency_ms'):
-                try:
-                    telegram_data["karar"]["yanit_suresi_ms"] = response._glm_latency_ms
-                    # Send updated timing info
-                    timing_message = f"⏱️ Yanıt Süresi: {response._glm_latency_ms:.0f}ms"
-                    telegram_client.send_message(timing_message)
-                except:
-                    pass
+            # Response time bilgisi decision objesine zaten ekleniyor (evaluate() içinde)
+            # Telegram mesajı _notify_cycle_complete içinde gönderiliyor
             
             return decision
             
@@ -2467,10 +2464,9 @@ IMPORTANT:
             try:
                 import re
                 
-                # Extract key values using regex patterns
+                # Extract key values using regex patterns (profit_target removed - not required)
                 signal_match = re.search(r'"signal":\s*"([^"]+)"', content)
                 quantity_match = re.search(r'"quantity":\s*([0-9.]+)', content)
-                profit_target_match = re.search(r'"profit_target":\s*([0-9.]+)', content)
                 stop_loss_match = re.search(r'"stop_loss":\s*([0-9.]+)', content)
                 leverage_match = re.search(r'"leverage":\s*([0-9.]+)', content)
                 confidence_match = re.search(r'"confidence":\s*([0-9.]+)', content)
@@ -2480,7 +2476,6 @@ IMPORTANT:
                     # Extract values
                     signal = signal_match.group(1).lower()
                     quantity = float(quantity_match.group(1))
-                    profit_target = float(profit_target_match.group(1)) if profit_target_match else None
                     stop_loss = float(stop_loss_match.group(1)) if stop_loss_match else None
                     leverage = float(leverage_match.group(1)) if leverage_match else 10.0
                     confidence = float(confidence_match.group(1)) if confidence_match else 0.5
@@ -2496,14 +2491,13 @@ IMPORTANT:
                     action = signal_map.get(signal, "HOLD")
                     
                     logger.info("✅ Fallback parsing successful: action=%s, quantity=%.6f", action, quantity)
-                    logger.info("  └─ PT: %s, SL: %s, Lev: %.1f, Conf: %.2f", 
-                               profit_target, stop_loss, leverage, confidence)
+                    logger.info("  └─ SL: %s, Lev: %.1f, Conf: %.2f", 
+                               stop_loss, leverage, confidence)
                     
-                    # Build exit plan if we have the data
+                    # Build exit plan if we have the data (profit_target removed - not required)
                     exit_plan = None
-                    if profit_target and stop_loss and action in ["BUY", "SELL"]:
+                    if stop_loss and action in ["BUY", "SELL"]:
                         exit_plan = {
-                            "profit_target": profit_target,
                             "stop_loss": stop_loss,
                             "invalidation_condition": "",
                         }
