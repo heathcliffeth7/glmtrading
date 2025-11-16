@@ -25,38 +25,6 @@ class BinanceSettings(BaseSettings):
         extra = "allow"
 
 
-class TwelveDataSettings(BaseSettings):
-    api_keys: List[str] = Field(default_factory=list, alias="TWELVE_DATA_API_KEYS")
-    base_url: AnyHttpUrl = Field("https://api.twelvedata.com", alias="TWELVE_DATA_BASE_URL")
-
-    @validator("api_keys", pre=True)
-    @classmethod
-    def parse_api_keys(cls, value):
-        if value is None:
-            return value
-        if isinstance(value, list):
-            return value
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return []
-            if text.startswith("["):
-                try:
-                    parsed = json.loads(text)
-                    if isinstance(parsed, list):
-                        return [str(item) for item in parsed]
-                except json.JSONDecodeError:
-                    pass
-            return [item.strip() for item in text.split(",") if item.strip()]
-        return value
-
-    class Config:
-        env_file = str(ENV_FILE)
-        env_file_encoding = "utf-8"
-        case_sensitive = False
-        extra = "allow"
-
-
 class RedisSettings(BaseSettings):
     url: AnyUrl = Field("redis://localhost:6379/0", alias="REDIS_URL")
 
@@ -108,7 +76,6 @@ class AppSettings(BaseSettings):
     position_monitor_check_invalidation: bool = Field(True, alias="POSITION_MONITOR_CHECK_INVALIDATION")
     
     binance: BinanceSettings = Field(default_factory=BinanceSettings)
-    twelve_data: TwelveDataSettings = Field(default_factory=TwelveDataSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     influx: InfluxSettings = Field(default_factory=InfluxSettings)
     qlib: QLibSettings = Field(default_factory=QLibSettings)

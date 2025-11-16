@@ -142,7 +142,7 @@ class AutomatedRunner:
         else:
             logger.info("Position Monitor disabled in settings")
         
-        # NOTE: feature workers and data feed disabled - using TwelveData sync service instead
+        # NOTE: feature workers and data feed disabled
         # feeder = asyncio.create_task(data_feed_orchestrator())
         # feature_task = asyncio.create_task(start_feature_workers([self._symbol], ["1m", self._interval]))
         
@@ -205,7 +205,7 @@ class AutomatedRunner:
             "Agent signal | direction=%s | confidence=%.4f | reasoning=%s",
             signal.direction,
             signal.confidence,
-            signal.reasoning,  # Show full reasoning (TwelveData indicators included)
+            signal.reasoning,  # Show full reasoning
         )
         
         # Get portfolio metrics for GLM context (BEFORE execution)

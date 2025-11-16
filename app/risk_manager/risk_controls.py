@@ -64,22 +64,21 @@ def validate_exit_plan_update(
     """
     try:
         stop_loss = new_plan.get('stop_loss')
-        profit_target = new_plan.get('profit_target')
         invalidation_condition = new_plan.get('invalidation_condition', '')
         
-        if not stop_loss or not profit_target:
-            raise ValidationError("Stop loss veya profit target eksik")
+        if not stop_loss:
+            raise ValidationError("Stop loss eksik")
         
         inv_price = parse_invalidation_price(invalidation_condition)
         
         if position_side == "LONG":
-            _validate_long_position(entry_price, stop_loss, profit_target, inv_price)
+            _validate_long_position(entry_price, stop_loss, inv_price)
         elif position_side == "SHORT":
-            _validate_short_position(entry_price, stop_loss, profit_target, inv_price)
+            _validate_short_position(entry_price, stop_loss, inv_price)
         else:
             raise ValidationError(f"Geçersiz position_side: {position_side}")
         
-        _validate_common_rules(entry_price, stop_loss, profit_target, position_side)
+        _validate_common_rules(entry_price, stop_loss, position_side)
         
         return True, None
         
@@ -94,7 +93,6 @@ def validate_exit_plan_update(
 def _validate_long_position(
     entry_price: float,
     stop_loss: float,
-    profit_target: float,
     inv_price: Optional[float]
 ):
     """LONG pozisyon özel validasyonları"""
@@ -105,12 +103,7 @@ def _validate_long_position(
             f"Entry={entry_price}, SL={stop_loss}"
         )
     
-    if profit_target <= entry_price:
-        raise ValidationError(
-            f"LONG TP entry'nin altında olamaz! "
-            f"Entry={entry_price}, TP={profit_target}"
-        )
-    
+        
     if inv_price is not None:
         if not (entry_price > inv_price > stop_loss):
             raise ValidationError(
@@ -129,7 +122,6 @@ def _validate_long_position(
 def _validate_short_position(
     entry_price: float,
     stop_loss: float,
-    profit_target: float,
     inv_price: Optional[float]
 ):
     """SHORT pozisyon özel validasyonları"""
@@ -140,12 +132,7 @@ def _validate_short_position(
             f"Entry={entry_price}, SL={stop_loss}"
         )
     
-    if profit_target >= entry_price:
-        raise ValidationError(
-            f"SHORT TP entry'nin üstünde olamaz! "
-            f"Entry={entry_price}, TP={profit_target}"
-        )
-    
+        
     if inv_price is not None:
         if not (stop_loss > inv_price > entry_price):
             raise ValidationError(
@@ -164,7 +151,6 @@ def _validate_short_position(
 def _validate_common_rules(
     entry_price: float,
     stop_loss: float,
-    profit_target: float,
     position_side: str
 ):
     """Hem LONG hem SHORT için ortak kurallar"""
@@ -177,13 +163,6 @@ def _validate_common_rules(
         )
     
     risk = abs(entry_price - stop_loss)
-    reward = abs(profit_target - entry_price)
-    
+
     if risk == 0:
         raise ValidationError("Risk 0 olamaz!")
-    
-    risk_reward_ratio = reward / risk
-    if risk_reward_ratio < 1.5:
-        raise ValidationError(
-            f"Risk/Reward çok düşük: {risk_reward_ratio:.2f} (min: 1.5)"
-        )

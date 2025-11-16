@@ -1,24 +1,26 @@
 """
 Enriched Feed - Combines Binance data sources for comprehensive trading signals
-Aggregates: Binance Spot + Binance Futures + TA Features
+Aggregates: Binance Spot + Binance Futures + Technical Analysis Features
 """
 import asyncio
 from datetime import datetime
 from typing import Dict, Any, List
 
 import httpx
+import numpy as np
 import pandas as pd
-import ta
 
 from app.config.settings import get_settings
 from app.data_feeds.binance_futures import BinanceFuturesClient
 from app.utils.influx import write_measurement, query_latest_snapshot
 from app.utils.latency import get_latency_tracker
 from app.utils.logging import get_logger
+from app.indicators.technical_analyzer import TechnicalAnalyzer
 
 
 settings = get_settings()
 logger = get_logger(__name__)
+technical_analyzer = TechnicalAnalyzer()
 
 
 async def fetch_binance_klines(symbol: str, interval: str = "1m", limit: int = 200) -> List[Dict]:
@@ -80,18 +82,20 @@ def calculate_indicators_from_klines(klines: List[Dict]) -> Dict[str, Any]:
             logger.warning("No klines available for indicator calculation")
             return {}
         
-        # Convert to DataFrame
-        df = pd.DataFrame(klines)
-        
-        # Calculate indicators using ta library
+        # Extract OHLC data as numpy arrays for TechnicalAnalyzer
+        close_prices = np.array([float(k['close']) for k in klines])
+        high_prices = np.array([float(k['high']) for k in klines])
+        low_prices = np.array([float(k['low']) for k in klines])
+        volumes = np.array([float(k['volume']) for k in klines])
+
+        # Calculate indicators
         indicators = {}
-        
+
         # Latest bar data - ALWAYS include basic OHLCV regardless of kline count
-        latest = df.iloc[-1]
-        indicators['close'] = float(latest['close'])
-        indicators['high'] = float(latest['high'])
-        indicators['low'] = float(latest['low'])
-        indicators['volume'] = float(latest['volume'])
+        indicators['close'] = float(close_prices[-1])
+        indicators['high'] = float(high_prices[-1])
+        indicators['low'] = float(low_prices[-1])
+        indicators['volume'] = float(volumes[-1])
         
         # Early return if not enough klines for indicators (but we have OHLCV)
         if len(klines) < 50:
@@ -103,89 +107,43 @@ def calculate_indicators_from_klines(klines: List[Dict]) -> Dict[str, Any]:
                        indicators.get('volume', 0))
             return indicators
         
-        # Trend indicators
-        if len(df) >= 20:
-            ema_20 = ta.trend.EMAIndicator(df['close'], window=20, fillna=True)
-            indicators['ema_20'] = float(ema_20.ema_indicator().iloc[-1])
-        
-        if len(df) >= 50:
-            ema_50 = ta.trend.EMAIndicator(df['close'], window=50, fillna=True)
-            indicators['ema_50'] = float(ema_50.ema_indicator().iloc[-1])
-        
-        # MACD
-        macd = ta.trend.MACD(df['close'], fillna=True)
-        indicators['macd'] = float(macd.macd().iloc[-1])
-        indicators['macd_signal'] = float(macd.macd_signal().iloc[-1])
-        
-        # Momentum indicators
-        if len(df) >= 14:
-            rsi14 = ta.momentum.RSIIndicator(df['close'], window=14, fillna=True)
-            indicators['rsi_14'] = float(rsi14.rsi().iloc[-1])
-        if len(df) >= 7:
-            rsi7 = ta.momentum.RSIIndicator(df['close'], window=7, fillna=True)
-            indicators['rsi_7'] = float(rsi7.rsi().iloc[-1])
-            
-            stoch = ta.momentum.StochasticOscillator(
-                df['high'], df['low'], df['close'], window=14, smooth_window=3, fillna=True
-            )
-            indicators['stoch_k'] = float(stoch.stoch().iloc[-1])
-            indicators['stoch_d'] = float(stoch.stoch_signal().iloc[-1])
-            
-            willr = ta.momentum.WilliamsRIndicator(
-                df['high'], df['low'], df['close'], lbp=14, fillna=True
-            )
-            indicators['willr'] = float(willr.williams_r().iloc[-1])
-        
-        # CCI
-        cci = ta.trend.CCIIndicator(df['high'], df['low'], df['close'], window=20, fillna=True)
-        indicators['cci'] = float(cci.cci().iloc[-1])
-        
-        # MFI (Money Flow Index) - requires volume
-        if len(df) >= 14:
-            mfi = ta.volume.MFIIndicator(
-                df['high'], df['low'], df['close'], df['volume'], window=14, fillna=True
-            )
-            indicators['mfi'] = float(mfi.money_flow_index().iloc[-1])
-        
-        # OBV (On Balance Volume)
-        obv = ta.volume.OnBalanceVolumeIndicator(df['close'], df['volume'], fillna=True)
-        indicators['obv'] = float(obv.on_balance_volume().iloc[-1])
-        
-        # Volatility indicators
-        if len(df) >= 14:
-            atr14 = ta.volatility.AverageTrueRange(
-                df['high'], df['low'], df['close'], window=14, fillna=True
-            )
-            indicators['atr_14'] = float(atr14.average_true_range().iloc[-1])
-        if len(df) >= 3:
-            atr3 = ta.volatility.AverageTrueRange(
-                df['high'], df['low'], df['close'], window=3, fillna=True
-            )
-            indicators['atr_3'] = float(atr3.average_true_range().iloc[-1])
-        
-        # Bollinger Bands
-        if len(df) >= 20:
-            bb = ta.volatility.BollingerBands(df['close'], window=20, window_dev=2, fillna=True)
-            indicators['bb_upper'] = float(bb.bollinger_hband().iloc[-1])
-            indicators['bb_middle'] = float(bb.bollinger_mavg().iloc[-1])
-            indicators['bb_lower'] = float(bb.bollinger_lband().iloc[-1])
+        # Trend indicators using our TechnicalAnalyzer
+        if len(klines) >= 20:
+            indicators['ema_20'] = technical_analyzer.calculate_ema(close_prices, 20)
 
-        # Parabolic SAR (PSAR)
-        try:
-            psar = ta.trend.PSARIndicator(
-                high=df['high'], low=df['low'], close=df['close'], step=0.02, max_step=0.2, fillna=True
-            )
-            indicators['sar'] = float(psar.psar().iloc[-1])
-        except Exception:
-            # If PSAR not available in current ta version or data insufficient
-            indicators['sar'] = 0.0
+        if len(klines) >= 50:
+            indicators['ema_50'] = technical_analyzer.calculate_ema(close_prices, 50)
         
-        # Volume indicators
-        if len(df) >= 20:
-            vwap = ta.volume.VolumeWeightedAveragePrice(
-                df['high'], df['low'], df['close'], df['volume'], window=20, fillna=True
-            )
-            indicators['vwap_20'] = float(vwap.volume_weighted_average_price().iloc[-1])
+        # MACD using our TechnicalAnalyzer
+        macd, macd_signal, macd_hist = technical_analyzer.calculate_macd(close_prices)
+        indicators['macd'] = macd
+        indicators['macd_signal'] = macd_signal
+        indicators['macd_histogram'] = macd_hist
+        
+        # Momentum indicators using our TechnicalAnalyzer
+        if len(klines) >= 14:
+            indicators['rsi_14'] = technical_analyzer.calculate_rsi(close_prices, 14)
+
+            # Stochastic
+            stoch_k, stoch_d = technical_analyzer.calculate_stochastic(high_prices, low_prices, close_prices)
+            indicators['stoch_k'] = stoch_k
+            indicators['stoch_d'] = stoch_d
+
+            # ATR
+            indicators['atr'] = technical_analyzer.calculate_atr(high_prices, low_prices, close_prices)
+        
+        # Note: Additional indicators (CCI, MFI, OBV) can be added here in the future
+# Currently using core technical indicators from our TechnicalAnalyzer
+        
+        # Bollinger Bands using our TechnicalAnalyzer
+        if len(klines) >= 20:
+            bb_upper, bb_middle, bb_lower = technical_analyzer.calculate_bollinger_bands(close_prices)
+            indicators['bb_upper'] = bb_upper
+            indicators['bb_middle'] = bb_middle
+            indicators['bb_lower'] = bb_lower
+
+        # Note: PSAR and VWAP can be added here in the future
+# indicators['sar'] = 0.0  # Placeholder for future implementation
         
         logger.info("✅ Binance indicator calculation: close=%.2f rsi=%.2f macd=%.4f", 
                    indicators.get('close', 0), 

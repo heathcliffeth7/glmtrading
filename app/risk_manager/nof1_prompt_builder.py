@@ -30,33 +30,26 @@ class Nof1PromptBuilder:
         """
         if not exit_plan:
             return False, "Exit plan eksik"
-        
-        profit_target = exit_plan.get("profit_target", 0.0)
+
         stop_loss = exit_plan.get("stop_loss", 0.0)
         invalidation_condition = exit_plan.get("invalidation_condition", "")
         
         # Değerlerin geçerliliğini kontrol et
-        if profit_target <= 0.0 or stop_loss <= 0.0:
-            return False, "Profit target ve stop loss 0'dan büyük olmalı"
+        if stop_loss <= 0.0:
+            return False, "Stop loss 0'dan büyük olmalı"
         
         # Invalidation condition parse et
         direction, invalidation_price = self._parse_invalidation_condition(invalidation_condition)
         
         # Mantıksal doğruluk kontrolü
         if position_side == "LONG":
-            # LONG için: stop_loss < profit_target ve entry ORTADA
-            if not (stop_loss < entry_price < profit_target):
-                return False, f"LONG için stop_loss({stop_loss}) < entry({entry_price}) < profit_target({profit_target}) olmalı"
-            
+                        
             # Invalidation condition kontrolü - LONG: Entry > Invalidation > Stop Loss
             if direction and invalidation_price:
                 if not (entry_price > invalidation_price > stop_loss):
                     return False, f"LONG için Entry({entry_price}) > Invalidation({invalidation_price}) > SL({stop_loss}) olmalı (erken uyarı mantığı)"
         else:  # SHORT
-            # SHORT için: profit_target < entry < stop_loss
-            if not (profit_target < entry_price < stop_loss):
-                return False, f"SHORT için profit_target({profit_target}) < entry({entry_price}) < stop_loss({stop_loss}) olmalı"
-            
+                        
             # Invalidation condition kontrolü - SHORT: Stop Loss > Invalidation > Entry
             if direction and invalidation_price:
                 if not (stop_loss > invalidation_price > entry_price):
@@ -903,21 +896,19 @@ DYNAMIC RISK MANAGEMENT
 The system uses advanced risk management to optimize your exit levels:
 - Volatility-based risk sizing
 - ATR (Average True Range) calculations
-- Dynamic stop-loss and profit-target adjustments
+- Dynamic stop-loss adjustments
 - Market condition analysis
 
 📈 **EXAMPLES OF OPTIMIZED EXIT PLANS:**
 
 For LONG @ $110,000 with medium volatility:
 ```json
-"profit_target": 114000.0,  // +3.6% (volatility-adjusted)
 "stop_loss": 107800.0,      // -2.0% (volatility-adjusted)
 "invalidation_condition": "If price closes below 107500 on 3-minute candle"  // Below stop_loss
 ```
 
 For SHORT @ $110,000 with high volatility:
 ```json
-"profit_target": 105500.0,  // -4.1% (volatility-adjusted)
 "stop_loss": 113300.0,      // +3.0% (volatility-adjusted)
 "invalidation_condition": "If price closes above 113800 on 3-minute candle"  // Above stop_loss
 ```
@@ -1036,13 +1027,12 @@ Your positions will be AUTOMATICALLY CLOSED when any of these 2 conditions are m
    - When your special condition is met, position closes immediately
    - Example: "If price closes below $105,000 on a 3-minute candle"
 
-**NOT:** Profit target does NOT auto-close position. When profit_target is reached, you can decide to CLOSE manually if CLOSE ACTION KURALLARI are met (see above).
 
 Until one of these conditions is met, your position stays open. The system ONLY checks these 2 rules (stop_loss and invalidation_condition).
 
 ⚠️ **REMEMBER:** If you provide invalid exit plan (0.0 values or null), your BUY/SELL trade will be AUTOMATICALLY REJECTED and converted to HOLD!
 
-**For HOLD actions:** Set profit_target: 0.0, stop_loss: 0.0, invalidation_condition: "N/A"
+**For HOLD actions:** Set stop_loss: 0.0, invalidation_condition: "N/A"
 
 EXAMPLES:
 
@@ -1054,8 +1044,7 @@ EXAMPLES:
       "coin": "BTCUSDT",
       "signal": "HOLD",
       "quantity": 0.0,
-      "profit_target": 0.0,
-      "stop_loss": 0.0,
+            "stop_loss": 0.0,
       "invalidation_condition": "N/A",
       "leverage": 1,
       "confidence": 0.8,
@@ -1074,8 +1063,7 @@ EXAMPLES:
       "coin": "BTCUSDT",
       "signal": "BUY",
       "quantity": 0.05,
-      "profit_target": 115000.0,
-      "stop_loss": 105000.0,
+            "stop_loss": 105000.0,
       "invalidation_condition": "If price closes below 105000 on 30m candle",
       "leverage": 10,
       "confidence": 0.75,
@@ -1194,7 +1182,6 @@ Think step by step and make your decision based on:
         
         # Emoji seçimi
         emoji_map = {
-            "profit_target": "🎯",
             "stop_loss": "🛑",
             "invalidation": "⚠️"
         }

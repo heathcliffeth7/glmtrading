@@ -113,7 +113,7 @@ def load_historical_from_influx(
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> pd.DataFrame:
-    # Use enriched data which includes all features (Binance + TwelveData)
+    # Use enriched data which includes all features
     measurement = f"enriched_{interval}"
     if start and end:
         records = query_range_between(measurement, symbol, interval, start, end)

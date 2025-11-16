@@ -195,18 +195,7 @@ class ActiveLearningRetrainer:
                 feedback.ema_20,
                 feedback.ema_50,
                 feedback.rsi_14,
-                # Twelve Data
-                feedback.rsi_twelvedata or 50.0,
-                feedback.macd_twelvedata or 0.0,
-                feedback.macd_signal_twelvedata or 0.0,
-                feedback.macd_hist_twelvedata or 0.0,
-                feedback.atr_twelvedata or 0.0,
-                feedback.stoch_k or 50.0,
-                feedback.stoch_d or 50.0,
-                feedback.bb_upper or 0.0,
-                feedback.bb_middle or 0.0,
-                feedback.bb_lower or 0.0,
-            ])
+                            ])
             
             # Label (actual result)
             # Binary classification: BUY (1) vs NOT-BUY (0)
@@ -252,18 +241,7 @@ class ActiveLearningRetrainer:
             "ema_20",
             "ema_50",
             "rsi_14",
-            # Twelve Data
-            "rsi_twelvedata",
-            "macd_twelvedata",
-            "macd_signal_twelvedata",
-            "macd_hist_twelvedata",
-            "atr_twelvedata",
-            "stoch_k",
-            "stoch_d",
-            "bb_upper",
-            "bb_middle",
-            "bb_lower",
-        ]
+                    ]
         
         importances = model.feature_importances_
         logger.info("Feature importances:")
@@ -286,18 +264,7 @@ class ActiveLearningRetrainer:
             f.ema_20,
             f.ema_50,
             f.rsi_14,
-            # Twelve Data
-            f.rsi_twelvedata or 50.0,
-            f.macd_twelvedata or 0.0,
-            f.macd_signal_twelvedata or 0.0,
-            f.macd_hist_twelvedata or 0.0,
-            f.atr_twelvedata or 0.0,
-            f.stoch_k or 50.0,
-            f.stoch_d or 50.0,
-            f.bb_upper or 0.0,
-            f.bb_middle or 0.0,
-            f.bb_lower or 0.0,
-        ] for f in feedbacks])
+                    ] for f in feedbacks])
         
         y_true = np.array([1 if f.actual_direction == "BUY" else 0 for f in feedbacks])
         

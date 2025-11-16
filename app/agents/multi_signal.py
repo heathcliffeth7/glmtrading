@@ -1,6 +1,6 @@
 """
 Multi-Signal Agent - Uses enriched data from all sources
-Combines: TA indicators + TwelveData + Binance Futures
+Combines: TA indicators + Binance Futures
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -178,15 +178,7 @@ class MultiSignalAgent(Agent):
                 score -= 0.2  # Price below SAR = downtrend
             count += 1
         
-        # VWAP (NEW)
-        vwap = data.get('vwap_twelvedata', 0)
-        if vwap > 0 and close > 0:
-            if close > vwap:
-                score += 0.15  # Price above VWAP = bullish
-            else:
-                score -= 0.15  # Price below VWAP = bearish
-            count += 1
-        
+                
         return score / count if count > 0 else 0.0
     
     def _analyze_momentum(self, data: Dict[str, Any]) -> float:

@@ -82,18 +82,7 @@ class PredictionLog(Base):
     rsi_14 = Column(Float)
     close_price = Column(Float)
     
-    # Features - Twelve Data indicators
-    rsi_twelvedata = Column(Float, nullable=True)
-    macd_twelvedata = Column(Float, nullable=True)
-    macd_signal_twelvedata = Column(Float, nullable=True)
-    macd_hist_twelvedata = Column(Float, nullable=True)
-    atr_twelvedata = Column(Float, nullable=True)
-    stoch_k = Column(Float, nullable=True)
-    stoch_d = Column(Float, nullable=True)
-    bb_upper = Column(Float, nullable=True)
-    bb_middle = Column(Float, nullable=True)
-    bb_lower = Column(Float, nullable=True)
-
+    
     # Model prediction
     model_score = Column(Float)
     predicted_direction = Column(String(4))
@@ -138,41 +127,17 @@ class StopLossOrder(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-class TakeProfitOrder(Base):
-    """Take-profit emirlerini takip et"""
-    __tablename__ = "take_profit_orders"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    trade_id = Column(Integer, ForeignKey("trades.id"), nullable=False)
-    position_id = Column(String(50), nullable=False)
-    symbol = Column(String(20), nullable=False)
-    
-    entry_price = Column(Float, nullable=False)
-    take_profit_price = Column(Float, nullable=False)
-    take_profit_pct = Column(Float, nullable=False)  # % olarak
-    
-    is_active = Column(Boolean, default=True)
-    triggered = Column(Boolean, default=False)
-    triggered_at = Column(DateTime, nullable=True)
-    triggered_price = Column(Float, nullable=True)
-    
-    # Trigger anında PnL bilgileri
-    pnl_at_trigger = Column(Float, nullable=True)
-    pnl_pct_at_trigger = Column(Float, nullable=True)
-    
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class StopLossNotification(Base):
-    """Stop-loss/take-profit bildirimlerini kaydet"""
+    """Stop-loss bildirimlerini kaydet"""
     __tablename__ = "stop_loss_notifications"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    order_id = Column(Integer, nullable=False)  # SL veya TP order ID
+    order_id = Column(Integer, nullable=False)  # SL order ID
     symbol = Column(String(20), nullable=False)
-    
-    notification_type = Column(String(20), nullable=False)  # STOP-LOSS, TAKE-PROFIT
+
+    notification_type = Column(String(20), nullable=False)  # STOP-LOSS
     position_type = Column(String(10), nullable=False)  # LONG, SHORT
     
     position_amount = Column(Float, nullable=False)
@@ -212,7 +177,8 @@ engine = create_engine(
     pool_size=10,
     max_overflow=20,
 )
-Base.metadata.create_all(engine)
+# NOTE: create_all removed - manual schema management to prevent conflicts
+# Base.metadata.create_all(engine)
 
 
 def get_portfolio(session: Session, symbol: str) -> Portfolio:
@@ -508,18 +474,7 @@ def record_prediction(
         ema_50=features.get("ema_50", 0.0),
         rsi_14=features.get("rsi_14", 50.0),
         close_price=features.get("close", 0.0),
-        # Twelve Data
-        rsi_twelvedata=features.get("rsi_twelvedata"),
-        macd_twelvedata=features.get("macd_twelvedata"),
-        macd_signal_twelvedata=features.get("macd_signal_twelvedata"),
-        macd_hist_twelvedata=features.get("macd_hist_twelvedata"),
-        atr_twelvedata=features.get("atr_twelvedata"),
-        stoch_k=features.get("stoch_k"),
-        stoch_d=features.get("stoch_d"),
-        bb_upper=features.get("bb_upper"),
-        bb_middle=features.get("bb_middle"),
-        bb_lower=features.get("bb_lower"),
-        # Prediction
+                # Prediction
         model_score=model_score,
         predicted_direction=predicted_direction,
         confidence=confidence,
@@ -616,28 +571,6 @@ def create_stop_loss_order(
     return order
 
 
-def create_take_profit_order(
-    session: Session,
-    trade_id: int,
-    position_id: str,
-    symbol: str,
-    entry_price: float,
-    take_profit_pct: float = 0.015,  # %1.5 default
-) -> "TakeProfitOrder":
-    """Yeni take-profit emri oluştur"""
-    take_profit_price = entry_price * (1 - take_profit_pct)  # SHORT için entry'nin altı
-    
-    order = TakeProfitOrder(
-        trade_id=trade_id,
-        position_id=position_id,
-        symbol=symbol,
-        entry_price=entry_price,
-        take_profit_price=take_profit_price,
-        take_profit_pct=take_profit_pct * 100,  # % olarak kaydet
-    )
-    session.add(order)
-    session.flush()
-    return order
 
 
 def get_active_stop_loss_orders(session: Session, symbol: str) -> List["StopLossOrder"]:
@@ -653,17 +586,6 @@ def get_active_stop_loss_orders(session: Session, symbol: str) -> List["StopLoss
     )
 
 
-def get_active_take_profit_orders(session: Session, symbol: str) -> List["TakeProfitOrder"]:
-    """Aktif take-profit emirlerini getir"""
-    return (
-        session.query(TakeProfitOrder)
-        .filter(
-            TakeProfitOrder.symbol == symbol,
-            TakeProfitOrder.is_active == True,  # noqa: E712
-            TakeProfitOrder.triggered == False,  # noqa: E712
-        )
-        .all()
-    )
 
 
 def trigger_stop_loss_order(
@@ -685,23 +607,6 @@ def trigger_stop_loss_order(
         session.flush()
 
 
-def trigger_take_profit_order(
-    session: Session,
-    order_id: int,
-    triggered_price: float,
-    pnl_amount: float,
-    pnl_pct: float,
-) -> None:
-    """Take-profit emrini tetikle"""
-    order = session.query(TakeProfitOrder).filter_by(id=order_id).first()
-    if order:
-        order.triggered = True
-        order.triggered_at = datetime.utcnow()
-        order.triggered_price = triggered_price
-        order.pnl_at_trigger = pnl_amount
-        order.pnl_pct_at_trigger = pnl_pct
-        order.is_active = False
-        session.flush()
 
 
 def create_stop_loss_notification(
@@ -718,7 +623,7 @@ def create_stop_loss_notification(
     pnl_percentage: float,
     telegram_sent: bool = False,
 ) -> "StopLossNotification":
-    """Stop-loss/take-profit bildirimi oluştur"""
+    """Stop-loss bildirimi oluştur"""
     notification = StopLossNotification(
         order_id=order_id,
         symbol=symbol,
