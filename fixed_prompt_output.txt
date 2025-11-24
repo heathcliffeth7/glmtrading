@@ -1,0 +1,263 @@
+It has been 0 minutes since you started trading. The current time is 2025-10-31 12:46:23.649871 and you've been invoked 1 times. Below, we are providing you with a variety of state data, price data, and predictive signals so you can discover alpha. Below that is your current account information, value, performance, positions, etc.
+
+ALL OF THE PRICE OR SIGNAL DATA BELOW IS ORDERED: OLDEST → NEWEST
+
+Timeframes note: Unless stated otherwise in a section title, the primary timeframe is 30-minute intervals. Additional timeframes (1m, 5m, 15m, 1h, 4h, 1d) are provided for comprehensive analysis.
+
+================================================================================
+CURRENT MARKET STATE FOR BTCUSDT
+================================================================================
+
+PRIMARY TIMEFRAME (30-minute)
+current_price = 110000.00
+current_ema20 = 109950.00
+current_ema50 = 109800.00
+current_macd = 126.25
+current_rsi (14-period) = 59.00
+
+30-minute series (oldest → latest):
+
+Mid prices: [109800.00, 109800.00, 109800.00, 109800.00, 109800.00, 109800.00, 109800.00, 109800.00, 109800.00, 109800.00]
+EMA indicators (20-period): [109750.00, 109750.00, 109750.00, 109750.00, 109750.00, 109750.00, 109750.00, 109750.00, 109750.00, 109750.00]
+MACD indicators: [125.00, 125.00, 125.00, 125.00, 125.00, 125.00, 125.00, 125.00, 125.00, 125.00]
+RSI indicators (14-Period): [58.00, 58.00, 58.00, 58.00, 58.00, 58.00, 58.00, 58.00, 58.00, 58.00]
+
+================================================================================
+FUTURES MARKET DATA:
+
+Funding Rate: 0.00012500
+  (8-hour average: 0.00012000)
+
+Open Interest: 25000000.00
+  (20-period average: 24500000.00)
+
+Long/Short Ratio: 1.2500
+  (20-period average: 1.2300)
+
+
+FUTURES HISTORICAL DATA (20 periods):
+
+Funding Rate history (20 periods): [0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000, 0.00010000]
+Open Interest history (20 periods): [24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00, 24000000.00]
+Long/Short Ratio history (20 periods): [1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000, 1.2000]
+
+================================================================================
+INTRADAY SERIES (1-minute, oldest → latest):
+
+Mid prices: [109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00]
+RSI indicators (14-Period): [55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00, 55.00]
+MACD indicators: [120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00, 120.00]
+
+================================================================================
+LONGER-TERM CONTEXT (4-hour timeframe):
+
+20-Period EMA: 110100.00 vs. 50-Period EMA: 109900.00
+14-Period ATR: 2500.00
+Current Volume: 360000000.00
+MACD indicators: [127.00, 127.00, 127.00, 127.00, 127.00, 127.00, 127.00, 127.00, 127.00, 127.00]
+RSI indicators (14-Period): [59.00, 59.00, 59.00, 59.00, 59.00, 59.00, 59.00, 59.00, 59.00, 59.00]
+
+================================================================================
+ADDITIONAL TIMEFRAMES AVAILABLE:
+
+
+5M TIMEFRAME:
+Current Price: 110100.00
+Current EMA 20: 109850.00
+Current EMA 50: 109600.00
+Current MACD: 125.75
+Current RSI (14): 58.50
+Current Volume: 7500000.00
+
+5M Historical Series (latest 10):
+  Close prices: [109600.00, 109600.00, 109600.00, 109600.00, 109600.00, 109600.00, 109600.00, 109600.00, 109600.00, 109600.00]
+  EMA 20: [109550.00, 109550.00, 109550.00, 109550.00, 109550.00, 109550.00, 109550.00, 109550.00, 109550.00, 109550.00]
+  EMA 50: [109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00, 109500.00]
+  MACD: [122.00, 122.00, 122.00, 122.00, 122.00, 122.00, 122.00, 122.00, 122.00, 122.00]
+  RSI 14: [56.00, 56.00, 56.00, 56.00, 56.00, 56.00, 56.00, 56.00, 56.00, 56.00]
+  Volume: [7000000.00, 7000000.00, 7000000.00, 7000000.00, 7000000.00, 7000000.00, 7000000.00, 7000000.00, 7000000.00, 7000000.00]
+
+15M TIMEFRAME:
+Current Price: 110200.00
+Current EMA 20: 109900.00
+Current EMA 50: 109700.00
+Current MACD: 126.00
+Current RSI (14): 58.75
+Current Volume: 22500000.00
+
+15M Historical Series (latest 10):
+  Close prices: [109700.00, 109700.00, 109700.00, 109700.00, 109700.00, 109700.00, 109700.00, 109700.00, 109700.00, 109700.00]
+  EMA 20: [109650.00, 109650.00, 109650.00, 109650.00, 109650.00, 109650.00, 109650.00, 109650.00, 109650.00, 109650.00]
+  EMA 50: [109600.00, 109600.00, 109600.00, 109600.00, 109600.00, 109600.00, 109600.00, 109600.00, 109600.00, 109600.00]
+  MACD: [124.00, 124.00, 124.00, 124.00, 124.00, 124.00, 124.00, 124.00, 124.00, 124.00]
+  RSI 14: [57.00, 57.00, 57.00, 57.00, 57.00, 57.00, 57.00, 57.00, 57.00, 57.00]
+  Volume: [20000000.00, 20000000.00, 20000000.00, 20000000.00, 20000000.00, 20000000.00, 20000000.00, 20000000.00, 20000000.00, 20000000.00]
+
+1H TIMEFRAME:
+Current Price: 109950.00
+Current EMA 20: 110000.00
+Current EMA 50: 109850.00
+Current MACD: 126.50
+Current RSI (14): 59.25
+Current Volume: 90000000.00
+
+1H Historical Series (latest 10):
+  Close prices: [109900.00, 109900.00, 109900.00, 109900.00, 109900.00, 109900.00, 109900.00, 109900.00, 109900.00, 109900.00]
+  EMA 20: [109850.00, 109850.00, 109850.00, 109850.00, 109850.00, 109850.00, 109850.00, 109850.00, 109850.00, 109850.00]
+  EMA 50: [109800.00, 109800.00, 109800.00, 109800.00, 109800.00, 109800.00, 109800.00, 109800.00, 109800.00, 109800.00]
+  MACD: [126.00, 126.00, 126.00, 126.00, 126.00, 126.00, 126.00, 126.00, 126.00, 126.00]
+  RSI 14: [58.50, 58.50, 58.50, 58.50, 58.50, 58.50, 58.50, 58.50, 58.50, 58.50]
+  Volume: [80000000.00, 80000000.00, 80000000.00, 80000000.00, 80000000.00, 80000000.00, 80000000.00, 80000000.00, 80000000.00, 80000000.00]
+
+1D TIMEFRAME:
+Current Price: 109850.00
+Current EMA 20: 110200.00
+Current EMA 50: 109950.00
+Current MACD: 127.50
+Current RSI (14): 59.75
+Current Volume: 900000000.00
+
+1D Historical Series (latest 10):
+  Close prices: [110100.00, 110100.00, 110100.00, 110100.00, 110100.00, 110100.00, 110100.00, 110100.00, 110100.00, 110100.00]
+  EMA 20: [110050.00, 110050.00, 110050.00, 110050.00, 110050.00, 110050.00, 110050.00, 110050.00, 110050.00, 110050.00]
+  EMA 50: [110000.00, 110000.00, 110000.00, 110000.00, 110000.00, 110000.00, 110000.00, 110000.00, 110000.00, 110000.00]
+  MACD: [128.00, 128.00, 128.00, 128.00, 128.00, 128.00, 128.00, 128.00, 128.00, 128.00]
+  RSI 14: [59.50, 59.50, 59.50, 59.50, 59.50, 59.50, 59.50, 59.50, 59.50, 59.50]
+  Volume: [800000000.00, 800000000.00, 800000000.00, 800000000.00, 800000000.00, 800000000.00, 800000000.00, 800000000.00, 800000000.00, 800000000.00]
+
+================================================================================
+HERE IS YOUR ACCOUNT INFORMATION & PERFORMANCE
+================================================================================
+
+Current Total Return (percent): 5.00%
+Available Cash: 5500.00
+Current Account Value: 10500.00
+
+Current live positions & performance:
+{
+  'symbol': 'BTCUSDT',
+  'quantity': 0.050000,
+  'entry_price': 108000.00,
+  'current_price': 110000.00,
+  'unrealized_pnl': 100.00,
+  'leverage': 10,
+  'exit_plan': {
+    'profit_target': 115000.00,
+    'stop_loss': 105000.00,
+    'invalidation_condition': 'RSI > 70'
+  }
+}
+
+Sharpe Ratio: 1.250
+
+
+================================================================================
+YOUR TASK
+================================================================================
+
+Analyze the market data and your current position. Decide on ONE of these actions:
+
+1. **HOLD** - Keep current position (if you have one) or stay flat
+2. **BUY** - Enter a new LONG position (only if FLAT)
+3. **SELL** - Enter a new SHORT position (only if FLAT)
+4. **CLOSE** - Close your current position
+
+🎯 COMPLETE TRADING FREEDOM MODE:
+
+You have COMPLETE FREEDOM to trade as you see fit! The only hard limits are:
+- ⚠️ Max 3000 USD per single trade (unleveraged notional value)
+- ⚠️ Max 20x leverage (minimum 1x)
+
+EVERYTHING ELSE IS UP TO YOU:
+- ✅ You can open multiple positions
+- ✅ You can add to existing positions
+- ✅ You can reverse positions (close and open opposite)
+- ✅ You can trade as frequently as you want
+- ✅ You decide position sizing, timing, and strategy
+- ✅ No confidence restrictions, no bias filters
+
+Your only job: MAXIMIZE PROFIT while respecting the safety limits above.
+
+OUTPUT FORMAT:
+
+⚠️ CRITICAL: The 'gerekçe' field MUST be written in TURKISH language only!
+⚠️ CRITICAL: The 'gerekçe' field MUST be AT LEAST 800-1000 CHARACTERS LONG! SHORT justifications will be REJECTED!
+
+Respond with a JSON object in this exact format:
+
+```json
+{
+  "BTCUSDT": {
+    "trade_signal_args": {
+      "coin": "BTCUSDT",
+      "signal": "<BUY|SELL|HOLD|CLOSE>",
+      "quantity": <float>,
+      "profit_target": <float>,
+      "stop_loss": <float>,
+      "invalidation_condition": "<string>",
+      "leverage": <int 1-20>,
+      "confidence": <0.0-1.0>,
+      "risk_usd": <float>
+    },
+    "gerekçe": "<your reasoning here - MUST be in TURKISH, MINIMUM 800-1000 CHARACTERS!>"
+  }
+}
+```
+
+EXAMPLES:
+
+Örnek HOLD yanıtı (Türkçe gerekçe ile):
+```json
+{
+  "BTCUSDT": {
+    "trade_signal_args": {
+      "coin": "BTCUSDT",
+      "signal": "HOLD",
+      "quantity": 0.0,
+      "profit_target": 0.0,
+      "stop_loss": 0.0,
+      "invalidation_condition": "N/A",
+      "leverage": 1,
+      "confidence": 0.8,
+      "risk_usd": 0.0
+    },
+    "gerekçe": "Piyasa karışık sinyaller gösteriyor, daha iyi yön için beklemek daha mantıklı."
+  }
+}
+```
+
+Örnek BUY yanıtı (Türkçe gerekçe ile):
+```json
+{
+  "BTCUSDT": {
+    "trade_signal_args": {
+      "coin": "BTCUSDT",
+      "signal": "BUY",
+      "quantity": 0.05,
+      "profit_target": 115000.0,
+      "stop_loss": 105000.0,
+      "invalidation_condition": "If price closes below 105000 on 30m candle",
+      "leverage": 10,
+      "confidence": 0.75,
+      "risk_usd": 500.0
+    },
+    "gerekçe": "RSI aşırı satım bölgesinde 30 seviyesinde, uzun pozisyon için iyi risk/ödül oranı."
+  }
+}
+```
+
+IMPORTANT:
+- For HOLD: Provide gerekçe explaining why you're holding the current position (MINIMUM 800-1000 characters!)
+- For BUY/SELL: Provide full entry plan with gerekçe (MINIMUM 800-1000 characters!)
+- For CLOSE: Explain why you're closing the position (MINIMUM 800-1000 characters!)
+- Confidence should reflect your conviction (0.5-1.0 range)
+- Risk should be proportional to confidence and account size
+- ⚠️ CRITICAL: Gerekçe MUST be written in TURKISH language - no English allowed
+- ⚠️ CRITICAL: Gerekçe MUST be AT LEAST 800-1000 CHARACTERS LONG - short justifications will be REJECTED!
+
+Think step by step and make your decision based on:
+1. Current market state across all timeframes
+2. Technical indicators alignment
+3. Your existing position (if any) and exit plan
+4. Risk/reward ratio
+5. Market structure and momentum

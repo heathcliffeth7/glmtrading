@@ -1,0 +1,25 @@
+[Unit]
+Description=AI Trading Orchestrator
+After=network-online.target redis.service influxdb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/trading
+EnvironmentFile=/root/trading/.env
+ExecStart=/root/trading/.venv/bin/python -m app.orchestrator.runtime
+Restart=on-failure
+RestartSec=10
+User=root
+
+# Network permissions - allow TCP socket creation for Redis/price_cache listener
+# Required for price_cache listener to connect to Redis
+PrivateNetwork=no
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Allow network interfaces
+RestrictNetworkInterfaces=
+# Disable IP accounting restrictions
+IPAccounting=no
+
+[Install]
+WantedBy=multi-user.target

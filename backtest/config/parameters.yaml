@@ -1,0 +1,84 @@
+# Backtesting Parameters Configuration
+# Bu dosya backtesting sisteminin parametrelerini tanımlar
+
+# Data Collection Parameters
+data_collection:
+  start_date: "2022-01-01"
+  end_date: "2024-12-31"
+  symbol: "BTCUSDT"
+  timeframes:
+    - "1m"
+    - "5m"
+    - "15m"
+    - "30m"
+    - "1h"
+    - "4h"
+  max_klines_per_request: 1000
+  rate_limit_delay: 0.1  # saniye
+
+# Backtest Configuration
+backtest:
+  initial_capital: 10000  # USDT
+  commission_rate: 0.001  # 0.1%
+  slippage: 0.0005  # 0.05%
+  timezone: "UTC"
+
+  # Position Management
+  position:
+    max_position_size: 1.0  # BTC
+    max_total_position: 1.0  # BTC
+    min_trade_amount: 10  # USDT
+    risk_per_trade: 0.02  # 2% of capital
+
+  # Risk Management
+  risk:
+    stop_loss: 0.05  # 5%
+    take_profit: 0.10  # 10%
+    max_drawdown_limit: 0.20  # 20%
+    confidence_threshold: 0.65
+
+# Walk-Forward Analysis
+walk_forward:
+  training_period_days: 180  # 6 ay
+  testing_period_days: 30  # 1 ay
+  step_size_days: 7  # 1 hafta
+  num_optimization_trials: 50
+
+# Monte Carlo Simulation
+monte_carlo:
+  num_simulations: 1000
+  confidence_levels: [0.90, 0.95, 0.99]
+  bootstrap_samples: 500
+
+# Performance Metrics
+metrics:
+  risk_free_rate: 0.02  # 2% annually
+  benchmark_symbol: "BTCUSDT"
+  benchmark_strategy: "buy_and_hold"
+
+# Report Configuration
+reporting:
+  output_formats:
+    - "json"
+    - "csv"
+    - "html"
+    - "pdf"
+  include_charts: true
+  chart_types:
+    - "equity_curve"
+    - "drawdown"
+    - "monthly_returns_heatmap"
+    - "trade_distribution"
+    - "rolling_sharpe"
+  save_trade_log: true
+  trade_log_detail: "full"  # "full", "summary", "minimal"
+
+# Database Configuration
+database:
+  influxdb:
+    measurement: "backtest_data"
+    retention_policy: "30d"
+  postgresql:
+    table_backtests: "backtest_results"
+    table_trades: "backtest_trades"
+    table_metrics: "backtest_metrics"

@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily AI Model Training Trigger
+
+[Timer]
+OnUnitActiveSec=3h
+AccuracySec=5min
+Unit=model-train@BTCUSDT.service
+
+[Install]
+WantedBy=timers.target

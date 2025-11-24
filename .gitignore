@@ -1,0 +1,86 @@
+Trading gitngore 
+
+__pycache__/
+.pytest_cache/
+.venv/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+*.log
+poetry.lock
+.env
+env
+test_*.py
+*_test.py
+.coverage
+htmlcov/
+.tox/
+
+# Documentation files
+*.md
+!README.md
+
+# Test and debug scripts
+debug_*.py
+demo_*.py
+analyze_*.py
+check_*.py
+create_test_data.py
+convert_to_deepseek_style.py
+init_multiframe_measurements.py
+quick_*.py
+verify_*.py
+
+# Test files are already covered by test_*.py pattern above
+
+# Reset and migration scripts
+reset_*.py
+complete_reset.py
+clean_database.py
+fix_*.py
+migrate_*.py
+add_total_fees_column.py
+remove_test_positions.py
+
+# Log files
+*.txt
+*.log
+
+# Database files
+*.db
+
+# ML Models and Training Data (not needed in repo)
+models/
+qlib_data/
+*.parquet
+*.joblib
+*.pkl
+
+# Shell scripts
+*.sh
+
+# Config files (if sensitive)
+mcp.json
+
+# GLM summary scripts
+glm_telegram_*.py
+htf_*.py
+
+# Backtest system (not needed in production)
+backtest/
+
+# Scripts directory (utility scripts, not needed in production)
+scripts/
+
+# Tests directory (test framework, not needed in production)
+tests/
+
+# Backup files
+*.backup
+*_backup.py
+
+# Temporary utility files
+get-pip.py
+
+.venv/

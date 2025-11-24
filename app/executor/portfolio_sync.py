@@ -1,0 +1,401 @@
+"""
+Portfolio synchronization module for maintaining consistency between trades and portfolio tables.
+This should be called before each trade execution to ensure accurate position tracking.
+"""
+
+import logging
+import os
+import pickle
+from datetime import datetime
+from typing import Dict, Optional, Set
+
+from sqlalchemy.orm import Session
+
+from app.executor.ledger import Portfolio, Trade
+try:
+    from app.utils.price_cache import price_cache as _price_cache
+except Exception:
+    _price_cache = None
+
+logger = logging.getLogger(__name__)
+
+# Persistent cache file for abnormal trade IDs
+_CACHE_FILE = "/tmp/abnormal_trade_cache.pkl"
+
+def _load_abnormal_cache() -> Set[str]:
+    """Load abnormal trade IDs from disk cache."""
+    if os.path.exists(_CACHE_FILE):
+        try:
+            with open(_CACHE_FILE, 'rb') as f:
+                return pickle.load(f)
+        except Exception as e:
+            logger.debug("Could not load abnormal trade cache: %s", e)
+    return set()
+
+def _save_abnormal_cache(cache: Set[str]) -> None:
+    """Save abnormal trade IDs to disk cache."""
+    try:
+        with open(_CACHE_FILE, 'wb') as f:
+            pickle.dump(cache, f)
+    except Exception as e:
+        logger.debug("Could not save abnormal trade cache: %s", e)
+
+_abnormal_trade_ids = _load_abnormal_cache()
+
+# Constants for dynamic position limits
+MAX_POSITION_USD = 60000.0  # $3.000 margin × 20x leverage
+DEFAULT_BTC_PRICE = 100000.0
+DEFAULT_ETH_PRICE = 3500.0
+DEFAULT_SOL_PRICE = 150.0
+
+
+def _get_dynamic_symbol_limit(symbol: str) -> float:
+    """
+    Get symbol-specific amount limit based on current price from WebSocket.
+    Returns maximum amount in units (not USD) that respects the $60,000 position limit.
+    """
+    symbol_upper = (symbol or "").upper()
+
+    # Try to get current price from WebSocket price cache first
+    current_price = None
+    if _price_cache:
+        try:
+            cached = _price_cache.get(symbol_upper, max_age_seconds=60)  # 1 minute freshness
+            if cached and cached > 0:
+                current_price = float(cached)
+                logger.debug("Using WebSocket price for %s: $%.2f", symbol_upper, current_price)
+        except Exception:
+            logger.debug("WebSocket price unavailable for %s", symbol_upper)
+
+    # Fallback to default prices if WebSocket unavailable
+    if not current_price:
+        if "BTC" in symbol_upper:
+            current_price = DEFAULT_BTC_PRICE
+        elif "ETH" in symbol_upper:
+            current_price = DEFAULT_ETH_PRICE
+        elif "SOL" in symbol_upper:
+            current_price = DEFAULT_SOL_PRICE
+        else:
+            # Generic fallback for other symbols
+            current_price = 100.0
+        logger.info("Using fallback price for %s: $%.2f", symbol_upper, current_price)
+
+    # Calculate max amount based on USD limit
+    max_amount = MAX_POSITION_USD / current_price
+
+    # Add buffer for price rounding/volatility - SOLANA için daha yüksek buffer
+    if "SOL" in symbol_upper:
+        max_amount *= 1.20  # SOL için %20 buffer (daha volatil)
+    else:
+        max_amount *= 1.05  # Diğerleri için %5 buffer
+
+    logger.debug("Dynamic limit for %s: %.6f units (price: $%.2f, USD limit: $%.0f)",
+                 symbol_upper, max_amount, current_price, MAX_POSITION_USD)
+
+    return max_amount
+
+
+def _get_price_hint(symbol: str, latest_trade: Optional[Trade]) -> Optional[float]:
+    """
+    Sağlıklı bir fiyat ipucu yakala. Önce bellek içi cache, sonra son trade fiyatı.
+    """
+    symbolsafe = (symbol or "").upper()
+    if _price_cache:
+        try:
+            cached = _price_cache.get(symbolsafe, max_age_seconds=300)
+            if cached:
+                return float(cached)
+        except Exception:
+            logger.debug("Price cache hint unavailable for %s", symbolsafe)
+
+    if latest_trade and latest_trade.price and latest_trade.price > 0:
+        return float(latest_trade.price)
+    return None
+
+
+def _normalize_trade(trade: Trade, price_hint: Optional[float]) -> tuple[bool, float, float, list[str]]:
+    """
+    Temel tutarlılık kontrolleri yap. (usable, amount, price, warnings) döner.
+    Fiyat aşırı sapıksa ve ipucu varsa fiyatı onarır.
+    Negatif miktarları otomatik olarak pozitife çevirir.
+    """
+    raw_amount = float(trade.amount or 0.0)
+    amount = abs(raw_amount)  # Always work with positive amount
+    price = float(trade.price or 0.0)
+    warnings: list[str] = []
+
+    if amount <= 0:
+        warnings.append("amount=0")
+    if price <= 0:
+        warnings.append("price<=0")
+
+    # Use dynamic symbol-specific limit instead of hardcoded amount limit
+    dynamic_limit = _get_dynamic_symbol_limit(trade.symbol)
+
+    # Debug log for SOLANA
+    if "SOL" in (trade.symbol or "").upper():
+        logger.info("SOLANA trade debug - ID:%s, Amount:%.6f, Price:%.2f, Dynamic_Limit:%.6f, Price_Hint:%.2f",
+                   getattr(trade, 'id', 'N/A'), amount, price, dynamic_limit, price_hint or 0.0)
+
+    if abs(amount) > dynamic_limit:
+        warnings.append(f"amount>{dynamic_limit:.1f}")
+
+    # Debug log for abnormal amounts to understand why it was rejected
+    if abs(amount) > dynamic_limit:
+         logger.info(
+            "Abnormal amount detected for %s: amount=%.6f > limit=%.6f (price=$%.2f, max_usd=$%.0f)",
+            trade.symbol, amount, dynamic_limit, price, MAX_POSITION_USD
+        )
+
+    if price_hint and price > 0:
+        diff_pct = abs(price - price_hint) / price_hint
+        # SOLANA için daha esnek fiyat sapma eşiği
+        threshold = 0.98
+        if "SOL" in (trade.symbol or "").upper():
+            threshold = 0.99  # SOL için %99 (daha volatil)
+
+        if diff_pct > threshold:
+            warnings.append(f"price_deviation:{diff_pct*100:.1f}% (hint={price_hint:.2f})")
+            price = price_hint  # kullanılır bir fiyatla onar
+
+    usable = amount > 0 and price > 0
+    return usable, amount, price, warnings
+
+
+def _log_abnormal(trade: Trade, amount: float, price: float, warnings: list[str], action: str) -> None:
+    """Tekrarlı log spamini önlemek için aynı trade'i bir kez yaz ve disk'e kaydet."""
+    trade_id = getattr(trade, "id", None)
+    key = f"{trade_id}:{action}"
+    if key in _abnormal_trade_ids:
+        return
+
+    # Only log if there are actual warnings - reduce noise
+    if warnings:
+        logger.info(
+            "%s %s trade: amount=%.6f price=%.2f id=%s (%s)",
+            action,
+            trade.position_side or "UNKNOWN",
+            amount,
+            price,
+            trade_id,
+            "; ".join(warnings) if warnings else "no-details",
+        )
+    
+    # Add to cache and persist to disk
+    _abnormal_trade_ids.add(key)
+    _save_abnormal_cache(_abnormal_trade_ids)
+
+
+def calculate_actual_position_from_trades(session: Session, symbol: str) -> Dict[str, float]:
+    """
+    Gerçek long/short pozisyonları açık (close_price IS NULL) işlemler üzerinden hesapla.
+    YENİ: Long ve short pozisyonları ayrı takip eder (hedge desteği).
+    """
+
+    # Yalnızca AÇIK işlemleri (close_price IS NULL) kronolojik sırada al
+    open_trades = (
+        session.query(Trade)
+        .filter(Trade.symbol == symbol)
+        .filter(Trade.close_price.is_(None))
+        .order_by(Trade.timestamp.asc())
+        .all()
+    )
+
+    latest_trade = (
+        session.query(Trade)
+        .filter(Trade.symbol == symbol)
+        .order_by(Trade.timestamp.desc())
+        .first()
+    )
+    price_hint = _get_price_hint(symbol, latest_trade)
+
+    if not open_trades:
+        return {
+            "position": 0.0,
+            "average_price": 0.0,
+            "total_cost": 0.0,
+            "long_position": 0.0,
+            "long_avg_price": None,
+            "short_position": 0.0,
+            "short_avg_price": None,
+            "net_position": 0.0,
+            "last_trade_price": None,
+            "last_trade_timestamp": None,
+        }
+
+    # Long ve short trade'leri ayır
+    long_trades = [t for t in open_trades if t.position_side == "LONG"]
+    short_trades = [t for t in open_trades if t.position_side == "SHORT"]
+
+    # Long pozisyon hesaplama
+    long_position = 0.0
+    long_total_cost = 0.0
+    long_avg_price = None
+
+    for trade in long_trades:
+        usable, amount, price, warnings = _normalize_trade(trade, price_hint)
+        if not usable:
+            _log_abnormal(trade, amount, price, warnings, "Ignoring abnormal LONG")
+            continue
+        if warnings:
+            _log_abnormal(trade, amount, price, warnings, "Adjusted LONG")
+
+        if trade.side == "BUY":
+            long_position += amount
+            long_total_cost += amount * price
+
+    if long_position > 0.0001:
+        long_avg_price = long_total_cost / long_position
+
+    # Short pozisyon hesaplama
+    short_position = 0.0
+    short_total_cost = 0.0
+    short_avg_price = None
+
+    for trade in short_trades:
+        usable, amount, price, warnings = _normalize_trade(trade, price_hint)
+        if not usable:
+            _log_abnormal(trade, amount, price, warnings, "Ignoring abnormal SHORT")
+            continue
+        if warnings:
+            _log_abnormal(trade, amount, price, warnings, "Adjusted SHORT")
+
+        if trade.side == "SELL":
+            short_position -= amount
+            short_total_cost += amount * price
+
+    if abs(short_position) > 0.0001:
+        short_avg_price = short_total_cost / abs(short_position)
+
+    # Net pozisyon hesapla
+    net_position = long_position + short_position
+
+    # Backward compatibility için eski position değeri
+    position = net_position
+    average_price = long_avg_price if long_avg_price else (short_avg_price if short_avg_price else 0.0)
+    total_cost = long_total_cost + short_total_cost
+
+    # Son işlem bilgisi (TÜM trade'lerden, açık olanlar da dahil)
+    last_trade_price = float(latest_trade.price) if latest_trade else None
+    last_trade_timestamp = latest_trade.timestamp if latest_trade else None
+
+    return {
+        "position": position,
+        "average_price": average_price,
+        "total_cost": total_cost,
+        "long_position": long_position,
+        "long_avg_price": long_avg_price,
+        "short_position": short_position,
+        "short_avg_price": short_avg_price,
+        "net_position": net_position,
+        "last_trade_price": last_trade_price,
+        "last_trade_timestamp": last_trade_timestamp,
+    }
+
+def sync_portfolio_with_trades(session: Session, symbol: str) -> Portfolio:
+    """
+    Synchronize portfolio table with actual trades and return the correct portfolio state.
+    YENİ: Long/short pozisyonları ve last_trade bilgilerini günceller.
+    """
+
+    portfolio = session.query(Portfolio).filter(Portfolio.symbol == symbol).first()
+    if not portfolio:
+        portfolio = Portfolio(
+            symbol=symbol,
+            position=0.0,
+            average_price=0.0,
+            long_position=0.0,
+            long_avg_price=None,
+            short_position=0.0,
+            short_avg_price=None,
+            net_position=0.0,
+            last_trade_price=None,
+            last_trade_timestamp=None,
+        )
+        session.add(portfolio)
+
+    actual_state = calculate_actual_position_from_trades(session, symbol)
+
+    position_diff = abs(portfolio.position - actual_state["position"])
+    long_diff = abs((portfolio.long_position or 0.0) - actual_state["long_position"])
+    short_diff = abs((portfolio.short_position or 0.0) - actual_state["short_position"])
+
+    sync_needed = (
+        position_diff > 0.0001
+        or long_diff > 0.0001
+        or short_diff > 0.0001
+    )
+
+    if sync_needed:
+        logger.info(
+            "Portfolio sync needed for %s: "
+            "position=%.6f→%.6f, long=%.6f→%.6f, short=%.6f→%.6f",
+            symbol,
+            portfolio.position,
+            actual_state["position"],
+            portfolio.long_position or 0.0,
+            actual_state["long_position"],
+            portfolio.short_position or 0.0,
+            actual_state["short_position"],
+        )
+
+        portfolio.position = actual_state["position"]
+        portfolio.average_price = actual_state["average_price"]
+        portfolio.long_position = actual_state["long_position"]
+        portfolio.long_avg_price = actual_state["long_avg_price"]
+        portfolio.short_position = actual_state["short_position"]
+        portfolio.short_avg_price = actual_state["short_avg_price"]
+        portfolio.net_position = actual_state["net_position"]
+        portfolio.last_trade_price = actual_state["last_trade_price"]
+        portfolio.last_trade_timestamp = actual_state["last_trade_timestamp"]
+        portfolio.updated_at = datetime.utcnow()
+
+        session.flush()
+
+        logger.info(
+            "Portfolio synchronized for %s: "
+            "long=%.6f@%.2f, short=%.6f@%.2f, net=%.6f",
+            symbol,
+            portfolio.long_position,
+            portfolio.long_avg_price or 0.0,
+            portfolio.short_position,
+            portfolio.short_avg_price or 0.0,
+            portfolio.net_position,
+        )
+
+    return portfolio
+
+def get_synced_portfolio(session: Session, symbol: str) -> Portfolio:
+    """
+    Get portfolio with automatic synchronization.
+    This is the main entry point that should be used instead of direct get_portfolio calls.
+    """
+    return sync_portfolio_with_trades(session, symbol)
+
+def calculate_correct_margin_usage(portfolio: Portfolio, current_price: float, leverage: float) -> float:
+    """
+    Calculate correct margin usage based on current position and current price.
+    Uses the synced portfolio position to ensure accuracy.
+    """
+
+    if leverage <= 0:
+        leverage = 1.0
+
+    position_value = abs(portfolio.position * current_price)
+    used_margin = position_value / leverage if position_value > 0 else 0.0
+
+    return used_margin
+
+def validate_portfolio_consistency(session: Session, symbol: str) -> bool:
+    """
+    Validate that portfolio is consistent with trades.
+    Returns True if consistent, False if issues detected.
+    """
+
+    portfolio = session.query(Portfolio).filter(Portfolio.symbol == symbol).first()
+    if not portfolio:
+        return True
+
+    actual_state = calculate_actual_position_from_trades(session, symbol)
+    position_diff = abs(portfolio.position - actual_state["position"])
+    return position_diff <= 0.0001

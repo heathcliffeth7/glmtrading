@@ -1,0 +1,25 @@
+[Unit]
+Description=AI Trading Enriched Data Feed - 1min Intraday
+After=network.target influxdb.service redis.service
+Wants=influxdb.service redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/trading
+Environment="PATH=/root/trading/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/root/trading/.venv/bin/python -m app.data_feeds.enriched_feed --symbol BTCUSDT --interval 1m --poll-interval 60
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading-enriched-feed-1m
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

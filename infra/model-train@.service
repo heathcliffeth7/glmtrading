@@ -1,0 +1,14 @@
+[Unit]
+Description=AI Model Training (%i)
+After=network-online.target redis.service influxdb.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/trading
+EnvironmentFile=/root/trading/.env
+ExecStart=/root/trading/.venv/bin/python scripts/train_all_agents.py %i --days 30
+User=root
+
+[Install]
+WantedBy=multi-user.target
