@@ -2,10 +2,13 @@
 """
 ETH, SOL ve BTC için portföyü ve geçmiş işlemleri sıfırlar.
 Sadece belirtilen sembolleri (BTCUSDT, ETHUSDT, SOLUSDT) etkiler.
+İşlem sonrası belirtilen systemd servisini yeniden başlatır.
 """
 
 import sys
 import os
+import subprocess
+import shlex
 
 # Add project root to path
 sys.path.append(os.getcwd())
@@ -23,6 +26,8 @@ from sqlalchemy.orm import Session
 from datetime import date, datetime
 
 TARGET_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+SYSTEMD_SERVICES = ["trading-orchestrator.service"]
+SYSTEMCTL_BIN = os.environ.get("SYSTEMCTL_BIN", "systemctl")
 
 def reset_target_portfolio():
     print('=== PORTFÖY SIFIRLAMA (BTC, ETH, SOL) ===')
@@ -117,6 +122,25 @@ def reset_target_portfolio():
         session.commit()
         print('\n🎉 TÜM İŞLEMLER BAŞARIYLA TAMAMLANDI!')
 
+def restart_systemd_services():
+    print('\n7. Systemd servisleri yeniden başlatılıyor...')
+    systemctl_parts = shlex.split(SYSTEMCTL_BIN)
+
+    for service in SYSTEMD_SERVICES:
+        cmd = [*systemctl_parts, "restart", service]
+        print(f'  ▶ {" ".join(cmd)}')
+        try:
+            subprocess.run(cmd, check=True)
+            print(f'  ✅ {service} yeniden başlatıldı.')
+        except FileNotFoundError:
+            print(f'  ❌ systemctl bulunamadı. Komutu manuel çalıştırın: {" ".join(cmd)}')
+            return False
+        except subprocess.CalledProcessError as exc:
+            print(f'  ❌ {service} yeniden başlatılamadı (kod {exc.returncode}). Manuel çalıştırın: {" ".join(cmd)}')
+            return False
+
+    return True
+
 def show_current_status():
     print('\n=== MEVCUT DURUM ===')
     with Session(engine) as session:
@@ -130,6 +154,8 @@ def show_current_status():
 if __name__ == "__main__":
     # Kullanıcı onayı
     print("UYARI: Bu işlem BTC, ETH ve SOL için TÜM GEÇMİŞ İŞLEMLERİ SİLECEKTİR.")
+    print(f"İşlem sonrası aşağıdaki servis(ler) yeniden başlatılacak: {', '.join(SYSTEMD_SERVICES)}")
+    print(f"systemctl komutu: {SYSTEMCTL_BIN}")
     response = input("Devam etmek istiyor musunuz? (y/n): ")
     
     if response.lower() == 'y':
@@ -137,11 +163,17 @@ if __name__ == "__main__":
         print('\n' + '-'*40)
         try:
             reset_target_portfolio()
+            restart_ok = restart_systemd_services()
         except Exception as e:
             print(f'\n❌ HATA OLUŞTU: {e}')
             import traceback
             traceback.print_exc()
+            restart_ok = False
         print('-'*40)
         show_current_status()
+        if restart_ok:
+            print("\n♻️  Systemd servisleri başarıyla yeniden başlatıldı.")
+        else:
+            print("\n⚠️  Servis yeniden başlatma adımı tamamlanamadı, komutları manuel kontrol edin.")
     else:
         print("İşlem iptal edildi.")
