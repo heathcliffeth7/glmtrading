@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Trading Dashboard</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@200..800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script>
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "primary": "#1e94f6",
+                        "background-light": "#f5f7f8",
+                        "background-dark": "#0a0a0f",
+                        "panel-dark": "#10121a",
+                        "border-dark": "#283139",
+                        "text-light": "#e0e0e0",
+                        "text-secondary": "#8a8a8a",
+                        "profit": "#00b894",
+                        "loss": "#d63031",
+                        "btc": "#f7931a",
+                        "eth": "#627eea",
+                        "sol": "#c74bf5",
+                    },
+                    fontFamily: {
+                        "display": ["Manrope", "sans-serif"]
+                    },
+                    borderRadius: {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings:
+                'FILL' 0,
+                'wght' 400,
+                'GRAD' 0,
+                'opsz' 24
+        }
+        /* Custom scrollbar for AI Insights */
+        .scrollbar-thin::-webkit-scrollbar {
+            width: 4px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-track {
+            background: rgba(255,255,255,0.05);
+            border-radius: 4px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,0.2);
+            border-radius: 4px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+            background: rgba(255,255,255,0.3);
+        }
+    </style>
+</head>
+<body class="bg-background-dark font-display text-text-light">
+<div class="relative flex h-auto min-h-screen w-full group/design-root overflow-x-hidden">
+<div class="layout-container flex h-full grow flex-row">
+<aside class="w-96 bg-panel-dark border-r border-border-dark flex-col hidden xl:flex">
+<div class="flex items-center gap-4 px-6 py-4 border-b border-solid border-border-dark h-[73px]">
+<div class="size-6 text-primary">
+<svg fill="none" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+<g clip-path="url(#clip0_6_535)">
+<path clip-rule="evenodd" d="M47.2426 24L24 47.2426L0.757355 24L24 0.757355L47.2426 24ZM12.2426 21H35.7574L24 9.24264L12.2426 21Z" fill="currentColor" fill-rule="evenodd"></path>
+</g>
+<defs>
+<clipPath id="clip0_6_535">
+<rect fill="white" height="48" width="48"></rect>
+</clipPath>
+</defs>
+</svg>
+</div>
+<h2 class="text-text-light text-lg font-bold leading-tight tracking-[-0.015em]">Trading Dashboard</h2>
+</div>
+<div class="p-6 flex-1 flex flex-col">
+<div class="flex items-center justify-between mb-3">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-primary text-2xl">auto_awesome</span>
+<h3 class="text-text-light text-lg font-bold leading-tight tracking-[-0.015em]">AI Insights</h3>
+</div>
+<button onclick="fetchPortfolio(); fetchTrades(); fetchGLMSignals();" class="flex items-center justify-center gap-1.5 rounded-lg bg-primary/10 text-primary px-3 py-1.5 text-xs font-medium hover:bg-primary/20 transition-colors">
+<span class="material-symbols-outlined text-base">refresh</span>
+<span>Refresh</span>
+</button>
+</div>
+<div id="ai-insights-container" class="flex flex-col gap-3 overflow-y-auto pr-1 scrollbar-thin flex-1">
+<!-- AI Insights will be populated dynamically -->
+<div class="flex flex-col gap-2 p-3 rounded-lg border border-border-dark bg-background-dark">
+<p class="text-xs text-text-secondary">Loading insights...</p>
+</div>
+</div>
+</div>
+</aside>
+<div class="flex flex-col flex-1">
+<div class="px-4 sm:px-8 md:px-12 lg:px-16 flex flex-1 justify-center py-5">
+<div class="layout-content-container flex flex-col w-full max-w-7xl flex-1">
+<header class="flex items-center justify-between whitespace-nowrap px-6 py-4 xl:border-b xl:border-solid xl:border-border-dark">
+<div class="flex items-center gap-4">
+<h2 class="text-text-light text-lg font-bold leading-tight tracking-[-0.015em] xl:hidden">Trading Dashboard</h2>
+<div id="connection-status" class="flex items-center gap-2 ml-4">
+<span class="relative flex h-2.5 w-2.5">
+<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-text-secondary opacity-75"></span>
+<span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-text-secondary"></span>
+</span>
+<span class="text-sm text-text-secondary font-medium">Connecting...</span>
+</div>
+</div>
+</header>
+<main class="flex-1 p-6">
+<div class="flex w-full md:w-auto md:max-w-md">
+<div class="flex h-10 flex-1 items-center justify-center rounded-lg bg-panel-dark p-1">
+<label class="flex cursor-pointer h-full grow items-center justify-center overflow-hidden rounded-lg px-4 has-[:checked]:bg-background-dark has-[:checked]:shadow-[0_0_4px_rgba(0,0,0,0.1)] has-[:checked]:text-text-light text-text-secondary text-sm font-medium leading-normal">
+<span class="truncate">All</span>
+<input checked="" class="invisible w-0" name="symbol-selector" type="radio" value="All" onchange="filterBySymbol(null)"/>
+</label>
+<label class="flex cursor-pointer h-full grow items-center justify-center overflow-hidden rounded-lg px-4 has-[:checked]:bg-background-dark has-[:checked]:shadow-[0_0_4px_rgba(0,0,0,0.1)] has-[:checked]:text-text-light text-text-secondary text-sm font-medium leading-normal">
+<span class="truncate">BTC</span>
+<input class="invisible w-0" name="symbol-selector" type="radio" value="BTC" onchange="filterBySymbol('BTCUSDT')"/>
+</label>
+<label class="flex cursor-pointer h-full grow items-center justify-center overflow-hidden rounded-lg px-4 has-[:checked]:bg-background-dark has-[:checked]:shadow-[0_0_4px_rgba(0,0,0,0.1)] has-[:checked]:text-text-light text-text-secondary text-sm font-medium leading-normal">
+<span class="truncate">ETH</span>
+<input class="invisible w-0" name="symbol-selector" type="radio" value="ETH" onchange="filterBySymbol('ETHUSDT')"/>
+</label>
+<label class="flex cursor-pointer h-full grow items-center justify-center overflow-hidden rounded-lg px-4 has-[:checked]:bg-background-dark has-[:checked]:shadow-[0_0_4px_rgba(0,0,0,0.1)] has-[:checked]:text-text-light text-text-secondary text-sm font-medium leading-normal">
+<span class="truncate">SOL</span>
+<input class="invisible w-0" name="symbol-selector" type="radio" value="SOL" onchange="filterBySymbol('SOLUSDT')"/>
+</label>
+</div>
+</div>
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+<div class="lg:col-span-2 flex flex-col gap-6">
+<div class="bg-panel-dark p-6 rounded-xl border border-border-dark">
+<div class="flex flex-col gap-2">
+<div class="flex items-center justify-between">
+<p class="text-text-light text-lg font-bold">Equity Curve</p>
+<div class="flex h-8 items-center justify-center rounded-lg bg-background-dark p-1">
+<label class="flex cursor-pointer h-full items-center justify-center overflow-hidden rounded-md px-3 has-[:checked]:bg-panel-dark has-[:checked]:shadow-sm has-[:checked]:text-text-light text-text-secondary text-xs font-medium leading-normal">
+<span class="truncate">1D</span>
+<input class="invisible w-0" name="time-range-selector" type="radio" value="1" onchange="fetchEquityCurve(1)"/>
+</label>
+<label class="flex cursor-pointer h-full items-center justify-center overflow-hidden rounded-md px-3 has-[:checked]:bg-panel-dark has-[:checked]:shadow-sm has-[:checked]:text-text-light text-text-secondary text-xs font-medium leading-normal">
+<span class="truncate">7D</span>
+<input class="invisible w-0" name="time-range-selector" type="radio" value="7" onchange="fetchEquityCurve(7)"/>
+</label>
+<label class="flex cursor-pointer h-full items-center justify-center overflow-hidden rounded-md px-3 has-[:checked]:bg-panel-dark has-[:checked]:shadow-sm has-[:checked]:text-text-light text-text-secondary text-xs font-medium leading-normal">
+<span class="truncate">30D</span>
+<input checked="" class="invisible w-0" name="time-range-selector" type="radio" value="30" onchange="fetchEquityCurve(30)"/>
+</label>
+</div>
+</div>
+<p id="equity-value" class="text-text-light tracking-light text-4xl font-bold leading-tight truncate">$0.00</p>
+<div class="flex gap-2 items-center">
+<p id="equity-period" class="text-text-secondary text-sm font-normal leading-normal">Last 30 Days</p>
+<p id="equity-change" class="text-profit text-sm font-medium leading-normal">+0.0%</p>
+</div>
+</div>
+<div id="equity-chart" class="flex min-h-[250px] flex-1 flex-col gap-8 pt-4 relative">
+<svg class="absolute inset-0" fill="none" height="100%" preserveAspectRatio="none" viewBox="0 0 472 150" width="100%" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<linearGradient gradientUnits="userSpaceOnUse" id="equity-gradient" x1="236" x2="236" y1="0" y2="150">
+<stop stop-color="#1e94f6" stop-opacity="0.3"></stop>
+<stop offset="1" stop-color="#1e94f6" stop-opacity="0"></stop>
+</linearGradient>
+</defs>
+<path id="equity-line" d="M0 75 L472 75" stroke="#1e94f6" stroke-linecap="round" stroke-width="2.5"></path>
+<path id="equity-area" d="M0 75 L472 75 V150 H0 Z" fill="url(#equity-gradient)"></path>
+</svg>
+</div>
+<div id="equity-labels" class="flex justify-around pt-2">
+<p class="text-text-secondary text-[13px] font-bold leading-normal tracking-[0.015em]">Loading...</p>
+</div>
+</div>
+<div class="w-full">
+<h3 class="text-text-light text-lg font-bold leading-tight tracking-[-0.015em] pb-2 pt-4">Portfolio Summary</h3>
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+<div class="flex flex-col gap-2 rounded-xl p-4 bg-panel-dark border border-border-dark">
+<p class="text-text-secondary text-sm font-medium leading-normal">Total Equity</p>
+<p id="total-equity" class="text-text-light tracking-light text-2xl font-bold leading-tight">$0.00</p>
+<p id="total-equity-change" class="text-text-secondary text-sm font-medium leading-normal">-</p>
+</div>
+<div class="flex flex-col gap-2 rounded-xl p-4 bg-panel-dark border border-border-dark">
+<p class="text-text-secondary text-sm font-medium leading-normal">Unrealized PnL</p>
+<p id="unrealized-pnl" class="text-text-light tracking-light text-2xl font-bold leading-tight">$0.00</p>
+<p id="unrealized-pnl-pct" class="text-text-secondary text-sm font-medium leading-normal">-</p>
+</div>
+<div class="flex flex-col gap-2 rounded-xl p-4 bg-panel-dark border border-border-dark">
+<p class="text-text-secondary text-sm font-medium leading-normal">Realized PnL</p>
+<p id="realized-pnl" class="text-text-light tracking-light text-2xl font-bold leading-tight">$0.00</p>
+<p id="realized-pnl-pct" class="text-text-secondary text-sm font-medium leading-normal">-</p>
+</div>
+<div class="flex flex-col gap-2 rounded-xl p-4 bg-panel-dark border border-border-dark">
+<p class="text-text-secondary text-sm font-medium leading-normal">Total PnL</p>
+<p id="total-pnl" class="text-text-light tracking-light text-2xl font-bold leading-tight">$0.00</p>
+<p id="total-pnl-pct" class="text-text-secondary text-sm font-medium leading-normal">-</p>
+</div>
+</div>
+</div>
+<div class="w-full">
+<h3 class="text-text-light text-lg font-bold leading-tight tracking-[-0.015em] pb-2 pt-4">Recent Trades</h3>
+<div class="bg-panel-dark rounded-xl border border-border-dark overflow-x-auto">
+<table class="w-full text-sm text-left text-text-secondary">
+<thead class="text-xs text-text-secondary uppercase bg-panel-dark">
+<tr>
+<th class="px-6 py-3" scope="col">Symbol</th>
+<th class="px-6 py-3" scope="col">Side</th>
+<th class="px-6 py-3 text-right" scope="col">Amount</th>
+<th class="px-6 py-3 text-right" scope="col">Entry Price</th>
+<th class="px-6 py-3 text-right" scope="col">PnL</th>
+<th class="px-6 py-3 text-right" scope="col">Time</th>
+</tr>
+</thead>
+<tbody id="trades-tbody">
+<tr>
+<td colspan="6" class="px-6 py-4 text-center text-text-secondary">Loading trades...</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</div>
+<div class="lg:col-span-1 flex flex-col gap-6">
+<div class="w-full">
+<h3 class="text-text-light text-lg font-bold leading-tight tracking-[-0.015em] pb-2">Positions</h3>
+<div id="positions-container" class="flex flex-col gap-4">
+<div class="bg-panel-dark p-4 rounded-xl border border-border-dark">
+<p class="text-sm text-text-secondary">Loading positions...</p>
+</div>
+</div>
+</div>
+<div class="w-full">
+<h3 class="text-text-light text-lg font-bold leading-tight tracking-[-0.015em] pb-2 pt-4">Trade Statistics (30D)</h3>
+<div class="bg-panel-dark p-6 rounded-xl border border-border-dark">
+<div id="pnl-histogram" class="h-40 w-full flex items-end gap-1">
+<!-- Histogram bars will be populated dynamically -->
+</div>
+<div id="trade-stats" class="mt-6 grid grid-cols-2 gap-4 text-sm">
+<div class="flex justify-between">
+<span class="text-text-secondary">Win Rate:</span>
+<span id="win-rate" class="text-text-light font-medium">-</span>
+</div>
+<div class="flex justify-between">
+<span class="text-text-secondary">Avg. Win:</span>
+<span id="avg-win" class="text-text-light font-medium">-</span>
+</div>
+<div class="flex justify-between">
+<span class="text-text-secondary">Loss Rate:</span>
+<span id="loss-rate" class="text-text-light font-medium">-</span>
+</div>
+<div class="flex justify-between">
+<span class="text-text-secondary">Avg. Loss:</span>
+<span id="avg-loss" class="text-text-light font-medium">-</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</main>
+</div>
+</div>
+</div>
+</div>
+</div>
+
+<script>
+// Configuration
+const API_BASE = window.location.hostname === 'localhost'
+    ? 'http://localhost:8001'
+    : `http://${window.location.hostname}:8001`;
+const WS_URL = window.location.hostname === 'localhost'
+    ? 'ws://localhost:8001/ws/portfolio'
+    : `ws://${window.location.hostname}:8001/ws/portfolio`;
+
+// State
+let currentSymbol = null;
+let ws = null;
+let prices = {};
+let portfolioData = null;
+let cachedTrades = [];
+let cachedSignals = [];
+
+// Format currency
+function formatCurrency(value) {
+    const num = parseFloat(value) || 0;
+    return new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: 'USD',
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    }).format(num);
+}
+
+// Format percentage
+function formatPercent(value) {
+    const num = parseFloat(value) || 0;
+    const sign = num >= 0 ? '+' : '';
+    return `${sign}${num.toFixed(2)}%`;
+}
+
+// Format time ago
+function timeAgo(timestamp) {
+    if (!timestamp) return '-';
+    const date = new Date(timestamp);
+    const now = new Date();
+    const diff = Math.floor((now - date) / 1000);
+
+    if (diff < 60) return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
+}
+
+// Update connection status
+function updateConnectionStatus(connected) {
+    const statusEl = document.getElementById('connection-status');
+    if (connected) {
+        statusEl.innerHTML = `
+            <span class="relative flex h-2.5 w-2.5">
+                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-profit opacity-75"></span>
+                <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-profit"></span>
+            </span>
+            <span class="text-sm text-profit font-medium">Live</span>
+        `;
+    } else {
+        statusEl.innerHTML = `
+            <span class="relative flex h-2.5 w-2.5">
+                <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-text-secondary"></span>
+            </span>
+            <span class="text-sm text-text-secondary font-medium">Disconnected</span>
+        `;
+    }
+}
+
+// Fetch portfolio data
+async function fetchPortfolio() {
+    try {
+        const response = await fetch(`${API_BASE}/api/portfolio`);
+        if (!response.ok) throw new Error('Failed to fetch portfolio');
+
+        const data = await response.json();
+        portfolioData = data;
+        updatePortfolioUI(data);
+        updateConnectionStatus(true);
+    } catch (error) {
+        console.error('Portfolio fetch error:', error);
+        updateConnectionStatus(false);
+    }
+}
+
+// Update portfolio UI
+function updatePortfolioUI(data) {
+    // Update positions first
+    updatePositionsUI(data.symbols);
+
+    // Use symbol-specific display function
+    updatePortfolioUIForSymbol(currentSymbol);
+}
+
+// Update positions UI
+function updatePositionsUI(symbols) {
+    const container = document.getElementById('positions-container');
+
+    if (!symbols || symbols.length === 0) {
+        container.innerHTML = `
+            <div class="bg-panel-dark p-4 rounded-xl border border-border-dark">
+                <p class="text-sm text-text-secondary">No positions</p>
+            </div>
+        `;
+        return;
+    }
+
+    const symbolIcons = {
+        'BTCUSDT': { color: 'btc', name: 'BTC/USD', icon: 'currency_bitcoin' },
+        'ETHUSDT': { color: 'eth', name: 'ETH/USD', icon: 'diamond' },
+        'SOLUSDT': { color: 'sol', name: 'SOL/USD', icon: 'sunny' }
+    };
+
+    container.innerHTML = symbols.map(pos => {
+        const info = symbolIcons[pos.symbol] || { color: 'primary', name: pos.symbol, icon: 'monetization_on' };
+        const hasPosition = Math.abs(pos.position) > 0.0001;
+
+        if (!hasPosition) return '';
+
+        const pnlClass = pos.unrealized_pnl >= 0 ? 'text-profit' : 'text-loss';
+        const pnlSign = pos.unrealized_pnl >= 0 ? '+' : '';
+
+        return `
+            <div class="bg-panel-dark p-4 rounded-xl border border-border-dark flex flex-col gap-3">
+                <div class="flex justify-between items-center">
+                    <div class="flex items-center gap-2">
+                        <span class="material-symbols-outlined text-${info.color}">${info.icon}</span>
+                        <span class="font-bold text-text-light">${info.name}</span>
+                    </div>
+                    <span id="price-${pos.symbol}" class="text-lg font-bold text-text-light">${formatCurrency(pos.current_price)}</span>
+                </div>
+                <div class="flex justify-between items-center text-sm">
+                    <span class="text-text-secondary">Position</span>
+                    <span class="text-text-light">${pos.position_side}: ${Math.abs(pos.position).toFixed(4)} ${pos.symbol.replace('USDT', '')}</span>
+                </div>
+                <div class="flex justify-between items-center text-sm">
+                    <span class="text-text-secondary">Entry Price</span>
+                    <span class="text-text-light">${formatCurrency(pos.entry_price)}</span>
+                </div>
+                <div class="flex justify-between items-center text-sm">
+                    <span class="text-text-secondary">PnL</span>
+                    <span class="${pnlClass} font-medium">${pnlSign}${formatCurrency(pos.unrealized_pnl)} (${formatPercent(pos.unrealized_pnl_pct)})</span>
+                </div>
+            </div>
+        `;
+    }).filter(html => html).join('') || `
+        <div class="bg-panel-dark p-4 rounded-xl border border-border-dark">
+            <p class="text-sm text-text-secondary">No open positions</p>
+        </div>
+    `;
+}
+
+// Fetch trades
+async function fetchTrades(symbol = null) {
+    try {
+        let url = `${API_BASE}/api/trades?per_page=10&status=all`;
+        if (symbol) url += `&symbol=${symbol}`;
+
+        const response = await fetch(url);
+        if (!response.ok) throw new Error('Failed to fetch trades');
+
+        const data = await response.json();
+        cachedTrades = data.trades || [];  // Cache for real-time PnL updates
+        updateTradesTable(cachedTrades);
+    } catch (error) {
+        console.error('Trades fetch error:', error);
+    }
+}
+
+// Update trades table
+function updateTradesTable(trades) {
+    const tbody = document.getElementById('trades-tbody');
+
+    if (!trades || trades.length === 0) {
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="6" class="px-6 py-4 text-center text-text-secondary">No trades found</td>
+            </tr>
+        `;
+        return;
+    }
+
+    tbody.innerHTML = trades.map((trade, index) => {
+        const isLast = index === trades.length - 1;
+        const borderClass = isLast ? '' : 'border-b border-border-dark';
+        const sideClass = trade.side === 'BUY' ? 'text-profit' : 'text-loss';
+        const pnlClass = (trade.pnl || 0) >= 0 ? 'text-profit' : 'text-loss';
+        const pnlSign = (trade.pnl || 0) >= 0 ? '+' : '';
+
+        return `
+            <tr class="${borderClass}">
+                <td class="px-6 py-4 font-medium text-text-light whitespace-nowrap">${trade.symbol.replace('USDT', '/USD')}</td>
+                <td class="px-6 py-4 ${sideClass}">${trade.side}</td>
+                <td class="px-6 py-4 text-right">${trade.amount.toFixed(4)}</td>
+                <td class="px-6 py-4 text-right">${formatCurrency(trade.entry_price)}</td>
+                <td class="px-6 py-4 text-right ${pnlClass}">${pnlSign}${formatCurrency(trade.pnl || 0)}</td>
+                <td class="px-6 py-4 text-right">${timeAgo(trade.timestamp)}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+// Fetch equity curve
+async function fetchEquityCurve(days = 30, symbol = null) {
+    try {
+        let url = `${API_BASE}/api/portfolio/equity-curve?days=${days}`;
+        if (symbol) {
+            url += `&symbol=${symbol}`;
+        }
+        const response = await fetch(url);
+        if (!response.ok) throw new Error('Failed to fetch equity curve');
+
+        const data = await response.json();
+        updateEquityChart(data, days, symbol);
+    } catch (error) {
+        console.error('Equity curve fetch error:', error);
+    }
+}
+
+// Update equity chart
+function updateEquityChart(data, days, symbol = null) {
+    const symbolLabel = symbol ? ` (${symbol.replace('USDT', '')})` : ' (All)';
+    document.getElementById('equity-period').textContent = `Last ${days} Days${symbolLabel}`;
+
+    if (!data.data || data.data.length < 2) {
+        return;
+    }
+
+    const points = data.data;
+    const minEquity = Math.min(...points.map(p => p.equity));
+    const maxEquity = Math.max(...points.map(p => p.equity));
+    const range = maxEquity - minEquity || 1;
+
+    // Generate SVG path
+    const width = 472;
+    const height = 150;
+    const padding = 10;
+
+    const pathPoints = points.map((point, index) => {
+        const x = (index / (points.length - 1)) * width;
+        const y = height - padding - ((point.equity - minEquity) / range) * (height - 2 * padding);
+        return `${x} ${y}`;
+    });
+
+    const linePath = `M${pathPoints.join(' L')}`;
+    const areaPath = `M${pathPoints.join(' L')} V ${height} H 0 Z`;
+
+    document.getElementById('equity-line').setAttribute('d', linePath);
+    document.getElementById('equity-area').setAttribute('d', areaPath);
+
+    // Update labels
+    const labelsContainer = document.getElementById('equity-labels');
+    const labelCount = Math.min(4, points.length);
+    const step = Math.floor(points.length / labelCount);
+
+    labelsContainer.innerHTML = Array.from({ length: labelCount }, (_, i) => {
+        const index = Math.min(i * step, points.length - 1);
+        const date = new Date(points[index].timestamp);
+        return `<p class="text-text-secondary text-[13px] font-bold leading-normal tracking-[0.015em]">${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</p>`;
+    }).join('');
+}
+
+// Fetch PnL histogram
+async function fetchPnLHistogram() {
+    try {
+        const response = await fetch(`${API_BASE}/api/trades/pnl-histogram?days=30&bins=14`);
+        if (!response.ok) throw new Error('Failed to fetch PnL histogram');
+
+        const data = await response.json();
+        updatePnLHistogram(data);
+    } catch (error) {
+        console.error('PnL histogram fetch error:', error);
+    }
+}
+
+// Update PnL histogram
+function updatePnLHistogram(data) {
+    const container = document.getElementById('pnl-histogram');
+    const stats = data.stats;
+
+    // Update stats
+    document.getElementById('win-rate').textContent = `${(stats.win_rate * 100).toFixed(0)}%`;
+    document.getElementById('avg-win').textContent = formatCurrency(stats.avg_winner);
+    document.getElementById('loss-rate').textContent = `${((1 - stats.win_rate) * 100).toFixed(0)}%`;
+    document.getElementById('avg-loss').textContent = formatCurrency(stats.avg_loser);
+
+    // Generate histogram bars
+    if (!data.histogram || data.histogram.length === 0) {
+        container.innerHTML = '<p class="text-text-secondary text-sm">No trade data</p>';
+        return;
+    }
+
+    const maxCount = Math.max(...data.histogram.map(b => b.count));
+
+    container.innerHTML = data.histogram.map(bin => {
+        const height = maxCount > 0 ? (bin.count / maxCount) * 100 : 0;
+        const colorClass = bin.range_max <= 0 ? 'bg-loss' : 'bg-profit';
+        return `<div class="flex-1 h-[${Math.max(5, height)}%] ${colorClass} rounded-t-sm" title="${bin.range_min.toFixed(2)} to ${bin.range_max.toFixed(2)}: ${bin.count} trades"></div>`;
+    }).join('');
+}
+
+// Filter by symbol
+function filterBySymbol(symbol) {
+    currentSymbol = symbol;
+    fetchTrades(symbol);
+
+    // Update equity curve for selected symbol
+    fetchEquityCurve(30, symbol);
+
+    // Update portfolio display for selected symbol
+    if (portfolioData) {
+        updatePortfolioUIForSymbol(symbol);
+    }
+}
+
+// Update portfolio UI for specific symbol or all
+function updatePortfolioUIForSymbol(symbol) {
+    if (!portfolioData) return;
+
+    let displayEquity, displayUnrealized, displayRealized, initialCapital;
+
+    if (symbol === null) {
+        // All symbols - show totals
+        displayEquity = portfolioData.total_equity;
+        displayUnrealized = portfolioData.total_unrealized_pnl;
+        displayRealized = portfolioData.total_realized_pnl;
+        initialCapital = 30000; // 3 symbols x 10K
+    } else {
+        // Specific symbol
+        const symbolData = portfolioData.symbols.find(s => s.symbol === symbol);
+        if (symbolData) {
+            displayEquity = symbolData.equity;
+            displayUnrealized = symbolData.unrealized_pnl;
+            displayRealized = symbolData.realized_pnl;
+            initialCapital = 10000; // Single symbol
+        } else {
+            return;
+        }
+    }
+
+    // Update equity display
+    document.getElementById('total-equity').textContent = formatCurrency(displayEquity);
+    document.getElementById('equity-value').textContent = formatCurrency(displayEquity);
+
+    // Unrealized PnL
+    const unrealizedEl = document.getElementById('unrealized-pnl');
+    const unrealizedPctEl = document.getElementById('unrealized-pnl-pct');
+    unrealizedEl.textContent = formatCurrency(displayUnrealized);
+    unrealizedPctEl.textContent = displayUnrealized >= 0 ? 'Profit' : 'Loss';
+    unrealizedPctEl.className = `text-sm font-medium leading-normal ${displayUnrealized >= 0 ? 'text-profit' : 'text-loss'}`;
+
+    // Realized PnL
+    const realizedEl = document.getElementById('realized-pnl');
+    const realizedPctEl = document.getElementById('realized-pnl-pct');
+    realizedEl.textContent = formatCurrency(displayRealized);
+    realizedPctEl.textContent = displayRealized >= 0 ? 'Profit' : 'Loss';
+    realizedPctEl.className = `text-sm font-medium leading-normal ${displayRealized >= 0 ? 'text-profit' : 'text-loss'}`;
+
+    // Total PnL
+    const totalPnl = displayUnrealized + displayRealized;
+    const totalPnlEl = document.getElementById('total-pnl');
+    const totalPnlPctEl = document.getElementById('total-pnl-pct');
+    totalPnlEl.textContent = formatCurrency(totalPnl);
+    totalPnlPctEl.textContent = totalPnl >= 0 ? 'Profit' : 'Loss';
+    totalPnlPctEl.className = `text-sm font-medium leading-normal ${totalPnl >= 0 ? 'text-profit' : 'text-loss'}`;
+
+    // Equity change indicator
+    const equityChangeEl = document.getElementById('equity-change');
+    const pnlPercent = ((totalPnl / initialCapital) * 100);
+    equityChangeEl.textContent = formatPercent(pnlPercent);
+    equityChangeEl.className = `text-sm font-medium leading-normal ${pnlPercent >= 0 ? 'text-profit' : 'text-loss'}`;
+}
+
+// WebSocket connection
+function connectWebSocket() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        return;
+    }
+
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+        console.log('WebSocket connected');
+        updateConnectionStatus(true);
+        ws.send(JSON.stringify({
+            action: 'subscribe',
+            symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
+        }));
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'price_update') {
+                updatePrice(data.symbol, data.price);
+            } else if (data.type === 'new_signal') {
+                // Real-time signal update
+                console.log('New signal received:', data.signal);
+                handleNewSignal(data.signal);
+            } else if (data.type === 'new_trade') {
+                // Real-time trade update
+                console.log('New trade received:', data.trade);
+                handleNewTrade(data.trade);
+            }
+        } catch (error) {
+            console.error('WebSocket message error:', error);
+        }
+    };
+
+    ws.onclose = () => {
+        console.log('WebSocket disconnected');
+        updateConnectionStatus(false);
+        setTimeout(connectWebSocket, 5000);
+    };
+
+    ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        updateConnectionStatus(false);
+    };
+}
+
+// Update price from WebSocket
+function updatePrice(symbol, price) {
+    prices[symbol] = price;
+    console.log(`Price update: ${symbol} = ${price}, cachedTrades: ${cachedTrades.length}`);
+
+    // Update price display
+    const priceEl = document.getElementById(`price-${symbol}`);
+    if (priceEl) {
+        priceEl.textContent = formatCurrency(price);
+    }
+
+    // Update position PnL if we have portfolio data
+    if (portfolioData && portfolioData.symbols) {
+        const position = portfolioData.symbols.find(s => s.symbol === symbol);
+        if (position && Math.abs(position.position) > 0.0001) {
+            position.current_price = price;
+            position.unrealized_pnl = (price - position.entry_price) * position.position;
+            position.unrealized_pnl_pct = ((price - position.entry_price) / position.entry_price) * 100;
+
+            // Recalculate totals
+            portfolioData.total_unrealized_pnl = portfolioData.symbols.reduce((sum, s) => sum + (s.unrealized_pnl || 0), 0);
+            portfolioData.total_equity = 10000 + portfolioData.total_realized_pnl + portfolioData.total_unrealized_pnl;
+
+            updatePortfolioUI(portfolioData);
+        }
+    }
+
+    // Update open trades PnL in Recent Trades table
+    updateOpenTradesPnL(symbol, price);
+}
+
+// Update PnL for open trades when price changes
+function updateOpenTradesPnL(symbol, currentPrice) {
+    if (!cachedTrades || cachedTrades.length === 0) {
+        console.log('updateOpenTradesPnL: No cached trades');
+        return;
+    }
+
+    let updated = false;
+    cachedTrades.forEach(trade => {
+        // Only update open positions (close_price is null)
+        if (trade.symbol === symbol && !trade.close_price) {
+            // PnL = (current_price - entry_price) * amount * direction - fees
+            const direction = trade.side === 'BUY' ? 1 : -1;
+            const oldPnl = trade.pnl;
+            const fees = trade.fees || 0;
+            trade.pnl = (currentPrice - trade.entry_price) * trade.amount * direction - fees;
+            trade.current_price = currentPrice;  // Store current price for display
+            console.log(`PnL updated for ${symbol}: ${oldPnl?.toFixed(2)} -> ${trade.pnl.toFixed(2)} (price: ${currentPrice}, fees: ${fees})`);
+            updated = true;
+        }
+    });
+
+    if (updated) {
+        updateTradesTable(cachedTrades);
+    }
+}
+
+// Fetch GLM signals from API
+async function fetchGLMSignals() {
+    try {
+        const response = await fetch(`${API_BASE}/api/signals/recent?limit=10`);
+        if (!response.ok) throw new Error('Failed to fetch signals');
+
+        const data = await response.json();
+        // Update cached signals for real-time updates
+        cachedSignals = data.signals || [];
+        updateAIInsightsUI(cachedSignals);
+    } catch (error) {
+        console.error('GLM signals fetch error:', error);
+        // Show error state
+        const container = document.getElementById('ai-insights-container');
+        container.innerHTML = `
+            <div class="flex flex-col gap-3 p-4 rounded-xl border border-border-dark bg-background-dark">
+                <p class="text-sm text-text-secondary">Sinyal verisi yüklenemedi</p>
+            </div>
+        `;
+    }
+}
+
+// Format timestamp for signals
+function formatTimeAgo(timestamp) {
+    if (!timestamp) return '-';
+    const date = new Date(timestamp);
+    const now = new Date();
+    const diff = Math.floor((now - date) / 1000);
+
+    if (diff < 60) return `${diff}sn önce`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}dk önce`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}sa önce`;
+    return `${Math.floor(diff / 86400)}g önce`;
+}
+
+// Handle new signal from WebSocket (real-time)
+function handleNewSignal(signal) {
+    // Add to beginning of cached signals
+    cachedSignals.unshift(signal);
+
+    // Keep only last 10 signals
+    if (cachedSignals.length > 10) {
+        cachedSignals = cachedSignals.slice(0, 10);
+    }
+
+    // Update UI immediately
+    updateAIInsightsUI(cachedSignals);
+
+    // Flash animation for new signal
+    const container = document.getElementById('ai-insights-container');
+    const firstCard = container.querySelector('div');
+    if (firstCard) {
+        firstCard.classList.add('ring-2', 'ring-primary', 'animate-pulse');
+        setTimeout(() => {
+            firstCard.classList.remove('ring-2', 'ring-primary', 'animate-pulse');
+        }, 3000);
+    }
+}
+
+// Handle new trade from WebSocket (real-time)
+function handleNewTrade(trade) {
+    // Update cached trades
+    cachedTrades.unshift(trade);
+    if (cachedTrades.length > 10) {
+        cachedTrades = cachedTrades.slice(0, 10);
+    }
+
+    const tbody = document.getElementById('trades-tbody');
+    if (!tbody) return;
+
+    const row = document.createElement('tr');
+    row.className = 'border-b border-border-dark hover:bg-background-dark/50 transition-colors';
+
+    const pnl = trade.pnl || 0;
+    const pnlClass = pnl >= 0 ? 'text-profit' : 'text-loss';
+    const pnlSign = pnl >= 0 ? '+' : '';
+
+    row.innerHTML = `
+        <td class="py-3 px-4">
+            <span class="font-medium">${trade.symbol || '-'}</span>
+        </td>
+        <td class="py-3 px-4">
+            <span class="px-2 py-1 rounded text-xs font-medium ${
+                trade.side === 'BUY' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
+            }">${trade.side || '-'}</span>
+        </td>
+        <td class="py-3 px-4 text-right">${trade.amount?.toFixed(4) || '-'}</td>
+        <td class="py-3 px-4 text-right">${formatCurrency(trade.entry_price)}</td>
+        <td class="py-3 px-4 text-right ${pnlClass}">
+            ${pnlSign}${formatCurrency(pnl)}
+        </td>
+        <td class="py-3 px-4 text-right text-text-secondary">${formatTimeAgo(trade.timestamp)}</td>
+    `;
+
+    // Animate the new row
+    row.style.animation = 'fadeIn 0.3s ease-in-out';
+    row.classList.add('ring-2', 'ring-primary');
+
+    // Insert at the beginning
+    tbody.insertBefore(row, tbody.firstChild);
+
+    // Remove highlight after 3 seconds
+    setTimeout(() => {
+        row.classList.remove('ring-2', 'ring-primary');
+    }, 3000);
+
+    // Keep only 10 rows
+    while (tbody.children.length > 10) {
+        tbody.removeChild(tbody.lastChild);
+    }
+}
+
+// Update AI Insights UI with GLM signals
+function updateAIInsightsUI(signals) {
+    const container = document.getElementById('ai-insights-container');
+
+    if (!signals || signals.length === 0) {
+        container.innerHTML = `
+            <div class="flex flex-col gap-2 p-3 rounded-xl border border-border-dark bg-background-dark">
+                <p class="text-xs text-text-secondary">Henüz sinyal yok</p>
+            </div>
+        `;
+        return;
+    }
+
+    const actionColors = {
+        'BUY': 'bg-profit/20 text-profit border-profit/30',
+        'SELL': 'bg-loss/20 text-loss border-loss/30',
+        'HOLD': 'bg-text-secondary/20 text-text-secondary border-text-secondary/30',
+        'CLOSE': 'bg-primary/20 text-primary border-primary/30'
+    };
+
+    // Show more signals (up to 10)
+    container.innerHTML = signals.slice(0, 10).map(signal => {
+        const actionClass = actionColors[signal.action] || actionColors['HOLD'];
+        const signalTime = formatTimeAgo(signal.timestamp);
+        // Use reasoning field, fallback to reason_primary
+        const reasoning = signal.reasoning || signal.reason_primary || 'Gerekçe mevcut değil';
+
+        return `
+            <div class="flex flex-col gap-3 p-5 rounded-xl border border-border-dark bg-background-dark/50 hover:bg-background-dark transition-colors">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-3">
+                        <span class="text-xs font-semibold uppercase px-2.5 py-1 rounded-md ${actionClass}">${signal.action || 'HOLD'}</span>
+                        <span class="text-sm font-semibold text-text-light">${(signal.symbol || '').replace('USDT', '/USD')}</span>
+                    </div>
+                    <span class="text-xs text-text-secondary">${signalTime}</span>
+                </div>
+                <p class="text-sm text-text-secondary leading-relaxed">${reasoning}</p>
+            </div>
+        `;
+    }).join('');
+}
+
+// Initialize
+document.addEventListener('DOMContentLoaded', () => {
+    // Initial fetch
+    fetchPortfolio();
+    fetchTrades();
+    fetchEquityCurve(30);
+    fetchPnLHistogram();
+    fetchGLMSignals();
+
+    // Connect WebSocket
+    connectWebSocket();
+
+    // Refresh data periodically (WebSocket handles real-time updates, polling is fallback)
+    setInterval(fetchPortfolio, 30000);
+    setInterval(fetchTrades, 300000);      // 5 dakika fallback (WebSocket anlık)
+    setInterval(fetchGLMSignals, 300000);  // 5 dakika fallback (WebSocket anlık)
+});
+</script>
+</body></html>
