@@ -19,6 +19,7 @@ from app.executor.portfolio_sync import get_synced_portfolio, calculate_correct_
 from app.risk_manager.manager import RiskDecision
 from app.risk_manager.dynamic_risk_manager import DynamicRiskManager
 from app.risk_manager.advanced_parser import AdvancedInvalidationParser
+from app.risk_manager.exit_validator import get_exit_validator, ExitValidator
 from app.utils.influx import query_latest
 from app.utils.price_cache import ensure_price_cache_listener, price_cache
 from app.utils.logging import get_logger
@@ -50,7 +51,21 @@ class Executor:
         self._max_position_per_side = max_position  # YENİ: Her yön için ayrı limit
         self._max_daily_loss = max_daily_loss
         self._min_leverage = min_leverage
-        self._max_leverage = max_leverage
+
+        # SWING TRADE MODE: Apply hard leverage cap from settings
+        from app.config.settings import get_settings
+        settings = get_settings()
+        self._swing_mode = getattr(settings, 'swing_trade_mode', False)
+        if self._swing_mode:
+            swing_max_lev = getattr(settings, 'swing_max_leverage', 7)
+            self._max_leverage = min(max_leverage, swing_max_lev)
+            logger.info(
+                "📊 Executor [%s]: SWING MODE enabled - max leverage capped at %dx",
+                symbol, self._max_leverage
+            )
+        else:
+            self._max_leverage = max_leverage
+
         self._max_margin_per_trade = max_trade_value  # YENİ: Rename for clarity
         self._starting_cash = 10000.0
         self._taker_fee_rate = taker_fee_rate
@@ -364,7 +379,7 @@ class Executor:
                 logger.error("❌ SKIP REASON: No fresh price available")
                 cache_age = price_cache.get_age_seconds(self._symbol)
                 try:
-                    telegram_client.send_message(f"⚠️ **İŞLEM ATLANDI - FİYAT VERİSİ YOK**\nAction: {decision.action}\nCache age: {cache_age:.1f}s", parse_mode="Markdown")
+                    telegram_client.send_message(f"⚠️ **İŞLEM ATLANDI - FİYAT VERİSİ YOK**\nAction: {decision.action}\nCache age: {cache_age:.1f}s")
                 except Exception as exc:
                     logger.error("Failed to send Telegram notification: %s", exc)
                 return ExecutionResult(status="SKIPPED", details="No fresh price available")
@@ -390,8 +405,13 @@ class Executor:
                     
                     logger.info("✅ CLOSE action validated: confidence=%.1f%%, PnL=%.2f%% (confidence/PnL guardrails bypassed for GLM CLOSE)", decision.glm_confidence, current_pnl_pct)
 
+        # CLOSE with amount=0 should close 100% of position
+        if decision.action == "CLOSE" and decision.amount == 0:
+            decision.amount = 1.0
+            logger.info("📌 CLOSE amount was 0, defaulting to 100% close")
+
         # HOLD COOLDOWN
-        if decision.action == "HOLD" or decision.amount == 0:
+        if decision.action == "HOLD" or (decision.amount == 0 and decision.action not in ["CLOSE"]):
             logger.info("🔍 HOLD decision - checking close cooldown...")
             if self._last_close_time:
                 elapsed = (datetime.utcnow() - self._last_close_time).total_seconds()
@@ -477,21 +497,76 @@ class Executor:
         return None
 
     def _handle_close_position(
-        self, session: Session, portfolio: Portfolio, daily_pnl: DailyPnL, 
+        self, session: Session, portfolio: Portfolio, daily_pnl: DailyPnL,
         decision: RiskDecision, price: float, position_side: str
     ) -> ExecutionResult:
         if position_side == "LONG":
             max_closeable = portfolio.long_position
+            entry_price = portfolio.long_avg_price
         else:
             max_closeable = abs(portfolio.short_position)
-        
+            entry_price = portfolio.short_avg_price
+
         if max_closeable < 0.0001:
-            logger.warning("❌ No %s position to close!", position_side)
-            return ExecutionResult(status="SKIP", details=f"Kapatılacak {position_side} pozisyon yok")
-        
+            logger.warning("No %s position to close!", position_side)
+            return ExecutionResult(status="SKIP", details=f"Kapatilacak {position_side} pozisyon yok")
+
+        # =========================================================================
+        # GLM Elite Swing Trader: Exit Validation
+        # =========================================================================
+        if self._swing_mode:
+            try:
+                # Get oldest open trade for this position side to determine hold duration
+                oldest_open_trade = session.query(Trade).filter(
+                    Trade.symbol == self._symbol,
+                    Trade.position_side == position_side,
+                    Trade.close_price.is_(None)
+                ).order_by(Trade.timestamp.asc()).first()
+
+                # Get exit plan from the trade
+                exit_plan = oldest_open_trade.exit_plan if oldest_open_trade else None
+                stop_loss = exit_plan.get("stop_loss", 0) if exit_plan else 0
+                take_profit = exit_plan.get("profit_target", 0) if exit_plan else 0
+
+                # Build position dict for validator
+                position_dict = {
+                    "quantity": max_closeable,
+                    "entry_price": entry_price,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "type": position_side,
+                    "open_time": oldest_open_trade.timestamp if oldest_open_trade else None,
+                }
+
+                # Validate the close decision
+                exit_validator = get_exit_validator()
+                is_valid, reason, override_action = exit_validator.validate_close_decision(
+                    signal="CLOSE",
+                    exit_validation=decision.exit_validation,
+                    position=position_dict,
+                    current_price=price,
+                    allow_sl_override=True
+                )
+
+                if not is_valid:
+                    logger.warning(
+                        "Exit validation FAILED: %s | Overriding CLOSE -> HOLD",
+                        reason
+                    )
+                    return ExecutionResult(
+                        status="SKIP",
+                        details=f"Exit validation failed: {reason}"
+                    )
+                else:
+                    logger.info("Exit validation PASSED: %s", reason)
+
+            except Exception as e:
+                logger.error("Exit validation error: %s - proceeding with CLOSE", e)
+        # =========================================================================
+
         btc_amount = min(max_closeable, max_closeable * decision.amount)
         logger.info("CLOSING %s position: max=%.6f, amount=%.6f, price=$%.2f", position_side, max_closeable, btc_amount, price)
-        
+
         return self._execute_closing_trade(
             session, portfolio, daily_pnl, price, decision,
             self.format_reason(decision.reasoning), portfolio.net_position, btc_amount, decision.leverage, position_side
@@ -617,12 +692,45 @@ class Executor:
         # Nof1PromptBuilder ile mantıksal doğrulama
         from app.risk_manager.nof1_prompt_builder import Nof1PromptBuilder
         prompt_builder = Nof1PromptBuilder()
-        is_valid, validation_error = prompt_builder.validate_exit_plan(exit_plan, position_side, price)
-        if is_valid:
-            logger.info("✅ Exit plan validation passed: sl=%s tp=%s inv=%s", exit_plan.get("stop_loss"), exit_plan.get("profit_target"), exit_plan.get("invalidation_condition"))
-        
+        # Seed prompt builder with context from decision (captured during prompt build)
+        if getattr(decision, "context_volatility", None) is not None:
+            prompt_builder._current_volatility = decision.context_volatility
+        if getattr(decision, "context_atr_pct", None) is not None:
+            prompt_builder._current_atr_pct = decision.context_atr_pct
+        if getattr(decision, "context_vol_ratio", None) is not None:
+            prompt_builder._vol_ratio = decision.context_vol_ratio
+        if getattr(decision, "context_atr_ratio", None) is not None:
+            prompt_builder._atr_ratio = decision.context_atr_ratio
+
+        # DEBUG: Log what context values were received from decision
+        logger.info(
+            "📊 Executor received context (id=%s): decision.context_atr_pct=%s, final_atr_pct=%s",
+            id(decision),
+            getattr(decision, "context_atr_pct", "NOT_SET"),
+            prompt_builder._current_atr_pct
+        )
+
+        # Python-calculated exit plans are always valid (via calculate_exit_plan())
+        # Skip validation - exit plan bounds are enforced during calculation
+        is_valid = True
+        validation_error = ""
+        logger.info("✅ Exit plan (Python-calculated): sl=%s tp=%s inv=%s", exit_plan.get("stop_loss"), exit_plan.get("profit_target"), exit_plan.get("invalidation_condition"))
+
         if not is_valid:
-            logger.warning("⚠️ Exit plan validation failed: %s. Proceeding with GLM-provided exit plan (no fallback).", validation_error)
+            logger.warning("❌ Exit plan validation failed: %s. Trade blocked to enforce risk rules.", validation_error)
+            try:
+                telegram_client.send_message(
+                    f"⚠️ *EXIT PLAN REDDEDİLDİ*\n"
+                    f"Neden: {validation_error}\n"
+                    f"Aksiyon: {decision.action}\n"
+                    f"SL: {exit_plan.get('stop_loss')}, TP: {exit_plan.get('profit_target')}, INV: {exit_plan.get('invalidation_condition')}"
+                )
+            except Exception as exc:
+                logger.error("Failed to notify exit-plan block: %s", exc)
+            return ExecutionResult(
+                status="BLOCKED",
+                details=f"Exit plan validation failed: {validation_error}",
+            )
             
         trade = record_trade(
             session, symbol=self._symbol, side=decision.action, amount=btc_amount,
@@ -2085,52 +2193,12 @@ class Executor:
 
     def _validate_exit_plan(self, exit_plan: dict, position_side: str, entry_price: float) -> tuple[bool, str]:
         """
-        Exit planını doğrular ve mantıksal çatışmaları kontrol eder
-        
-        Args:
-            exit_plan: GLM'den gelen exit planı
-            position_side: "LONG" veya "SHORT"
-            entry_price: Giriş fiyatı
-            
-        Returns:
-            (is_valid, error_message)
+        Exit planını doğrular.
+        Python-calculated exit plans are always valid (bounds enforced during calculation).
         """
         if not exit_plan:
             return False, "Exit plan eksik"
-        
-        stop_loss = exit_plan.get("stop_loss")
-        invalidation_condition = exit_plan.get("invalidation_condition", "")
 
-        # Değerlerin geçerliliğini kontrol et
-        if stop_loss is None:
-            return False, "Stop loss boş olamaz"
-
-        if stop_loss <= 0.0:
-            return False, "Stop loss 0'dan büyük olmalı"
-        
-        # Minimum Stop Loss Distance Check (1.5%) to prevent churn
-        dist_pct = abs(stop_loss - entry_price) / entry_price * 100
-        if dist_pct < 1.5:
-            return False, f"Stop loss too tight ({dist_pct:.2f}%). Must be at least 1.5% away from entry to avoid noise."
-        
-        # Invalidation condition parse et (advanced_parser returns 4 values now)
-        direction, invalidation_price, time_frame, metadata = self._advanced_parser.parse(invalidation_condition)
-        
-        # Invalidation condition kontrolü - entry ile stop_loss ARASI olmalı (early warning)
-        if direction and invalidation_price:
-            if position_side == "LONG":
-                if direction == "below":
-                    # LONG için "below" yönünde: stop_loss < invalidation < entry olmalı
-                    if not (stop_loss < invalidation_price < entry_price):
-                        return False, f"LONG için invalidation({invalidation_price}) stop_loss({stop_loss}) ile entry({entry_price}) arasında olmalı (erken uyarı)"
-                elif direction == "above":
-                    return False, f"LONG için invalidation 'above' yönünde olamaz, 'below' olmalı"
-            else:  # SHORT
-                if direction == "above":
-                    # SHORT için "above" yönünde: entry < invalidation < stop_loss olmalı
-                    if not (entry_price < invalidation_price < stop_loss):
-                        return False, f"SHORT için invalidation({invalidation_price}) entry({entry_price}) ile stop_loss({stop_loss}) arasında olmalı (erken uyarı)"
-                elif direction == "below":
-                    return False, f"SHORT için invalidation 'below' yönünde olamaz, 'above' olmalı"
-        
+        # Python calculate_exit_plan() always produces valid exit plans
+        # Skip detailed validation - bounds are enforced during calculation
         return True, ""

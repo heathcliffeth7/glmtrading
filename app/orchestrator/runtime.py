@@ -18,6 +18,7 @@ from app.executor.executor import Executor, ExecutionResult
 from app.executor.ledger import engine
 from app.research.backtest import Backtester, load_historical_from_influx
 from app.risk_manager.manager import RiskDecision, RiskManager
+from app.risk_manager.glm_client import GLMClient
 from app.utils.logging import configure_logging, get_logger
 from app.utils.telegram import format_markdown, telegram_client
 from app.monitoring.service_monitor import monitor_all, verify_htf_data
@@ -28,6 +29,11 @@ from app.risk_manager.dynamic_risk_manager import DynamicRiskManager
 from app.risk_manager.advanced_parser import AdvancedInvalidationParser
 from app.monitoring.advanced_monitor import AdvancedExitMonitor
 from app.monitoring.timing_monitor import CycleTimingTracker
+from app.monitoring.crash_protection import (
+    CrashProtectionManager,
+    CrashAction,
+    CrashEvent,
+)
 
 
 settings = get_settings()
@@ -77,13 +83,26 @@ class AutomatedRunner:
         self._risk_managers = {}
         self._executors = {}
         self._agents = {}
-        
+        self._glm_clients = {}
+
+        # API key mapping for parallel GLM calls - each symbol gets its own key
+        api_key_map = {
+            "BTCUSDT": settings.zai.api_key,
+            "ETHUSDT": settings.zai.api_key_2,
+            "SOLUSDT": settings.zai.api_key_3,
+        }
+
         for sym in self._symbols:
+            # Create GLM client with symbol-specific API key for parallel processing
+            api_key = api_key_map.get(sym, settings.zai.api_key)
+            self._glm_clients[sym] = GLMClient(api_key=api_key)
+            logger.info("🔑 Created GLMClient for %s with key: %s...", sym, api_key[:8])
+
             # Use passed components if single symbol and matches, otherwise create new
             if sym == symbol and risk_manager:
                 self._risk_managers[sym] = risk_manager
             else:
-                self._risk_managers[sym] = RiskManager()
+                self._risk_managers[sym] = RiskManager(glm_client=self._glm_clients[sym])
                 
             if sym == symbol and executor:
                 self._executors[sym] = executor
@@ -132,6 +151,18 @@ class AutomatedRunner:
         for monitor in self._advanced_exit_monitors.values():
             monitor.start_monitoring()
         logger.info("✅ Advanced exit monitoring started for all symbols")
+
+        # Initialize Crash Protection Manager for swing trading safety
+        if settings.crash_protection_enabled:
+            self._crash_protection_manager = CrashProtectionManager(
+                symbols=self._symbols,
+                close_position_callback=self._on_crash_protection_trigger,
+                htf_data_getter=self._get_htf_data_for_crash,
+            )
+            logger.info("🛡️ Crash Protection Manager initialized for swing trading")
+        else:
+            self._crash_protection_manager = None
+            logger.info("⚠️ Crash Protection DISABLED in settings")
 
     def _default_metrics(self) -> dict:
         """Safe fallback metrics to keep pipeline moving when DB access fails."""
@@ -223,13 +254,19 @@ class AutomatedRunner:
         # 4. Position Monitor task (3-minute exit plan checks)
         if settings.enable_position_monitor:
             from app.monitoring.position_monitor import PositionMonitor
-            
+
             for sym in self._symbols:
+                # Get crash handler for this symbol (if crash protection is enabled)
+                crash_handler = None
+                if self._crash_protection_manager:
+                    crash_handler = self._crash_protection_manager.get_handler(sym)
+
                 position_monitor = PositionMonitor(
                     symbol=sym,
                     interval_seconds=settings.position_monitor_interval_seconds,
                     executor=self._executors[sym],
-                    enable_telegram=True
+                    enable_telegram=True,
+                    crash_handler=crash_handler,  # Pass crash handler for state sync
                 )
                 # Create unique task name
                 task_name = f"position_monitor_{sym}"
@@ -246,6 +283,11 @@ class AutomatedRunner:
         # NOTE: feature workers and data feed disabled
         # feeder = asyncio.create_task(data_feed_orchestrator())
         # feature_task = asyncio.create_task(start_feature_workers(self._symbols, ["1m", self._interval]))
+
+        # 5. Crash Protection registration with price_cache
+        if self._crash_protection_manager:
+            self._crash_protection_manager.register_with_price_cache()
+            logger.info("🛡️ Crash Protection registered with price_cache for real-time monitoring")
         
         try:
             # Main trading cycle
@@ -270,67 +312,87 @@ class AutomatedRunner:
                 except Exception as exc:
                     logger.error("Error stopping %s: %s", task_name, exc)
 
-    async def _run_cycle(self) -> None:
+    async def _evaluate_and_execute_symbol(self, symbol: str) -> dict:
+        """
+        Execute-As-You-Go Pattern: Evaluate GLM and immediately execute for a single symbol.
+
+        This prevents STALE decisions by executing right after GLM returns,
+        instead of waiting for all symbols' GLM calls to complete.
+
+        Returns:
+            dict with 'success', 'error' (if any), 'duration'
+        """
         start_time = datetime.now(timezone.utc)
-        logger.info("Cycle started at %s for symbols: %s", start_time.isoformat(), self._symbols)
-        
-        # Phase 1: Paralel GLM değerlendirmeleri (en yavaş kısım)
-        phase_start = datetime.now(timezone.utc)
-        logger.info("🚀 Phase 1: Starting parallel GLM evaluations for all symbols at %s", phase_start.strftime("%H:%M:%S.%f")[:-3])
+        logger.info("[%s] 🤖 Starting GLM evaluation...", symbol)
 
-        # Kick off evaluations in parallel
-        eval_tasks: List[asyncio.Task] = []
-        for symbol in self._symbols:
-            logger.info("[%s] 🤖 Starting GLM evaluation...", symbol)
-            eval_tasks.append(asyncio.create_task(self._evaluate_symbol(symbol), name=f"eval:{symbol}"))
+        try:
+            # Phase 1: Evaluate
+            eval_result = await self._evaluate_symbol(symbol)
+            eval_duration = (datetime.now(timezone.utc) - start_time).total_seconds()
 
-        execution_tasks = []
-        completed_evals = 0
-        evaluation_errors: List[tuple[str, Exception]] = []
-
-        # Wait for all evaluations (gather ensures we don't drop any)
-        eval_results = await asyncio.gather(*eval_tasks, return_exceptions=True)
-        for symbol, eval_result in zip(self._symbols, eval_results):
             if isinstance(eval_result, Exception):
-                evaluation_errors.append((symbol, eval_result))
-                elapsed = (datetime.now(timezone.utc) - phase_start).total_seconds()
                 logger.warning(
                     "[%s] ⚠️ Evaluation failed in %.1fs → continuing with HOLD fallback",
-                    symbol,
-                    elapsed,
+                    symbol, eval_duration
                 )
                 eval_result = self._build_failed_eval_result(symbol, eval_result)
             else:
-                completed_evals += 1
-                elapsed = (datetime.now(timezone.utc) - phase_start).total_seconds()
-                logger.info("[%s] ⏱️ Evaluation finished in %.1fs → launching execution", symbol, elapsed)
+                logger.info("[%s] ⏱️ Evaluation finished in %.1fs → IMMEDIATELY executing", symbol, eval_duration)
 
-            execution_tasks.append(
-                (symbol, asyncio.create_task(self._execute_with_guard(symbol, eval_result), name=f"exec:{symbol}"))
+            # Phase 2: Execute IMMEDIATELY (no waiting for other symbols)
+            await self._execute_with_guard(symbol, eval_result)
+
+            total_duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+            logger.info("[%s] ✅ Evaluation+Execution completed in %.1fs", symbol, total_duration)
+            return {'success': True, 'duration': total_duration, 'symbol': symbol}
+
+        except Exception as exc:
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+            logger.error("[%s] ❌ Evaluation+Execution failed in %.1fs: %s", symbol, duration, exc, exc_info=True)
+            return {'success': False, 'error': str(exc), 'duration': duration, 'symbol': symbol}
+
+    async def _run_cycle(self) -> None:
+        """
+        Execute-As-You-Go Cycle: Each symbol evaluates and executes independently.
+
+        Key difference from old approach:
+        - OLD: Wait for ALL GLM evaluations → Then execute ALL
+        - NEW: Each symbol executes IMMEDIATELY after its GLM returns
+
+        This prevents STALE decisions caused by waiting for slow symbols.
+        """
+        start_time = datetime.now(timezone.utc)
+        logger.info("🚀 Cycle started at %s for symbols: %s", start_time.isoformat(), self._symbols)
+        logger.info("📊 Execute-As-You-Go pattern: Each symbol executes immediately after GLM returns")
+
+        # Launch all symbols in parallel - each handles its own execution
+        tasks = [
+            asyncio.create_task(
+                self._evaluate_and_execute_symbol(symbol),
+                name=f"eval_exec:{symbol}"
             )
+            for symbol in self._symbols
+        ]
 
-        phase_end = datetime.now(timezone.utc)
-        phase_duration = (phase_end - phase_start).total_seconds()
+        # Wait for all to complete (but each has already executed individually)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Log summary
+        cycle_duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+        successes = sum(1 for r in results if isinstance(r, dict) and r.get('success'))
+        failures = len(results) - successes
+
         logger.info(
-            "⏱️ Phase 1 completed at %s (%.1fs total) | completed=%d/%d",
-            phase_end.strftime("%H:%M:%S.%f")[:-3],
-            phase_duration,
-            completed_evals,
-            len(self._symbols),
+            "⏱️ Cycle completed in %.1fs | success=%d/%d | failures=%d",
+            cycle_duration, successes, len(self._symbols), failures
         )
-        if evaluation_errors:
-            failed_symbols = ", ".join(sym for sym, _ in evaluation_errors)
-            logger.warning("⚠️ Phase 1 had %d evaluation errors | symbols=%s", len(evaluation_errors), failed_symbols)
-        
-        # Phase 2: Paralel execution (tasks zaten oluşturuldu)
-        if execution_tasks:
-            logger.info("⚡ Phase 2: Awaiting parallel executions (limit=%d)", self._execution_concurrency)
-            exec_results = await asyncio.gather(*(t for _, t in execution_tasks), return_exceptions=True)
-            for (symbol, _), exec_result in zip(execution_tasks, exec_results):
-                if isinstance(exec_result, Exception):
-                    logger.error("[%s] Execution failed: %s", symbol, exec_result, exc_info=exec_result)
-        else:
-            logger.warning("⚠️ Phase 2 skipped: No successful evaluations to execute")
+
+        # Log any failures
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error("Cycle task exception: %s", result, exc_info=result)
+            elif isinstance(result, dict) and not result.get('success'):
+                logger.warning("[%s] Failed: %s", result.get('symbol', '?'), result.get('error', 'unknown'))
 
     async def _evaluate_symbol(self, symbol: str):
         """
@@ -347,6 +409,38 @@ class AutomatedRunner:
 
         # Start timing tracker
         timing_tracker.start_cycle()
+
+        # Check global cooldown from crash protection
+        if self._crash_protection_manager and self._crash_protection_manager.is_in_global_cooldown():
+            logger.warning(
+                "[%s] 🚫 GLOBAL COOLDOWN ACTIVE - No new positions allowed after crash protection",
+                symbol
+            )
+            # Return HOLD decision during cooldown
+            now = datetime.now(timezone.utc)
+            cooldown_signal = AgentSignal(
+                direction="HOLD",
+                confidence=0.0,
+                reasoning="🚫 Global cooldown active after crash protection",
+                timestamp=now.isoformat(),
+                metadata={},
+            )
+            cooldown_decision = RiskDecision(
+                action="HOLD",
+                amount=0.0,
+                leverage=1.0,
+                reasoning="🚫 Global cooldown active - no new positions until cooldown expires",
+                decision_timestamp=now,
+            )
+            timing_tracker.add_stage("cooldown_skip", now, now)
+            return {
+                'symbol': symbol,
+                'signal': cooldown_signal,
+                'decision': cooldown_decision,
+                'metrics_before': self._safe_portfolio_metrics(symbol, executor),
+                'backtest_data': None,
+                'timing_tracker': timing_tracker,
+            }
 
         # Parallelize data loading (Backtest + Agent signal generation)
         async def load_backtest_data():
@@ -444,6 +538,7 @@ class AutomatedRunner:
         )
         
         # Return evaluation results
+        logger.info("[%s] 📊 Returning decision (id=%s) context_atr_pct=%s", symbol, id(decision), getattr(decision, 'context_atr_pct', 'NOT_SET'))
         return {
             'symbol': symbol,
             'signal': signal,
@@ -474,6 +569,8 @@ class AutomatedRunner:
         metrics_before = eval_result['metrics_before']
         timing_tracker = eval_result['timing_tracker']
         eval_error = eval_result.get("evaluation_error")
+
+        logger.info("[%s] 📊 Executing decision (id=%s) context_atr_pct=%s", symbol, id(decision), getattr(decision, 'context_atr_pct', 'NOT_SET'))
         
         # Get components for this symbol
         executor = self._executors[symbol]
@@ -923,6 +1020,63 @@ class AutomatedRunner:
         # Debug: Log decision section and full message
         logger.info("📊 Decision section: %s", "\n".join(decision_section))
         logger.info("📨 Full Telegram message (first 1500 chars): %s", "\n".join(lines)[:1500])
+
+        def append_recent_trades(trades: list[dict], start_index: int = 1, max_items: int = 5) -> None:
+            """Append formatted recent trades to the Telegram lines."""
+            if not trades or max_items <= 0:
+                return
+            
+            for i, trade in enumerate(trades[:max_items], start_index):
+                emoji = "🟢" if trade['pnl'] >= 0 else "🔴"
+                status = "🔒 Kapandı" if trade['is_closed'] else "🔓 Açık"
+                
+                # Format trade line with position ID
+                position_id_text = f" [{trade['position_id']}]" if trade.get('position_id') else ""
+                trade_line = f"{i}. {emoji} {trade['side']} {trade['amount']:.4f} {base_asset}{position_id_text} {status}"
+                lines.append(trade_line)
+                
+                # Add price details - show both opening and current/closing prices
+                price_label = "Kapanış" if trade['is_closed'] else "Güncel"
+                lines.append(f"   Açılış: ${trade['open_price']:,.2f} → {price_label}: ${trade['close_price']:,.2f}")
+                
+                # Add position percentage if it's a partial close
+                if trade.get('is_closed') and trade.get('original_amount') and trade.get('amount'):
+                    closed_percentage = (trade['amount'] / trade['original_amount']) * 100
+                    if closed_percentage < 100.0:
+                        lines.append(f"   Kapatılan: %{closed_percentage:.1f} pozisyon")
+                
+                # Add PnL with bps fallback
+                net_pnl = trade['pnl']
+                pnl_sign = "+" if net_pnl >= 0 else ""
+                pct = float(trade.get('pnl_pct', 0.0) or 0.0)
+                if abs(pct) < 0.01:
+                    bps = abs(pct) * 100.0
+                    pct_text = f"({('-' if pct < 0 else '+')}{bps:.1f} bp)"
+                else:
+                    pct_text = f"({pnl_sign}{pct:.2f}%)"
+                
+                # Brüt PnL'i hesapla (net + fees)
+                fee_amount = float(trade.get('fee', 0.0) or 0.0)
+                gross_pnl = net_pnl + fee_amount
+                gross_pnl_sign = "+" if gross_pnl >= 0 else ""
+                
+                fee_text = ""
+                if fee_amount > 0:
+                    fee_text = f" | Fee: ${fee_amount:.2f}"
+                
+                # Show gross PnL, fees, and net PnL
+                lines.append(f"   Brüt PnL: {gross_pnl_sign}${gross_pnl:,.2f} {pct_text}{fee_text} → Net: {pnl_sign}${net_pnl:.2f}")
+                
+                # Add stop loss and take profit ONLY for open positions
+                if not trade['is_closed']:
+                    stop_loss = trade.get('stop_loss')
+                    profit_target = trade.get('profit_target')
+                    
+                    if profit_target:
+                        lines.append(f"   ✅ Take Profit: ${profit_target:,.2f}")
+                    
+                    if stop_loss:
+                        lines.append(f"   🛑 Stop Loss: ${stop_loss:,.2f}")
         
         # Check if this is a CLOSE cycle (using telemetry)
         is_close_cycle = bool(getattr(result, 'telemetry', None) and result.telemetry.get('last_action') == 'CLOSE')
@@ -959,61 +1113,17 @@ class AutomatedRunner:
                 sign = '+' if pnl_val >= 0 else ''
                 lines.append(f"   ✅ Gerçekleşen PnL: {sign}${pnl_val:,.2f}")
             lines.append("   ⛔ Yeni pozisyon açılmadı (CLOSE)")
+
+            # Also show the recent trade history so it matches non-CLOSE cycles
+            filtered_trades = recent_trades or []
+            close_position_id = result.telemetry.get('position_id')
+            if close_position_id and filtered_trades and filtered_trades[0].get('position_id') == close_position_id:
+                filtered_trades = filtered_trades[1:]
+            
+            # Keep total visible trades to five (one slot used by the close summary above)
+            append_recent_trades(filtered_trades, start_index=2, max_items=4)
         else:
-            # Add recent trades with detailed info
-            if recent_trades:
-                for i, trade in enumerate(recent_trades[:5], 1):
-                    emoji = "🟢" if trade['pnl'] >= 0 else "🔴"
-                    status = "🔒 Kapandı" if trade['is_closed'] else "🔓 Açık"
-                    
-                    # Format trade line with position ID
-                    position_id_text = f" [{trade['position_id']}]" if trade.get('position_id') else ""
-                    trade_line = f"{i}. {emoji} {trade['side']} {trade['amount']:.4f} {base_asset}{position_id_text} {status}"
-                    lines.append(trade_line)
-                    
-                    # Add price details - show both opening and current/closing prices
-                    price_label = "Kapanış" if trade['is_closed'] else "Güncel"
-                    lines.append(f"   Açılış: ${trade['open_price']:,.2f} → {price_label}: ${trade['close_price']:,.2f}")
-                    
-                    # Add position percentage if it's a partial close
-                    if trade.get('is_closed') and trade.get('original_amount') and trade.get('amount'):
-                        closed_percentage = (trade['amount'] / trade['original_amount']) * 100
-                        if closed_percentage < 100.0:
-                            lines.append(f"   Kapatılan: %{closed_percentage:.1f} pozisyon")
-                    
-                    # Add PnL with bps fallback
-                    # NOT: trade['pnl'] zaten NET PnL'dir (fee'ler düşülmüş)
-                    net_pnl = trade['pnl']
-                    pnl_sign = "+" if net_pnl >= 0 else ""
-                    pct = float(trade.get('pnl_pct', 0.0) or 0.0)
-                    if abs(pct) < 0.01:
-                        bps = abs(pct) * 100.0
-                        pct_text = f"({('-' if pct<0 else '+')}{bps:.1f} bp)"
-                    else:
-                        pct_text = f"({pnl_sign}{pct:.2f}%)"
-                    
-                    # Brüt PnL'i hesapla (net + fees)
-                    fee_amount = float(trade.get('fee', 0.0) or 0.0)
-                    gross_pnl = net_pnl + fee_amount
-                    gross_pnl_sign = "+" if gross_pnl >= 0 else ""
-                    
-                    fee_text = ""
-                    if fee_amount > 0:
-                        fee_text = f" | Fee: ${fee_amount:.2f}"
-                    
-                    # Show gross PnL, fees, and net PnL
-                    lines.append(f"   Brüt PnL: {gross_pnl_sign}${gross_pnl:,.2f} {pct_text}{fee_text} → Net: {pnl_sign}${net_pnl:.2f}")
-                    
-                    # Add stop loss and take profit ONLY for open positions
-                    if not trade['is_closed']:
-                        stop_loss = trade.get('stop_loss')
-                        profit_target = trade.get('profit_target')
-                        
-                        if profit_target:
-                            lines.append(f"   ✅ Take Profit: ${profit_target:,.2f}")
-                        
-                        if stop_loss:
-                            lines.append(f"   🛑 Stop Loss: ${stop_loss:,.2f}")
+            append_recent_trades(recent_trades)
         
         # Add reasoning header
         # CLOSE, LONG, SHORT durumunda veya PAPER durumunda Son İşlem Detayları göster
@@ -1529,6 +1639,166 @@ class AutomatedRunner:
                 
         except Exception as exc:
             logger.error(f"Error in position summary notification: {exc}")
+
+    def _on_crash_protection_trigger(
+        self,
+        symbol: str,
+        current_price: float,
+        reason: str,
+        action: CrashAction,
+    ) -> None:
+        """
+        Callback for crash protection events.
+        Called when crash detection triggers a position close/reduce action.
+        """
+        try:
+            logger.critical(
+                "🚨 CRASH PROTECTION TRIGGERED %s | Action=%s | Price=$%.2f | Reason: %s",
+                symbol, action.value, current_price, reason
+            )
+
+            executor = self._executors.get(symbol)
+            if not executor:
+                logger.error("No executor found for %s during crash protection", symbol)
+                return
+
+            # Get current position info
+            metrics = self._safe_portfolio_metrics(symbol, executor)
+            position = metrics.get('position', 0)
+
+            if abs(position) < 0.0001:
+                logger.info("No position to close for %s during crash protection", symbol)
+                return
+
+            # Execute action based on crash level
+            if action == CrashAction.CLOSE_ALL:
+                # Create emergency CLOSE decision
+                from app.risk_manager.manager import RiskDecision
+                from datetime import datetime, timezone
+
+                close_decision = RiskDecision(
+                    action="CLOSE",
+                    amount=1.0,  # 100% close
+                    leverage=1.0,
+                    reasoning=f"🚨 CRASH PROTECTION: {reason}",
+                    decision_timestamp=datetime.now(timezone.utc),
+                )
+
+                try:
+                    result = executor.execute(close_decision)
+                    logger.critical(
+                        "✅ CRASH PROTECTION executed for %s: %s | Position closed at $%.2f",
+                        symbol, result.status, current_price
+                    )
+
+                    # Set global cooldown
+                    if self._crash_protection_manager:
+                        self._crash_protection_manager.set_global_cooldown()
+
+                except Exception as exec_exc:
+                    logger.critical("❌ CRASH PROTECTION EXECUTION FAILED for %s: %s", symbol, exec_exc)
+
+            elif action == CrashAction.REDUCE_50:
+                # Reduce position by 50%
+                from app.risk_manager.manager import RiskDecision
+                from datetime import datetime, timezone
+
+                reduce_decision = RiskDecision(
+                    action="CLOSE",
+                    amount=0.5,  # 50% close
+                    leverage=1.0,
+                    reasoning=f"⚠️ CRASH WARNING REDUCTION: {reason}",
+                    decision_timestamp=datetime.now(timezone.utc),
+                )
+
+                try:
+                    result = executor.execute(reduce_decision)
+                    logger.warning(
+                        "✅ CRASH REDUCTION executed for %s: %s | 50%% position closed at $%.2f",
+                        symbol, result.status, current_price
+                    )
+                except Exception as exec_exc:
+                    logger.error("❌ CRASH REDUCTION EXECUTION FAILED for %s: %s", symbol, exec_exc)
+
+            elif action == CrashAction.ALERT_ONLY:
+                # Send Telegram alert without taking action
+                try:
+                    message = f"""
+🚨 *CRASH WARNING - {symbol}*
+
+⚠️ {reason}
+
+📊 **Current Status:**
+• Price: ${current_price:,.2f}
+• Position: {position:.6f} {symbol.replace('USDT', '')}
+• HTF Trend: Bullish (no action taken)
+
+💡 *System is monitoring closely. Manual intervention may be needed.*
+
+⏰ *{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}*
+"""
+                    telegram_client.send_message(message)
+                    logger.warning("📨 Crash warning alert sent for %s (no action taken)", symbol)
+                except Exception as tg_exc:
+                    logger.error("Failed to send crash warning telegram: %s", tg_exc)
+
+        except Exception as exc:
+            logger.critical("❌ CRASH PROTECTION CALLBACK ERROR: %s", exc, exc_info=True)
+
+    def _get_htf_data_for_crash(self, symbol: str) -> Dict:
+        """
+        Get HTF (30m) data for crash protection HTF confirmation.
+        Returns dict with ema_20 and ema_50 values.
+        """
+        try:
+            from influxdb_client import InfluxDBClient
+            from app.config.settings import get_settings
+
+            settings = get_settings()
+            htf_timeframe = settings.crash_protection_htf_timeframe  # "30m"
+
+            client = InfluxDBClient(
+                url=str(settings.influx.url),
+                token=settings.influx.token,
+                org=settings.influx.org,
+            )
+
+            # Query latest HTF bar with EMA data
+            query = f'''
+            from(bucket: "{settings.influx.bucket}")
+              |> range(start: -2h)
+              |> filter(fn: (r) => r["_measurement"] == "enriched_{htf_timeframe}")
+              |> filter(fn: (r) => r["symbol"] == "{symbol}")
+              |> filter(fn: (r) => r["_field"] == "ema_20" or r["_field"] == "ema_50")
+              |> last()
+              |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+            '''
+
+            tables = client.query_api().query(query, org=settings.influx.org)
+
+            for table in tables:
+                for record in table.records:
+                    ema_20 = record.values.get("ema_20", 0)
+                    ema_50 = record.values.get("ema_50", 0)
+
+                    logger.debug(
+                        "HTF data for %s (%s): EMA20=%.2f, EMA50=%.2f",
+                        symbol, htf_timeframe, ema_20, ema_50
+                    )
+
+                    return {
+                        "ema_20": ema_20,
+                        "ema_50": ema_50,
+                        "timeframe": htf_timeframe,
+                    }
+
+            client.close()
+
+        except Exception as exc:
+            logger.error("Failed to get HTF data for %s: %s", symbol, exc)
+
+        # Return empty dict on failure
+        return {}
 
 
 async def run_automated(

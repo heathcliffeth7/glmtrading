@@ -5,7 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 import redis
 
@@ -16,6 +16,9 @@ from app.utils.logging import get_logger
 
 settings = get_settings()
 logger = get_logger(__name__)
+
+# Type alias for price callback
+PriceCallback = Callable[[str, float, datetime], None]
 
 
 @dataclass
@@ -123,6 +126,10 @@ class EnhancedPriceCache:
             "influx_fallback": 5,        # InfluxDB fallback
             "unknown": 10                # Lowest priority
         }
+
+        # 🔔 CALLBACK SYSTEM - for real-time crash protection
+        self._price_callbacks: Dict[str, List[PriceCallback]] = {}
+        self._callback_lock = threading.Lock()
     
     def set(self, symbol: str, price: float, source: str = "unknown") -> None:
         """
@@ -182,6 +189,9 @@ class EnhancedPriceCache:
                     "✅ Price updated for %s: $%.2f from %s (priority %d)",
                     symbol_upper, price, source, new_priority
                 )
+
+        # 🔔 Fire callbacks AFTER lock is released (for crash protection)
+        self._fire_callbacks(symbol_upper, price)
     
     def get(self, symbol: str, max_age_seconds: Optional[int] = None) -> Optional[float]:
         """
@@ -271,6 +281,79 @@ class EnhancedPriceCache:
             "is_stale": snapshot.is_stale(),
             "source_priority": self._source_priority.get(snapshot.source, 10)
         }
+
+    # =========================================================================
+    # CALLBACK SYSTEM - for real-time crash protection
+    # =========================================================================
+
+    def register_price_callback(
+        self,
+        symbol: str,
+        callback: PriceCallback,
+    ) -> None:
+        """
+        Register callback for real-time price updates.
+        Callbacks are invoked AFTER successful price validation.
+        Used by crash protection to monitor price drops in real-time.
+
+        Args:
+            symbol: Symbol to subscribe to (e.g., "BTCUSDT")
+            callback: Function(symbol, price, timestamp) to call on each update
+        """
+        symbol_upper = symbol.upper()
+        with self._callback_lock:
+            if symbol_upper not in self._price_callbacks:
+                self._price_callbacks[symbol_upper] = []
+            self._price_callbacks[symbol_upper].append(callback)
+
+        logger.info(
+            "🔔 Registered price callback for %s (total callbacks: %d)",
+            symbol_upper,
+            len(self._price_callbacks[symbol_upper]),
+        )
+
+    def unregister_price_callback(
+        self,
+        symbol: str,
+        callback: PriceCallback,
+    ) -> None:
+        """Remove a previously registered callback"""
+        symbol_upper = symbol.upper()
+        with self._callback_lock:
+            if symbol_upper in self._price_callbacks:
+                try:
+                    self._price_callbacks[symbol_upper].remove(callback)
+                    logger.info("🔕 Unregistered price callback for %s", symbol_upper)
+                except ValueError:
+                    pass
+
+    def _fire_callbacks(self, symbol: str, price: float) -> None:
+        """
+        Fire registered callbacks (non-blocking, async-safe).
+        Called after every successful price update.
+        Must complete in <10ms to avoid blocking price updates.
+        """
+        callbacks = []
+        with self._callback_lock:
+            callbacks = self._price_callbacks.get(symbol, [])[:]  # Copy for thread safety
+
+        if not callbacks:
+            return
+
+        timestamp = datetime.now(timezone.utc)
+        for callback in callbacks:
+            try:
+                callback(symbol, price, timestamp)
+            except Exception as e:
+                logger.error("❌ Price callback error for %s: %s", symbol, e)
+
+    def get_callback_count(self, symbol: str) -> int:
+        """Get number of registered callbacks for a symbol"""
+        symbol_upper = symbol.upper()
+        with self._callback_lock:
+            return len(self._price_callbacks.get(symbol_upper, []))
+
+    # =========================================================================
 
     def force_reset(self, symbol: str, new_price: float, source: str = "reset") -> None:
         """

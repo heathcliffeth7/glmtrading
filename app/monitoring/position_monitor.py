@@ -26,6 +26,11 @@ from app.utils.logging import get_logger
 from app.utils.price_cache import price_cache
 from app.utils.telegram import telegram_client
 
+# Forward reference for type hint
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from app.monitoring.crash_protection import CrashProtectionHandler
+
 
 logger = get_logger(__name__)
 
@@ -40,6 +45,7 @@ class PositionMonitor:
         executor = None,  # Executor instance (pozisyon kapatmak için)
         enable_telegram: bool = True,
         glm_client = None,  # GLM client for dynamic exit plan updates
+        crash_handler: "CrashProtectionHandler" = None,  # Crash protection handler
     ):
         self._symbol = symbol
         self._interval = interval_seconds
@@ -48,12 +54,14 @@ class PositionMonitor:
         self._enable_telegram = enable_telegram
         self._glm_client = glm_client
         self._dynamic_exit_updater = None
-        
+        self._crash_handler = crash_handler  # For position state sync
+
         logger.info(
-            "Position Monitor initialized | symbol=%s interval=%ds dynamic_updates=%s",
+            "Position Monitor initialized | symbol=%s interval=%ds dynamic_updates=%s crash_protection=%s",
             self._symbol,
             self._interval,
-            glm_client is not None
+            glm_client is not None,
+            crash_handler is not None,
         )
     
     async def start(self) -> None:
@@ -198,10 +206,34 @@ class PositionMonitor:
             
             if position_info is None:
                 logger.debug("No open position, skipping monitor cycle")
+                # Update crash handler: no position to protect
+                if self._crash_handler:
+                    self._crash_handler.update_position_state(
+                        has_position=False,
+                        position_side=None,
+                        entry_price=0.0,
+                        quantity=0.0,
+                    )
                 return
-            
+
             # FIX: Pozisyonun gerçek sembolünü kullan (örn: BTCUSDT monitörü ETHUSDT pozisyonu bulabilir)
             symbol = position_info.get("symbol", self._symbol)
+
+            # Update crash handler with current position state for real-time protection
+            if self._crash_handler:
+                self._crash_handler.update_position_state(
+                    has_position=True,
+                    position_side="LONG" if position_info.get("is_long") else "SHORT",
+                    entry_price=position_info.get("entry_price", 0.0),
+                    quantity=position_info.get("quantity", 0.0),
+                )
+                logger.debug(
+                    "🛡️ Crash handler state updated | symbol=%s side=%s entry=%.2f qty=%.6f",
+                    symbol,
+                    "LONG" if position_info.get("is_long") else "SHORT",
+                    position_info.get("entry_price", 0.0),
+                    position_info.get("quantity", 0.0),
+                )
             
             # DEBUG: Log symbol resolution
             logger.debug(

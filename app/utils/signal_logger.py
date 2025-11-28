@@ -113,7 +113,7 @@ class SignalLog:
     def to_influx_fields(self) -> Dict[str, Any]:
         """
         Convert to InfluxDB fields
-        
+
         Returns:
             Dict suitable for InfluxDB write_measurement
         """
@@ -122,6 +122,7 @@ class SignalLog:
             'action_numeric': float(self._action_to_numeric()),
             'amount': float(self.amount),
             'leverage': float(self.leverage),
+            'reasoning': str(self.reasoning) if self.reasoning else "",
             
             # Risk Scores
             'volatility_regime': float(self.volatility_regime),

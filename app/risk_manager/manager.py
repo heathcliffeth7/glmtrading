@@ -1,5 +1,6 @@
 import json
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -42,9 +43,16 @@ class RiskDecision:
     exit_plan: Optional[dict] = None  # GLM's exit plan: {profit_target, stop_loss, invalidation_condition}
     close_side: Optional[str] = None  # YENİ: "LONG" veya "SHORT" (CLOSE action için hangi pozisyon kapatılacak)
     glm_response_json: Optional[dict] = None  # GLM response JSON for Telegram notification
+    # Exit validation for CLOSE decisions (GLM Elite Swing Trader)
+    exit_validation: Optional[str] = None  # SL_HIT, TP_HIT, THESIS_INVALID, or N/A
     # Timing and staleness detection
     decision_timestamp: Optional[datetime] = None  # When GLM made this decision
     market_snapshot_timestamp: Optional[datetime] = None  # Timestamp of market data used
+    # Market context used during prompt build (to re-use in executor validation)
+    context_volatility: Optional[float] = None
+    context_atr_pct: Optional[float] = None
+    context_vol_ratio: Optional[float] = None
+    context_atr_ratio: Optional[float] = None
     
     def is_stale(self, max_age_seconds: int = 60) -> bool:
         """
@@ -70,8 +78,16 @@ class RiskDecision:
 
 
 class RiskManager:
-    def __init__(self) -> None:
-        self._glm = GLMClient()
+    def __init__(self, glm_client: GLMClient | None = None) -> None:
+        """
+        Initialize RiskManager.
+
+        Args:
+            glm_client: Optional GLMClient instance. If not provided, creates default.
+                        Use this to inject custom GLM clients with different API keys
+                        for parallel processing across symbols.
+        """
+        self._glm = glm_client if glm_client else GLMClient()
         self._signal_logger = get_signal_logger()
         self._settings = get_settings()
         self._runtime_tracker = RuntimeTracker.get_instance()
@@ -122,6 +138,11 @@ class RiskManager:
                 prompt_messages = self._build_nof1_prompt(signals, portfolio_metrics)
             else:
                 prompt_messages = self._build_prompt(signals, portfolio_metrics)
+            # Capture volatility/ATR context from prompt builder for downstream validation
+            context_vol = getattr(self._nof1_prompt_builder, "_current_volatility", None)
+            context_atr_pct = getattr(self._nof1_prompt_builder, "_current_atr_pct", None)
+            context_vol_ratio = getattr(self._nof1_prompt_builder, "_vol_ratio", None)
+            context_atr_ratio = getattr(self._nof1_prompt_builder, "_atr_ratio", None)
         except Exception as exc:  # noqa: BLE001
             # Prompt generation failure should not bubble up - return a safe fallback
             logger.error("Prompt build failed: %s", exc, exc_info=True)
@@ -176,6 +197,18 @@ class RiskManager:
                 decision.glm_response_time_ms = response['_glm_latency_ms']
                 logger.info("✅ GLM latency captured: %.0fms", decision.glm_response_time_ms)
             
+            # Attach market context used during prompt build for executor-side validation
+            decision.context_volatility = context_vol
+            decision.context_atr_pct = context_atr_pct
+            decision.context_vol_ratio = context_vol_ratio
+            decision.context_atr_ratio = context_atr_ratio
+
+            # DEBUG: Log context values being attached to decision
+            logger.info(
+                "📊 Context attached to decision (id=%s): atr_pct=%s, volatility=%s",
+                id(decision), context_atr_pct, context_vol
+            )
+
             # Log timing information
             evaluation_duration = (datetime.now(timezone.utc) - evaluation_start_time).total_seconds()
             if evaluation_duration > 90:
@@ -197,7 +230,7 @@ class RiskManager:
                     decision.glm_confidence
                 )
                 
-                # Force decision to HOLD
+                # Force decision to HOLD (preserve context attributes!)
                 decision = RiskDecision(
                     action="HOLD",
                     amount=0.0,
@@ -210,6 +243,10 @@ class RiskManager:
                     exit_plan=None,  # No position opened, no exit plan needed
                     decision_timestamp=decision.decision_timestamp,
                     market_snapshot_timestamp=decision.market_snapshot_timestamp,
+                    context_volatility=decision.context_volatility,
+                    context_atr_pct=decision.context_atr_pct,
+                    context_vol_ratio=decision.context_vol_ratio,
+                    context_atr_ratio=decision.context_atr_ratio,
                 )
             
             # Log successful GLM decision
@@ -723,12 +760,12 @@ class RiskManager:
             '  ⭐ Missing some opportunities is OK, but being too passive misses trends',
             '  ⭐ Small position with good probability > No position with perfect setup',
             '',
-            '🎯 POSITION SIZING - BE CONSERVATIVE:',
-            '  - miktar: 0.05-0.1 → Use this for MOST trades (5-10%)',
-            '  - miktar: 0.15-0.2 → Only for VERY strong signals',
-            '  - miktar: 0.3 → RARELY! Only when ALL indicators perfectly aligned',
-            '  - miktar: 0.5 → NEVER use! Too risky, always start small',
-            '  - Default approach: Start with 0.1 (10%) for safety',
+            '🎯 POSITION SIZING - BALANCED APPROACH:',
+            '  - miktar: 0.20-0.25 → Use this for MOST trades (20-25%)',
+            '  - miktar: 0.25-0.30 → For STRONG signals with good setup (25-30%)',
+            '  - miktar: 0.15-0.20 → For lower confidence setups (15-20%)',
+            '  - miktar: 0.35+ → RARELY! Only when ALL indicators perfectly aligned',
+            '  - Default approach: Start with 0.25 (25%) for normal trades',
         ])
         
         prompt_content = "\n".join(content_lines)
@@ -885,14 +922,27 @@ class RiskManager:
         raw = raw.strip()
         logger.debug("🔧 Original JSON payload length: %d", len(raw))
 
-        # Remove markdown code blocks with more robust patterns
-        if raw.startswith("```json"):
-            raw = raw[7:]
-        elif raw.startswith("```"):
-            raw = raw[3:]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-        raw = raw.strip()
+        # Extract JSON from markdown code block ANYWHERE in the text
+        # GLM often returns: "DÜŞÜNCE: ...text... ```json {...} ```"
+        json_block_match = re.search(r'```json\s*([\s\S]*?)```', raw)
+        if json_block_match:
+            raw = json_block_match.group(1).strip()
+            logger.info("📦 Extracted JSON from markdown code block")
+        else:
+            # Fallback: try to find any code block
+            code_block_match = re.search(r'```\s*([\s\S]*?)```', raw)
+            if code_block_match:
+                raw = code_block_match.group(1).strip()
+                logger.info("📦 Extracted content from generic code block")
+            else:
+                # Legacy fallback: Remove markdown code blocks with old patterns
+                if raw.startswith("```json"):
+                    raw = raw[7:]
+                elif raw.startswith("```"):
+                    raw = raw[3:]
+                if raw.endswith("```"):
+                    raw = raw[:-3]
+                raw = raw.strip()
 
         # Handle truncated JSON responses - find the last complete JSON object
         brace_count = 0
@@ -1281,6 +1331,10 @@ IMPORTANT:
                     decision_timestamp=decision.decision_timestamp,
                     market_snapshot_timestamp=decision.market_snapshot_timestamp,
                     close_side=decision.close_side,
+                    context_volatility=decision.context_volatility,
+                    context_atr_pct=decision.context_atr_pct,
+                    context_vol_ratio=decision.context_vol_ratio,
+                    context_atr_ratio=decision.context_atr_ratio,
                 )
         
         # Fallback: only apply leverage limit if no portfolio metrics
@@ -1298,6 +1352,10 @@ IMPORTANT:
                 decision_timestamp=decision.decision_timestamp,
                 market_snapshot_timestamp=decision.market_snapshot_timestamp,
                 close_side=decision.close_side,
+                context_volatility=decision.context_volatility,
+                context_atr_pct=decision.context_atr_pct,
+                context_vol_ratio=decision.context_vol_ratio,
+                context_atr_ratio=decision.context_atr_ratio,
             )
         
         return decision
@@ -2080,7 +2138,21 @@ IMPORTANT:
             
             # === PROMPT GÖNDERİM ÖNCESİ DOĞRULAMA ===
             # Prompt'un tam içeriğinin API'ye gönderilmeden önce doğru olduğunu kontrol et
-            system_message = "Sen AGRESİF ve kar odaklı bir profesyonel kripto para türev piyasası traderısın. KRİTİK KURAL: JSON yanıtındaki 'gerekçe' alanı MUTLAKA TÜRKÇE olmalıdır. Gerekçe detaylı ve kapsamlı olmalı (400-600 karakter önerilir). Her karar için: (1) TÜM timeframe'leri (1m, 30m, 4h) AYRI AYRI analiz et ve SAYISAL değerler ver, (2) Her timeframe için RSI, EMA20, EMA50, MACD değerlerini belirt, (3) Fiyat seviyelerini, destek/direnç noktalarını KESIN RAKAMLARLA açıkla, (4) Timeframe'ler arasındaki uyum/çelişkileri açıkla, (5) Neden ŞİMDİ bu kararı verdiğini piyasa bağlamında izah et. HOLD kararları da detaylı gerekçe gerektirir. Her cümle spesifik veri içermeli ve net olmalı. Fırsatları kaçırmaktan korkma ama her kararını KANITA DAYALI olarak açıkla!"
+            system_message = """Sen SERMAYEYİ KORUMA ÖNCELİKLİ bir profesyonel kripto türev traderısın.
+
+TEMEL PRENSİP: "Capital Preservation First, Alpha Second"
+- Önce sermayeni koru, sonra kar fırsatlarını değerlendir
+- Şüphe durumunda HOLD - agresif olmak yerine sabırlı ol
+- Stop-loss'ları sıkı tut, R:R en az 2:1 olmalı
+- Tek bir işlemde portföyün %2'sinden fazla risk alma
+- Fırsatları kaçırmaktan korkma - kötü bir trade açmak, fırsat kaçırmaktan daha kötü
+
+KRİTİK KURALLAR:
+1. JSON yanıtındaki 'reasoning' alanı HER ZAMAN TÜRKÇE yazılmalıdır - İngilizce yazmak YASAKTIR
+2. Her karar için TÜM timeframe'leri (1m, 30m, 4h) analiz et
+3. Fiyat seviyelerini, destek/direnç noktalarını KESIN RAKAMLARLA açıkla
+4. HOLD kararları da detaylı gerekçe gerektirir
+5. Emin değilsen → HOLD"""
             system_len = len(system_message)
             user_content_len = len(content)
             total_prompt_len = system_len + user_content_len
@@ -2469,6 +2541,30 @@ IMPORTANT:
         response_tokens = len(raw_content) // 4  # Rough estimate
         logger.info("📥 GLM Response: %d chars, ~%d tokens (estimated)", len(raw_content), response_tokens)
         logger.info("🔍 Raw GLM response (first 500 chars): %s", raw_content[:500])
+
+        # Empty-content guard: attempt alternative fields, else hard HOLD to avoid JSON parse spam
+        if not raw_content or not raw_content.strip():
+            choices = response.get("choices", []) if isinstance(response, dict) else []
+            alt_content = ""
+            if choices:
+                choice0 = choices[0] or {}
+                alt_content = (
+                    choice0.get("text")
+                    or choice0.get("delta", {}).get("content")
+                    or choice0.get("message", {}).get("delta", {}).get("content", "")
+                )
+            if alt_content and alt_content.strip():
+                logger.warning("📌 GLM content empty, using alternative field (%d chars)", len(alt_content))
+                raw_content = alt_content
+            else:
+                logger.error("❌ GLM returned empty content in all known fields - forcing HOLD fallback")
+                self._parsing_metrics["complete_failures"] += 1
+                return RiskDecision(
+                    action="HOLD",
+                    amount=0.0,
+                    reasoning="GLM boş yanıt verdi",
+                    decision_timestamp=datetime.now(timezone.utc)
+                )
         
         # Extract JSON from response
         content = self._prepare_json_payload(raw_content)
@@ -2479,23 +2575,158 @@ IMPORTANT:
             self._parsing_metrics["successful_json_parsing"] += 1
             logger.debug("📊 JSON parsing successful - metrics: %s", self._parsing_metrics)
 
-            # NOF1.AI format: {"SYMBOL": {"trade_signal_args": {..., "justification": "..."}}}
             # Dynamic key handling for multi-symbol support
             symbol_data = {}
-            
+            detected_symbol = None
+
             # First try standard keys
             if "BTCUSDT" in payload:
                 symbol_data = payload["BTCUSDT"]
+                detected_symbol = "BTCUSDT"
+            elif "ETHUSDT" in payload:
+                symbol_data = payload["ETHUSDT"]
+                detected_symbol = "ETHUSDT"
+            elif "SOLUSDT" in payload:
+                symbol_data = payload["SOLUSDT"]
+                detected_symbol = "SOLUSDT"
             elif "BTC" in payload:
                 symbol_data = payload["BTC"]
+                detected_symbol = "BTCUSDT"
             else:
-                # Try to find ANY key that looks like a symbol and has trade_signal_args
+                # Try to find ANY key that looks like a symbol
                 for key, value in payload.items():
-                    if isinstance(value, dict) and "trade_signal_args" in value:
+                    if isinstance(value, dict):
                         symbol_data = value
+                        detected_symbol = key
                         logger.info("🔍 Found dynamic symbol key: %s", key)
                         break
-            
+
+            # ============================================================
+            # NEW SIMPLIFIED FORMAT: {"SYMBOL": {"signal": "BUY", "confidence": 85, "reasoning": "..."}}
+            # GLM only decides signal + confidence, Python calculates exit plan
+            # ============================================================
+            if "signal" in symbol_data and "trade_signal_args" not in symbol_data:
+                logger.info("🆕 Detected SIMPLIFIED GLM format - Python will calculate exit plan")
+
+                signal = symbol_data.get("signal", "HOLD").upper()
+                confidence = float(symbol_data.get("confidence", 0))
+                reasoning = symbol_data.get("reasoning", "") or symbol_data.get("gerekçe", "")
+                # Extract exit_validation field for CLOSE decisions (GLM Elite Swing Trader)
+                exit_validation = symbol_data.get("exit_validation", "N/A")
+
+                # Map signal to action
+                signal_map = {
+                    "HOLD": "HOLD",
+                    "CLOSE": "CLOSE",
+                    "CLOSE_POSITION": "CLOSE",
+                    "BUY": "BUY",
+                    "SELL": "SELL",
+                    "LONG": "BUY",
+                    "SHORT": "SELL",
+                }
+                action = signal_map.get(signal.upper(), "HOLD")
+
+                logger.info("🔍 Simplified GLM response: signal=%s, confidence=%.1f, action=%s, exit_validation=%s",
+                           signal, confidence, action, exit_validation)
+
+                # For HOLD/CLOSE - no exit plan needed
+                if action in ["HOLD", "CLOSE"]:
+                    # Log exit_validation for CLOSE decisions
+                    if action == "CLOSE":
+                        valid_exit_validations = {"SL_HIT", "TP_HIT", "THESIS_INVALID"}
+                        if exit_validation not in valid_exit_validations:
+                            logger.warning(
+                                "⚠️ CLOSE decision without valid exit_validation: '%s' (valid: %s)",
+                                exit_validation, valid_exit_validations
+                            )
+
+                    return RiskDecision(
+                        action=action,
+                        amount=0.0,
+                        reasoning=reasoning or f"GLM karar: {action}",
+                        leverage=10.0,
+                        glm_confidence=max(0.0, min(100.0, confidence)),
+                        reason_primary=reasoning[:100] if reasoning else action,
+                        reason_secondary="",
+                        exit_plan=None,
+                        exit_validation=exit_validation,  # GLM Elite Swing Trader field
+                        decision_timestamp=datetime.now(timezone.utc),
+                    )
+
+                # For BUY/SELL - Python calculates exit plan
+                if action in ["BUY", "SELL"]:
+                    # Get current price from portfolio_metrics or use a fallback
+                    current_price = 0.0
+                    if portfolio_metrics:
+                        current_price = portfolio_metrics.get("current_price", 0.0) or portfolio_metrics.get("mark_price", 0.0)
+
+                    if current_price <= 0:
+                        logger.warning("⚠️ Cannot calculate exit plan - current_price not available")
+                        return RiskDecision(
+                            action="HOLD",
+                            amount=0.0,
+                            reasoning="Exit plan hesaplanamadı - fiyat bilgisi yok",
+                            decision_timestamp=datetime.now(timezone.utc),
+                        )
+
+                    # Get historical arrays from cached data (stored during prompt building)
+                    historical_arrays = getattr(self._nof1_prompt_builder, '_cached_historical_arrays', {})
+
+                    # Calculate exit plan using Python
+                    exit_plan_data = self._nof1_prompt_builder.calculate_exit_plan(
+                        signal=action,
+                        entry_price=current_price,
+                        historical_arrays=historical_arrays,
+                    )
+
+                    logger.info("🧮 Python calculated exit plan: SL=%.2f, TP=%.2f, R:R=%.2f, leverage=%d",
+                               exit_plan_data["stop_loss"], exit_plan_data["profit_target"],
+                               exit_plan_data["rr_ratio"], exit_plan_data["leverage"])
+
+                    # Calculate position size based on risk percentage
+                    equity = portfolio_metrics.get("equity", 10000.0) if portfolio_metrics else 10000.0
+                    risk_pct = 0.02  # 2% risk per trade
+                    sl_distance_pct = exit_plan_data["sl_distance_pct"]
+                    leverage = exit_plan_data["leverage"]
+
+                    # Position size = (equity * risk_pct) / (sl_distance_pct / 100) / leverage
+                    # This gives us the position size in USD
+                    if sl_distance_pct > 0:
+                        position_usd = (equity * risk_pct) / (sl_distance_pct / 100)
+                        quantity_usd = min(position_usd, 3000.0)  # Cap at 3000 USD margin
+                        quantity_coin = quantity_usd / current_price
+                    else:
+                        quantity_coin = 0.0
+
+                    logger.info("🧮 Python calculated quantity: %.6f (equity=%.2f, risk=%.1f%%, sl_dist=%.2f%%)",
+                               quantity_coin, equity, risk_pct * 100, sl_distance_pct)
+
+                    exit_plan = {
+                        "stop_loss": exit_plan_data["stop_loss"],
+                        "profit_target": exit_plan_data["profit_target"],
+                        "invalidation_condition": exit_plan_data["invalidation_condition"],
+                    }
+
+                    # Build reasoning
+                    reasoning_full = f"{reasoning} | SL: {exit_plan_data['stop_loss']:.2f} | TP: {exit_plan_data['profit_target']:.2f} | R:R: {exit_plan_data['rr_ratio']:.2f}"
+
+                    return RiskDecision(
+                        action=action,
+                        amount=quantity_coin,
+                        reasoning=reasoning_full,
+                        leverage=leverage,
+                        glm_confidence=max(0.0, min(100.0, confidence)),
+                        reason_primary=reasoning[:100] if reasoning else f"{action} signal",
+                        reason_secondary=f"R:R {exit_plan_data['rr_ratio']:.2f}",
+                        exit_plan=exit_plan,
+                        exit_validation=exit_validation,  # GLM Elite Swing Trader field (N/A for new positions)
+                        decision_timestamp=datetime.now(timezone.utc),
+                    )
+
+            # ============================================================
+            # OLD FORMAT: {"SYMBOL": {"trade_signal_args": {...}, "justification": "..."}}
+            # Backward compatibility for old GLM responses
+            # ============================================================
             trade_signal_args = symbol_data.get("trade_signal_args", {})
             # Justification is inside trade_signal_args (per prompt), with fallbacks for backward compatibility
             justification = (
@@ -2504,30 +2735,30 @@ IMPORTANT:
                 symbol_data.get("justification", "") or            # Fallback: outside args (English)
                 symbol_data.get("gerekçe", "")                     # Fallback: outside args (Turkish)
             )
-            
+
             # Sanitization: Check for Python error messages in justification
             if justification and ("name '" in justification and "' is not defined" in justification):
                 logger.error("🚨 Detected Python error message in GLM justification: %s", justification)
                 justification = "Gerekçe oluşturulurken teknik bir hata oluştu (AI response contained error pattern)."
-            
+
             if not trade_signal_args:
-                logger.warning("❌ No trade_signal_args found in NOF1.AI response.")
+                logger.warning("❌ No trade_signal_args found in response.")
                 logger.warning("🔍 Payload structure: %s", json.dumps(payload, indent=2)[:500])
                 logger.warning("🔍 Available keys: %s", list(payload.keys()))
                 return RiskDecision(
-                    action="HOLD", 
-                    amount=0.0, 
-                    reasoning="Invalid nof1.ai response format - missing trade_signal_args",
+                    action="HOLD",
+                    amount=0.0,
+                    reasoning="Invalid response format - missing trade_signal_args or simplified format",
                     decision_timestamp=datetime.now(timezone.utc)
                 )
-            
+
             signal = trade_signal_args.get("signal", "hold").lower()
             quantity = float(trade_signal_args.get("quantity") or 0)
             leverage = float(trade_signal_args.get("leverage") or 10)
             confidence = float(trade_signal_args.get("confidence") or 0.5) * 100  # Convert 0-1 to 0-100 percentage
-            
+
             # Debug log to see what justification we got
-            logger.info("🔍 GLM justification received: '%s'", justification)
+            logger.info("🔍 GLM justification received (old format): '%s'", justification)
             if not justification:
                 logger.warning("⚠️ GLM provided empty justification - this is the main issue!")
             
@@ -3092,15 +3323,39 @@ IMPORTANT:
             ]
         }
 
+        # First, extract signal to determine which fields are needed
+        signal_type = None
+        for pattern in strategies.get("signal", []):
+            match = re.search(pattern, content, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+            if match:
+                signal_type = (match.group(1) if match.groups() else match.group(0)).upper()
+                if signal_type in ["HOLD", "BEKLE"]:
+                    signal_type = "HOLD"
+                elif signal_type in ["BUY", "LONG", "AL"]:
+                    signal_type = "BUY"
+                elif signal_type in ["SELL", "SHORT", "SAT"]:
+                    signal_type = "SELL"
+                elif signal_type in ["CLOSE", "KAPAT"]:
+                    signal_type = "CLOSE"
+                break
+
+        # Fields that are only needed for BUY/SELL signals (not HOLD/CLOSE)
+        position_only_fields = {"stop_loss", "profit_target", "invalidation_condition", "quantity", "leverage"}
+
         # Try each strategy for each field with enhanced logging
         for field, patterns in strategies.items():
+            # Skip position-specific fields for HOLD/CLOSE signals
+            if signal_type in ["HOLD", "CLOSE"] and field in position_only_fields:
+                logger.debug("⏭️ Skipping %s extraction for %s signal", field, signal_type)
+                continue
+
             field_success = False
             patterns_tried = 0
-            
+
             for i, pattern in enumerate(patterns):
                 patterns_tried += 1
                 extraction_metrics["patterns_tried"] += 1
-                
+
                 logger.debug("🔍 Trying pattern %d/%d for %s: %s", i+1, len(patterns), field, pattern[:50])
                 
                 match = re.search(pattern, content, re.IGNORECASE | re.MULTILINE | re.DOTALL)
@@ -3173,22 +3428,30 @@ IMPORTANT:
         
         # Final validation and quality check
         required_fields = ["signal"]
-        optional_fields = ["quantity", "stop_loss", "profit_target", "leverage", "confidence", "justification"]
-        
+
+        # For HOLD/CLOSE, position fields are not required
+        if signal_type in ["HOLD", "CLOSE"]:
+            optional_fields = ["confidence", "justification"]
+            logger.info("📊 %s signal - position fields not required", signal_type)
+        else:
+            optional_fields = ["quantity", "stop_loss", "profit_target", "leverage", "confidence", "justification"]
+
         missing_required = [f for f in required_fields if f not in data]
         missing_optional = [f for f in optional_fields if f not in data]
-        
+
         if missing_required:
             logger.error("❌ Missing required fields: %s", missing_required)
-        
-        if missing_optional:
+
+        if missing_optional and signal_type not in ["HOLD", "CLOSE"]:
             logger.info("ℹ️ Missing optional fields (will default safely): %s", missing_optional)
-        
-        success_rate = (extraction_metrics["successful_extractions"] / max(1, len(required_fields) + len(optional_fields))) * 100
-        logger.info("📈 Extraction success rate: %.1f%%", success_rate)
-        
-        if success_rate >= 80:
-            logger.info("✅ High-quality extraction achieved")
+
+        # Adjust success rate calculation based on signal type
+        expected_fields = len(required_fields) + len(optional_fields)
+        success_rate = (extraction_metrics["successful_extractions"] / max(1, expected_fields)) * 100
+        logger.info("📈 Extraction success rate: %.1f%% (expected %d fields for %s)", success_rate, expected_fields, signal_type or "UNKNOWN")
+
+        if success_rate >= 80 or signal_type in ["HOLD", "CLOSE"]:
+            logger.info("✅ Extraction quality OK for %s signal", signal_type or "UNKNOWN")
         elif success_rate >= 50:
             logger.warning("⚠️ Moderate extraction quality - some data missing")
         else:

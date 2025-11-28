@@ -82,6 +82,39 @@ class QLibSettings(BaseSettings):
     region: str = Field("us", alias="QLIB_REGION")
 
 
+class SecuritySettings(BaseSettings):
+    """Security-related settings for HMAC validation and notification freshness"""
+
+    model_config = SettingsConfigDict(
+        env_file=str(ENV_FILE),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="allow",
+    )
+
+    redis_hmac_secret: str = Field("", alias="REDIS_HMAC_SECRET")
+    notification_max_age_minutes: int = Field(5, alias="NOTIFICATION_MAX_AGE_MINUTES")
+    require_enhanced_features: bool = Field(False, alias="REQUIRE_ENHANCED_FEATURES")
+
+
+class TradingConfig(BaseSettings):
+    """Trading configuration for fees, limits, and position sizing"""
+
+    model_config = SettingsConfigDict(
+        env_prefix="TRADING_",
+        env_file=str(ENV_FILE),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="allow",
+    )
+
+    taker_fee_pct: float = Field(0.05, alias="TRADING_TAKER_FEE_PCT")
+    maker_fee_pct: float = Field(0.02, alias="TRADING_MAKER_FEE_PCT")
+    max_margin_per_position: float = Field(3000.0, alias="TRADING_MAX_MARGIN_PER_POSITION")
+    max_leverage: int = Field(20, alias="TRADING_MAX_LEVERAGE")
+    example_position_usd: float = Field(50000.0, alias="TRADING_EXAMPLE_POSITION_USD")
+
+
 class ZAISettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="GLM_",
@@ -92,6 +125,9 @@ class ZAISettings(BaseSettings):
     )
 
     api_key: str = Field("changeme")
+    # Additional API keys for parallel processing (one per symbol)
+    api_key_2: str = Field("65895bc22a0440f89c8fba9b03a239c9.86OSst0vZNrFevUb", alias="GLM_API_KEY_2")
+    api_key_3: str = Field("b42cc5962a7346d49cf63541ce559a21.3acBWSE3GuN1QRCF", alias="GLM_API_KEY_3")
     base_url: AnyHttpUrl = Field("https://api.z.ai/api/coding/paas/v4")
     model: str = Field("glm-4.6")
     window_seconds: int = Field(5 * 60 * 60)
@@ -117,11 +153,46 @@ class AppSettings(BaseSettings):
     telegram_bot_token: str = Field("", alias="TELEGRAM_BOT_TOKEN")
     telegram_channel_id: str = Field("", alias="TELEGRAM_CHANNEL_ID")
     use_nof1_style: bool = Field(False, alias="USE_NOF1_STYLE")
-    
+
     # Position Monitor Settings
     enable_position_monitor: bool = Field(True, alias="ENABLE_POSITION_MONITOR")
     position_monitor_interval_seconds: int = Field(180, alias="POSITION_MONITOR_INTERVAL_SECONDS")  # 3 dakika
     position_monitor_check_invalidation: bool = Field(True, alias="POSITION_MONITOR_CHECK_INVALIDATION")
+
+    # =========================================================================
+    # SWING TRADE SETTINGS
+    # =========================================================================
+    swing_trade_mode: bool = Field(True, alias="SWING_TRADE_MODE")
+    swing_max_leverage: int = Field(7, alias="SWING_MAX_LEVERAGE")
+    swing_primary_timeframe: str = Field("4h", alias="SWING_PRIMARY_TIMEFRAME")
+
+    # Performance Tracking Override
+    override_consecutive_losses: bool = Field(False, alias="OVERRIDE_CONSECUTIVE_LOSSES")
+
+    # =========================================================================
+    # CRASH PROTECTION SETTINGS (3-Tier System + HTF Confirmation)
+    # =========================================================================
+    crash_protection_enabled: bool = Field(True, alias="CRASH_PROTECTION_ENABLED")
+    crash_protection_cooldown_minutes: int = Field(30, alias="CRASH_PROTECTION_COOLDOWN_MINUTES")
+    crash_protection_htf_timeframe: str = Field("30m", alias="CRASH_HTF_TIMEFRAME")
+
+    # Seviye 1: UYARI (1 dakika içinde drop - HTF ile doğrulama yapılır)
+    crash_warning_1min_btc: float = Field(1.0, alias="CRASH_WARNING_1MIN_BTC")  # %1
+    crash_warning_1min_eth: float = Field(1.5, alias="CRASH_WARNING_1MIN_ETH")  # %1.5
+    crash_warning_1min_sol: float = Field(2.0, alias="CRASH_WARNING_1MIN_SOL")  # %2
+
+    # Seviye 2: TEHLİKE (5 dakika içinde drop - %50 azalt)
+    crash_danger_5min_btc: float = Field(3.0, alias="CRASH_DANGER_5MIN_BTC")  # %3
+    crash_danger_5min_eth: float = Field(4.0, alias="CRASH_DANGER_5MIN_ETH")  # %4
+    crash_danger_5min_sol: float = Field(5.0, alias="CRASH_DANGER_5MIN_SOL")  # %5
+
+    # Seviye 3: KRİTİK (10 dakika içinde drop - TÜM pozisyonları kapat)
+    crash_critical_10min_btc: float = Field(5.0, alias="CRASH_CRITICAL_10MIN_BTC")  # %5
+    crash_critical_10min_eth: float = Field(7.0, alias="CRASH_CRITICAL_10MIN_ETH")  # %7
+    crash_critical_10min_sol: float = Field(10.0, alias="CRASH_CRITICAL_10MIN_SOL")  # %10
+
+    # Per-symbol cooldown for DANGER level (sadece o coin için)
+    crash_danger_cooldown_minutes: int = Field(10, alias="CRASH_DANGER_COOLDOWN_MINUTES")
     
     # Price Freshness Thresholds (symbol-specific, in seconds)
     # Volatile assets need stricter freshness requirements
@@ -140,6 +211,8 @@ class AppSettings(BaseSettings):
     influx: InfluxSettings = Field(default_factory=InfluxSettings)
     qlib: QLibSettings = Field(default_factory=QLibSettings)
     zai: ZAISettings = Field(default_factory=ZAISettings)
+    security: SecuritySettings = Field(default_factory=SecuritySettings)
+    trading: TradingConfig = Field(default_factory=TradingConfig)
 
 
 @lru_cache

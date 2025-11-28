@@ -17,10 +17,16 @@ logger = get_logger(__name__)
 
 
 class GLMClient:
-    def __init__(self) -> None:
+    def __init__(self, api_key: Optional[str] = None) -> None:
+        """
+        Initialize GLM client.
+
+        Args:
+            api_key: Optional API key override. If not provided, uses settings.zai.api_key
+        """
         self._base_url = str(settings.zai.base_url).rstrip("/")
         self._endpoint = self._ensure_completions_endpoint(self._base_url)
-        self._api_key = settings.zai.api_key
+        self._api_key = api_key if api_key else settings.zai.api_key
         self._model = settings.zai.model
         self._max_tokens = settings.zai.max_tokens
         self._limiter = SlidingWindowRateLimiter(
@@ -29,6 +35,10 @@ class GLMClient:
         )
         # Optimized timeout: 300s total, 270s read - 5 minute timeout for very slow GLM API responses
         self._client = httpx.Client(timeout=httpx.Timeout(300.0, connect=5.0, read=270.0))
+
+        # Log which API key is being used (masked)
+        key_prefix = self._api_key[:8] if len(self._api_key) > 8 else "***"
+        logger.info("GLMClient initialized with API key: %s...", key_prefix)
 
     @staticmethod
     def _ensure_completions_endpoint(base_url: str) -> str:
