@@ -1,0 +1,6 @@
+{"timestamp": "2025-11-29T11:35:53.053423+00:00", "prompt_tokens": 3581, "completion_tokens": 1933, "total_tokens": 5514, "latency_ms": 30605.01503944397}
+{"timestamp": "2025-11-29T11:36:05.843270+00:00", "prompt_tokens": 3302, "completion_tokens": 2877, "total_tokens": 6179, "latency_ms": 42690.00554084778}
+{"timestamp": "2025-11-29T11:36:18.007340+00:00", "prompt_tokens": 3327, "completion_tokens": 2202, "total_tokens": 5529, "latency_ms": 54232.245206832886}
+{"timestamp": "2025-11-29T11:39:46.107895+00:00", "prompt_tokens": 3328, "completion_tokens": 2422, "total_tokens": 5750, "latency_ms": 46324.25880432129}
+{"timestamp": "2025-11-29T11:39:52.600393+00:00", "prompt_tokens": 3301, "completion_tokens": 2439, "total_tokens": 5740, "latency_ms": 52197.537660598755}
+{"timestamp": "2025-11-29T11:39:53.955625+00:00", "prompt_tokens": 3580, "completion_tokens": 2160, "total_tokens": 5740, "latency_ms": 54896.34013175964}

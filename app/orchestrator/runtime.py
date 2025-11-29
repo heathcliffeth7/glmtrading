@@ -10,7 +10,6 @@ from app.agents.base import Agent, AgentSignal
 from app.agents.short_term import PureDataCollector
 from app.config.settings import get_settings
 from app.data_feeds.service import orchestrator as data_feed_orchestrator
-from app.features.orchestrator import start_feature_workers
 from app.executor.executor import Executor, ExecutionResult
 from app.executor.ledger import engine
 from app.risk_manager.manager import RiskDecision, RiskManager
@@ -234,11 +233,6 @@ class AutomatedRunner:
                 )
         else:
             logger.info("Position Monitor disabled in settings")
-        
-        # NOTE: feature workers and data feed disabled
-        # feeder = asyncio.create_task(data_feed_orchestrator())
-        # feature_task = asyncio.create_task(start_feature_workers(self._symbols, ["1m", self._interval]))
-
         # 5. Crash Protection registration with price_cache
         if self._crash_protection_manager:
             self._crash_protection_manager.register_with_price_cache()
