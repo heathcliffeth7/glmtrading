@@ -177,7 +177,7 @@ class GLMClient:
                 
             except httpx.HTTPStatusError as exc:
                 # Check if this is a transient server error that's worth retrying
-                if exc.response.status_code in [502, 503, 504] and attempt < max_retries - 1:
+                if exc.response.status_code in [500, 502, 503, 504] and attempt < max_retries - 1:
                     # Exponential backoff with jitter
                     delay = base_delay * (2 ** attempt) + (0.1 * attempt)
                     logger.warning(

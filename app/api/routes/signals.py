@@ -16,7 +16,8 @@ SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 @router.get("/recent")
 async def get_recent_signals(
     symbol: Optional[str] = Query(None, description="Filter by symbol (e.g., BTCUSDT)"),
-    limit: int = Query(10, ge=1, le=50, description="Number of signals to return")
+    limit: int = Query(50, ge=1, le=200, description="Number of signals to return"),
+    days: int = Query(7, ge=1, le=30, description="How many days back to look")
 ) -> Dict[str, Any]:
     """
     Get recent GLM trading signals with reasoning.
@@ -29,6 +30,9 @@ async def get_recent_signals(
     # Determine which symbols to query
     symbols_to_query = [symbol.upper()] if symbol else SYMBOLS
 
+    # Convert days to hours for query
+    hours = days * 24
+
     for sym in symbols_to_query:
         try:
             # Query InfluxDB for recent signals
@@ -36,7 +40,8 @@ async def get_recent_signals(
                 measurement="trading_signals",
                 symbol=sym,
                 interval="30min",
-                limit=limit
+                limit=limit,
+                hours=hours
             )
 
             if result:

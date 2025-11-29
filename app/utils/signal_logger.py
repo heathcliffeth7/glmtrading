@@ -18,6 +18,7 @@ from typing import Dict, Any, Optional
 
 from app.utils.influx import write_measurement
 from app.utils.logging import get_logger
+from app.utils.signal_publisher import publish_signal
 
 
 logger = get_logger(__name__)
@@ -270,13 +271,29 @@ class SignalLogger:
                 fields=fields,
                 timestamp=signal_log.timestamp,
             )
-            
+
             logger.info(
                 "📝 Signal logged: %s | %s",
                 signal_log.action,
                 signal_log.get_summary(),
             )
-            
+
+            # Push signal to Redis for real-time WebSocket broadcast
+            # Fire-and-forget: if Redis/API is down, InfluxDB log still works
+            publish_signal(
+                symbol=signal_log.symbol,
+                action=signal_log.action,
+                reasoning=signal_log.reasoning,
+                amount=signal_log.amount,
+                leverage=signal_log.leverage,
+                equity=signal_log.equity,
+                confidence=signal_log.metadata.get('glm_confidence', 0.0) if signal_log.metadata else 0.0,
+                current_price=signal_log.current_price,
+                composite_bias=signal_log.composite_bias,
+                interval=signal_log.interval,
+                trace_id=signal_log.trace_id or "",
+            )
+
         except Exception as e:
             logger.error("Failed to log signal: %s", e, exc_info=True)
     
@@ -352,6 +369,7 @@ class SignalLogger:
         self,
         decision: Any,  # RiskDecision
         signal: Any,  # AgentSignal
+        symbol: str,  # Symbol must be passed explicitly
         portfolio_metrics: Optional[Dict] = None,
         latency_metrics: Optional[Dict] = None,
     ) -> SignalLog:
@@ -380,7 +398,7 @@ class SignalLogger:
         
         signal_log = SignalLog(
             timestamp=datetime.utcnow(),
-            symbol=metadata.get('symbol', 'BTCUSDT'),
+            symbol=symbol,  # Use explicit symbol parameter
             interval=metadata.get('interval', '30min'),
             
             # Decision

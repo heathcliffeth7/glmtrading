@@ -3,6 +3,7 @@ Enriched Feed - Combines Binance data sources for comprehensive trading signals
 Aggregates: Binance Spot + Binance Futures + Technical Analysis Features
 """
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Dict, Any, List
 
@@ -21,6 +22,9 @@ from app.indicators.technical_analyzer import TechnicalAnalyzer
 settings = get_settings()
 logger = get_logger(__name__)
 technical_analyzer = TechnicalAnalyzer()
+
+# Thread pool for CPU-intensive indicator calculations (prevents event loop blocking)
+_indicator_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ta-calc")
 
 
 async def fetch_binance_klines(symbol: str, interval: str = "1m", limit: int = 200) -> List[Dict]:
@@ -74,13 +78,32 @@ async def fetch_binance_klines(symbol: str, interval: str = "1m", limit: int = 2
         return []
 
 
+async def calculate_indicators_async(klines: List[Dict]) -> Dict[str, Any]:
+    """
+    Async wrapper for CPU-intensive indicator calculations.
+    Runs in thread pool to prevent event loop blocking.
+
+    Args:
+        klines: List of kline dicts with OHLCV data
+
+    Returns:
+        Dict with calculated indicators for the latest bar
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _indicator_executor,
+        calculate_indicators_from_klines,
+        klines
+    )
+
+
 def calculate_indicators_from_klines(klines: List[Dict]) -> Dict[str, Any]:
     """
     Calculate technical indicators from Binance klines using pandas-ta
-    
+
     Args:
         klines: List of kline dicts with OHLCV data
-    
+
     Returns:
         Dict with calculated indicators for the latest bar
     """
@@ -264,8 +287,8 @@ async def aggregate_enriched_data(
             logger.info("🔄 Initial fetch: Loaded 200 bars from REST API (sufficient for all indicators)")
         
         if klines:
-            # Calculate all possible indicators from Binance OHLCV
-            binance_indicators = calculate_indicators_from_klines(klines)
+            # Calculate all possible indicators from Binance OHLCV (async to prevent blocking)
+            binance_indicators = await calculate_indicators_async(klines)
             
             if binance_indicators:
                 enriched.update(binance_indicators)

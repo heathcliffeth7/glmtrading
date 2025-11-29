@@ -78,7 +78,7 @@ class RiskDecision:
 
 
 class RiskManager:
-    def __init__(self, glm_client: GLMClient | None = None) -> None:
+    def __init__(self, glm_client: GLMClient | None = None, symbol: str = "BTCUSDT") -> None:
         """
         Initialize RiskManager.
 
@@ -86,7 +86,9 @@ class RiskManager:
             glm_client: Optional GLMClient instance. If not provided, creates default.
                         Use this to inject custom GLM clients with different API keys
                         for parallel processing across symbols.
+            symbol: Trading symbol (e.g., BTCUSDT, ETHUSDT, SOLUSDT)
         """
+        self._symbol = symbol
         self._glm = glm_client if glm_client else GLMClient()
         self._signal_logger = get_signal_logger()
         self._settings = get_settings()
@@ -1809,6 +1811,7 @@ IMPORTANT:
             signal_log = self._signal_logger.create_signal_from_decision(
                 decision=decision,
                 signal=signal,
+                symbol=self._symbol,  # Pass symbol explicitly
                 portfolio_metrics=portfolio_metrics,
                 latency_metrics=latency_metrics,
             )

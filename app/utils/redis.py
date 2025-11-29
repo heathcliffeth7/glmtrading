@@ -1,10 +1,12 @@
+import asyncio
 import json
 import threading
 import time
 from collections import deque
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 import redis
+import redis.asyncio as aioredis
 
 from app.config.settings import get_settings
 from app.utils.logging import get_logger
@@ -124,8 +126,143 @@ def get_queue_status() -> Dict[str, Any]:
 def get_redis_client() -> redis.Redis:
     """
     Get Redis client for direct operations (e.g., set/get for notifications)
-    
+
     Returns:
         Redis client instance
     """
     return _publisher
+
+
+# =============================================================================
+# ASYNC REDIS PUBLISHING - Non-blocking, high-performance
+# =============================================================================
+
+# Per-loop clients to avoid "attached to different loop" errors
+_async_clients: Dict[int, aioredis.Redis] = {}
+_async_queues: Dict[int, asyncio.Queue] = {}
+
+
+def _get_loop_id() -> int:
+    """Get current event loop's ID."""
+    try:
+        loop = asyncio.get_running_loop()
+        return id(loop)
+    except RuntimeError:
+        return 0
+
+
+async def _ensure_async_client() -> aioredis.Redis:
+    """Get or create async Redis client for current event loop."""
+    loop_id = _get_loop_id()
+    if loop_id not in _async_clients or _async_clients[loop_id] is None:
+        _async_clients[loop_id] = aioredis.from_url(
+            str(settings.redis.url),
+            max_connections=10,
+            decode_responses=True
+        )
+        logger.debug("Async Redis client initialized for loop %d", loop_id)
+    return _async_clients[loop_id]
+
+
+def _get_async_queue() -> asyncio.Queue:
+    """Get or create async queue for current event loop."""
+    loop_id = _get_loop_id()
+    if loop_id not in _async_queues or _async_queues[loop_id] is None:
+        _async_queues[loop_id] = asyncio.Queue(maxsize=1000)
+    return _async_queues[loop_id]
+
+
+async def publish_async(channel: str, payload: Dict[str, Any]) -> None:
+    """
+    Non-blocking async publish to Redis.
+    Falls back to local queue if Redis connection fails.
+
+    Args:
+        channel: Redis channel name
+        payload: Message payload
+    """
+    try:
+        client = await _ensure_async_client()
+        await client.publish(channel, json.dumps(payload, default=str))
+    except Exception as e:
+        logger.warning("⚠️ Async Redis publish failed, queuing: %s", e)
+        try:
+            queue = _get_async_queue()
+            queue.put_nowait((channel, payload))
+        except asyncio.QueueFull:
+            # Drop oldest message, add new one
+            try:
+                queue.get_nowait()
+                queue.put_nowait((channel, payload))
+                logger.warning("Async queue full, dropped oldest message")
+            except asyncio.QueueEmpty:
+                pass
+        except Exception:
+            # Fallback to sync publish_safe if async fails completely
+            publish_safe(channel, payload)
+
+
+_async_queue_flusher_started: Dict[int, bool] = {}
+
+
+async def start_async_queue_flusher() -> None:
+    """
+    Background task to flush queued messages when Redis reconnects.
+    Should be started once per event loop.
+    """
+    loop_id = _get_loop_id()
+
+    if _async_queue_flusher_started.get(loop_id, False):
+        return
+
+    _async_queue_flusher_started[loop_id] = True
+    logger.info("Starting async Redis queue flusher for loop %d", loop_id)
+
+    while True:
+        await asyncio.sleep(1)  # Check every second
+
+        queue = _get_async_queue()
+        if queue.empty():
+            continue
+
+        try:
+            client = await _ensure_async_client()
+            flushed = 0
+
+            while not queue.empty():
+                try:
+                    channel, payload = queue.get_nowait()
+                    await client.publish(channel, json.dumps(payload, default=str))
+                    flushed += 1
+                except asyncio.QueueEmpty:
+                    break
+                except Exception as e:
+                    logger.warning("Failed to flush async queued message: %s", e)
+                    # Re-queue
+                    try:
+                        queue.put_nowait((channel, payload))
+                    except asyncio.QueueFull:
+                        pass
+                    break
+
+            if flushed > 0:
+                logger.info("✅ Async Redis flusher: sent %d queued messages", flushed)
+
+        except Exception as e:
+            logger.warning("Async Redis flusher error: %s", e)
+
+
+async def close_async_client() -> None:
+    """Close async Redis client for current event loop (for graceful shutdown)."""
+    loop_id = _get_loop_id()
+    client = _async_clients.get(loop_id)
+    if client:
+        try:
+            await client.close()
+            logger.info("Async Redis client closed for loop %d", loop_id)
+        except Exception as e:
+            logger.error("Error closing async Redis client: %s", e)
+        finally:
+            _async_clients.pop(loop_id, None)
+            _async_queues.pop(loop_id, None)
+            _async_queue_flusher_started.pop(loop_id, None)

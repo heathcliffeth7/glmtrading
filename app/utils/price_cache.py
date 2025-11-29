@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional
@@ -114,7 +115,8 @@ class EnhancedPriceCache:
     
     def __init__(self):
         self._snapshots: Dict[str, PriceSnapshot] = {}
-        self._lock = threading.Lock()
+        # Per-symbol locks for fine-grained locking (reduces cross-symbol contention)
+        self._symbol_locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
         self._last_valid_prices: Dict[str, float] = {}  # Track last valid price per symbol
 
         # 🎯 SOURCE PRIORITY SYSTEM - prevents race conditions
@@ -159,7 +161,9 @@ class EnhancedPriceCache:
             )
             return
         
-        with self._lock:
+        # Per-symbol lock - only blocks updates for the same symbol
+        symbol_lock = self._symbol_locks[symbol_upper]
+        with symbol_lock:
             current_snapshot = self._snapshots.get(symbol_upper)
             current_priority = self._source_priority.get(current_snapshot.source, 10) if current_snapshot else 10
             new_priority = self._source_priority.get(source, 10)
@@ -218,8 +222,8 @@ class EnhancedPriceCache:
                 symbol_upper, max_age_seconds
             )
         
-        with self._lock:
-            snapshot = self._snapshots.get(symbol.upper())
+        # Lock-free read - dict.get() is thread-safe in Python
+        snapshot = self._snapshots.get(symbol.upper())
         
         if not snapshot:
             logger.warning("⚠️ No price cached for %s", symbol)
@@ -242,9 +246,8 @@ class EnhancedPriceCache:
         return snapshot.price
     
     def get_snapshot(self, symbol: str) -> Optional[PriceSnapshot]:
-        """Get full snapshot with metadata"""
-        with self._lock:
-            return self._snapshots.get(symbol.upper())
+        """Get full snapshot with metadata (lock-free read)"""
+        return self._snapshots.get(symbol.upper())
     
     def get_age_seconds(self, symbol: str) -> float:
         """Get age of cached price in seconds"""
@@ -370,9 +373,12 @@ class EnhancedPriceCache:
         )
 
         snapshot = PriceSnapshot(new_price, datetime.now(timezone.utc), source)
+        symbol_upper = symbol.upper()
 
-        with self._lock:
-            self._snapshots[symbol.upper()] = snapshot
+        # Per-symbol lock
+        symbol_lock = self._symbol_locks[symbol_upper]
+        with symbol_lock:
+            self._snapshots[symbol_upper] = snapshot
 
     def update_rest_price(self, symbol: str, rest_price: float) -> None:
         """
@@ -386,8 +392,11 @@ class EnhancedPriceCache:
             logger.debug("Invalid REST price for %s: %.2f", symbol, rest_price)
             return
 
-        with self._lock:
-            current_snapshot = self._snapshots.get(symbol.upper())
+        symbol_upper = symbol.upper()
+        # Per-symbol lock
+        symbol_lock = self._symbol_locks[symbol_upper]
+        with symbol_lock:
+            current_snapshot = self._snapshots.get(symbol_upper)
 
             if current_snapshot:
                 current_price = current_snapshot.price

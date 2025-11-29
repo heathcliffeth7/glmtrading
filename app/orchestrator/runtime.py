@@ -8,15 +8,11 @@ from typing import Dict, Iterable, List, Optional
 
 from app.agents.base import Agent, AgentSignal
 from app.agents.short_term import PureDataCollector
-from app.agents.multi_timeframe import MultiTimeframeAgent
-from app.agents.feedback.collector import FeedbackCollector
-from app.agents.feedback.retrainer import ActiveLearningRetrainer
 from app.config.settings import get_settings
 from app.data_feeds.service import orchestrator as data_feed_orchestrator
 from app.features.orchestrator import start_feature_workers
 from app.executor.executor import Executor, ExecutionResult
 from app.executor.ledger import engine
-from app.research.backtest import Backtester, load_historical_from_influx
 from app.risk_manager.manager import RiskDecision, RiskManager
 from app.risk_manager.glm_client import GLMClient
 from app.utils.logging import configure_logging, get_logger
@@ -47,14 +43,10 @@ class AutomatedRunner:
         symbols: Optional[List[str]] = None,  # New argument for multiple symbols
         symbol: str = "BTCUSDT",  # Keep for backward compatibility
         interval: str = "15min",
-        backtest_window_minutes: int = 2880,
         cycle_seconds: int = 900,  # 15 dakika (900 saniye)
         risk_manager: Optional[RiskManager] = None,
         executor: Optional[Executor] = None,
         agent: Optional[Agent] = None,
-        enable_feedback_collector: bool = True,
-        enable_daily_retraining: bool = True,
-        retraining_hour: int = 2,  # UTC hour for daily retraining
         execution_concurrency: Optional[int] = None,
     ) -> None:
         # Handle symbols list
@@ -64,8 +56,7 @@ class AutomatedRunner:
             self._symbols = [symbol]
             
         self._interval = interval
-        self._window = backtest_window_minutes
-        
+
         # nof1.ai style aktifse 3 dakikalık döngü kullan
         settings = get_settings()
         if settings.use_nof1_style:
@@ -102,7 +93,7 @@ class AutomatedRunner:
             if sym == symbol and risk_manager:
                 self._risk_managers[sym] = risk_manager
             else:
-                self._risk_managers[sym] = RiskManager(glm_client=self._glm_clients[sym])
+                self._risk_managers[sym] = RiskManager(glm_client=self._glm_clients[sym], symbol=sym)
                 
             if sym == symbol and executor:
                 self._executors[sym] = executor
@@ -115,29 +106,6 @@ class AutomatedRunner:
                 self._agents[sym] = PureDataCollector(symbol=sym)
 
         self._running = False
-        
-        # Active Learning components
-        self._enable_feedback = enable_feedback_collector
-        self._enable_retraining = enable_daily_retraining
-        self._retraining_hour = retraining_hour
-        
-        if self._enable_feedback:
-            self._feedback_collector = FeedbackCollector(
-                check_interval_minutes=30,
-                result_after_minutes=60,
-                batch_size=20,
-                enable_glm_feedback=True,
-            )
-        else:
-            self._feedback_collector = None
-        
-        if self._enable_retraining:
-            self._retrainer = ActiveLearningRetrainer(
-                model_path="models/derivatives.joblib",
-                min_samples=50,
-            )
-        else:
-            self._retrainer = None
 
         # Initialize advanced monitoring systems (per symbol if needed, but currently shared or primary)
         # For now, we'll monitor the primary symbol or all? 
@@ -227,26 +195,13 @@ class AutomatedRunner:
     async def start(self) -> None:
         cycle_minutes = self._cycle // 60
         logger.info("Starting automated runner with %dmin cycle (15min interval data, feature workers disabled)", cycle_minutes)
-        logger.info("Active Learning: feedback=%s retraining=%s", self._enable_feedback, self._enable_retraining)
-        
+
         self._running = True
-        
+
         # Start background tasks
         tasks = []
-        
-        # 1. Feedback collector task
-        if self._feedback_collector:
-            feedback_task = asyncio.create_task(self._feedback_collector.start())
-            tasks.append(("feedback_collector", feedback_task))
-            logger.info("✅ Feedback Collector started")
-        
-        # 2. Daily retraining scheduler task
-        if self._retrainer:
-            retrain_task = asyncio.create_task(self._daily_retraining_scheduler())
-            tasks.append(("retraining_scheduler", retrain_task))
-            logger.info("✅ Retraining Scheduler started (daily at %02d:00 UTC)", self._retraining_hour)
-        
-        # 3. Service monitoring task (runs every 5 minutes)
+
+        # 1. Service monitoring task (runs every 5 minutes)
         service_monitor_task = asyncio.create_task(self._service_monitoring_loop())
         tasks.append(("service_monitor", service_monitor_task))
         logger.info("✅ Service Monitor started (checking every 5 minutes)")
@@ -299,10 +254,7 @@ class AutomatedRunner:
         finally:
             # Cleanup background tasks
             logger.info("Stopping background tasks...")
-            
-            if self._feedback_collector:
-                self._feedback_collector.stop()
-            
+
             for task_name, task in tasks:
                 task.cancel()
                 try:
@@ -442,41 +394,11 @@ class AutomatedRunner:
                 'timing_tracker': timing_tracker,
             }
 
-        # Parallelize data loading (Backtest + Agent signal generation)
-        async def load_backtest_data():
-            try:
-                data = await asyncio.to_thread(load_historical_from_influx, symbol, self._interval, self._window)
-                if data.empty:
-                    logger.warning("[%s] Backtest skipped: no historical data", symbol)
-                    return None
-                return data
-            except Exception as exc:
-                logger.warning("[%s] Backtest data loading failed: %s", symbol, exc)
-                return None
-
-        async def generate_agent_signal():
-            t1 = datetime.now(timezone.utc)
-            # Agent signal generation might be CPU bound, run in thread
-            signal = await asyncio.to_thread(agent.generate_signal)
-            t2 = datetime.now(timezone.utc)
-            timing_tracker.add_stage("data_collection", t1, t2)
-            return signal
-
-        # Run backtest data load and agent signal generation concurrently
-        backtest_data, signal = await asyncio.gather(load_backtest_data(), generate_agent_signal())
-
-        # Run backtest simulation if data available (cpu bound, separate thread)
-        if backtest_data is not None:
-            try:
-                aggregated = backtest_data.pivot(index="timestamp", columns="field", values="value").reset_index(drop=True)
-                tester = Backtester(agent)
-                # Run CPU-intensive backtest in thread
-                await asyncio.to_thread(tester.run, aggregated.to_dict(orient="records"))
-                summary = tester.summary()
-                net_pnl = summary["portfolio_value"] - summary["initial_cash"]
-                logger.info("[%s] Backtest completed: PnL=%.2f", symbol, net_pnl)
-            except Exception as exc:
-                logger.warning("[%s] Backtest simulation failed: %s", symbol, exc)
+        # Generate agent signal (data collection)
+        t1 = datetime.now(timezone.utc)
+        signal = await asyncio.to_thread(agent.generate_signal)
+        t2 = datetime.now(timezone.utc)
+        timing_tracker.add_stage("data_collection", t1, t2)
 
         logger.info(
             "[%s] Agent signal | direction=%s | confidence=%.4f | reasoning=%s",
@@ -1299,82 +1221,6 @@ class AutomatedRunner:
                         len(main_message) if 'main_message' in locals() else 0, 
                         len(reasoning_escaped) if 'reasoning_escaped' in locals() else 0,
                         decision.action if decision else "N/A")
-    
-    async def _daily_retraining_scheduler(self) -> None:
-        """
-        Daily retraining scheduler
-        Runs retraining at specified UTC hour every day
-        """
-        logger.info("Daily retraining scheduler started")
-        
-        while self._running:
-            try:
-                # Calculate next run time
-                now = datetime.utcnow()
-                target_time = datetime.combine(
-                    now.date(),
-                    time(hour=self._retraining_hour, minute=0, second=0)
-                )
-                
-                # If target time has passed today, schedule for tomorrow
-                if target_time <= now:
-                    target_time += timedelta(days=1)
-                
-                # Sleep until target time
-                sleep_seconds = (target_time - now).total_seconds()
-                logger.info(
-                    "Next retraining scheduled at %s UTC (in %.1f hours)",
-                    target_time.isoformat(),
-                    sleep_seconds / 3600,
-                )
-                
-                await asyncio.sleep(sleep_seconds)
-                
-                # Run retraining
-                if not self._running:
-                    break
-                
-                logger.info("🔄 Starting daily retraining...")
-                
-                try:
-                    result = self._retrainer.retrain(days=7, dry_run=False)
-                    
-                    if result.get("success"):
-                        logger.info(
-                            "✅ Daily retraining complete: accuracy improved by %+.2f%%",
-                            result["improvement"] * 100,
-                        )
-                    else:
-                        logger.warning(
-                            "⚠️ Daily retraining did not improve model: %s",
-                            result.get("error", "No improvement"),
-                        )
-                
-                except Exception as exc:
-                    logger.error("❌ Daily retraining failed: %s", exc, exc_info=True)
-                    
-                    # Notify Telegram about failure
-                    if telegram_client.enabled():
-                        try:
-                            message = "\n".join([
-                                "*❌ Daily Retraining Failed*",
-                                "",
-                                f"Error: {format_markdown(str(exc))}",
-                                f"Time: {datetime.utcnow().isoformat()} UTC",
-                                "",
-                                "⚠️ Model was not updated. Check logs for details.",
-                            ])
-                            telegram_client.send_message(message)
-                        except Exception:
-                            pass
-            
-            except asyncio.CancelledError:
-                logger.info("Retraining scheduler cancelled")
-                raise
-            except Exception as exc:
-                logger.error("Retraining scheduler error: %s", exc, exc_info=True)
-                # Wait before retry
-                await asyncio.sleep(3600)  # Retry in 1 hour
     
     async def _service_monitoring_loop(self) -> None:
         """Periyodik olarak servisleri ve veri tazeliğini izle (her 5 dakikada bir)"""

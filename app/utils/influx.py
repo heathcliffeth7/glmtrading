@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
-from influxdb_client.client.write_api import SYNCHRONOUS
+from influxdb_client.client.write_api import SYNCHRONOUS, WriteOptions
 from influxdb_client.rest import ApiException
 
 from app.config.settings import get_settings
@@ -56,7 +56,18 @@ def _ensure_client() -> None:
             token=settings.influx.token,
             org=settings.influx.org,
         )
-        _write_api = _client.write_api(write_options=SYNCHRONOUS)
+        # Use batched writes for better performance (non-blocking)
+        _write_api = _client.write_api(
+            write_options=WriteOptions(
+                batch_size=100,
+                flush_interval=500,  # 500ms max latency
+                jitter_interval=100,
+                retry_interval=1000,
+                max_retries=3,
+                max_retry_delay=5000,
+                exponential_base=2
+            )
+        )
         _query_api = _client.query_api()
     elif not _client_initialized_logged:
         # Client exists but we haven't logged yet (shouldn't happen, but defensive)
@@ -229,15 +240,20 @@ def query_historical_snapshots(
     symbol: str,
     interval: str,
     limit: int = 10,
+    hours: int = 24,
 ) -> List[Dict[str, Any]]:
     """
     Get last N snapshots (e.g., last 10 data points for each indicator)
     Returns list of dicts, oldest → newest
+
+    Args:
+        hours: How far back to look (default 24 hours, max 720 = 30 days)
     """
     _ensure_client()
+    hours = min(hours, 720)  # Cap at 30 days
     query = f"""
     from(bucket: "{settings.influx.bucket}")
-      |> range(start: -24h)
+      |> range(start: -{hours}h)
       |> filter(fn: (r) => r["_measurement"] == "{measurement}")
       |> filter(fn: (r) => r["symbol"] == "{symbol}" and r["interval"] == "{interval}")
       |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
@@ -460,7 +476,15 @@ from(bucket: "{settings.influx.bucket}")
 
 
 def close_connections() -> None:
+    """Graceful shutdown - flush pending batched writes before closing."""
     global _client, _write_api, _query_api, _client_initialized_logged
+    if _write_api:
+        try:
+            # Flush any pending batched writes
+            _write_api.close()
+            logger.debug("InfluxDB write API closed (pending writes flushed)")
+        except Exception as e:
+            logger.error("Error closing InfluxDB write API: %s", e)
     if _client:
         try:
             _client.close()

@@ -17,16 +17,17 @@ SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 INITIAL_CAPITAL_PER_SYMBOL = 10000.0  # Her sembol için ayrı başlangıç bakiyesi
 
 
-def get_current_price(symbol: str) -> float:
-    """Get current price from Binance"""
+async def get_current_price(symbol: str) -> float:
+    """Get current price from Binance (async)"""
     try:
         import httpx
-        response = httpx.get(
-            "https://api.binance.com/api/v3/ticker/price",
-            params={"symbol": symbol},
-            timeout=5.0
-        )
-        return float(response.json()["price"])
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://api.binance.com/api/v3/ticker/price",
+                params={"symbol": symbol},
+                timeout=5.0
+            )
+            return float(response.json()["price"])
     except Exception:
         return 0.0
 
@@ -38,7 +39,7 @@ async def get_portfolio_summary(db: Session = Depends(get_db)):
 
     for symbol in SYMBOLS:
         portfolio = get_synced_portfolio(db, symbol)
-        current_price = get_current_price(symbol)
+        current_price = await get_current_price(symbol)
 
         # Bu sembol için realized PnL
         symbol_realized = db.query(func.sum(Trade.pnl)).filter(
@@ -153,7 +154,7 @@ async def get_equity_curve(
         for sym in symbols_to_check:
             portfolio = get_synced_portfolio(db, sym)
             if abs(portfolio.position) > 0.0001:
-                current_price = get_current_price(sym)
+                current_price = await get_current_price(sym)
                 if current_price > 0:
                     total_unrealized += (current_price - portfolio.average_price) * portfolio.position
 
@@ -192,7 +193,7 @@ async def get_portfolio_by_symbol(
         raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found")
 
     portfolio = get_synced_portfolio(db, symbol)
-    current_price = get_current_price(symbol)
+    current_price = await get_current_price(symbol)
 
     # Get open trades for this symbol
     open_trades = db.query(Trade).filter(

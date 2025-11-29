@@ -80,8 +80,8 @@ class Executor:
         self._max_btc_per_trade = None
         # Minimum margin to deploy per trade (per-symbol override, 0 = disabled)
         self._min_margin_per_trade = 0.0
-        if symbol in {"ETHUSDT", "SOLUSDT"}:
-            # User request: keep alt positions similar to BTC (~$30k notional @10x)
+        if symbol in {"BTCUSDT", "ETHUSDT", "SOLUSDT"}:
+            # Tüm semboller için tutarlı pozisyon boyutu (~$30k notional @10x)
             self._min_margin_per_trade = 3000.0
         # Reasonable price sanity range (adjusted for alts)
         self._min_price_sanity = 0.01

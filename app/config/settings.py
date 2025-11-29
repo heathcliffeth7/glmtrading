@@ -26,12 +26,17 @@ class BinanceWebSocketSettings(BaseSettings):
     base_retry_delay: int = Field(5, alias="BINANCE_WS_BASE_RETRY_DELAY")  # seconds
     max_retry_delay: int = Field(60, alias="BINANCE_WS_MAX_RETRY_DELAY")  # seconds
     circuit_breaker_threshold: int = Field(5, alias="BINANCE_WS_CIRCUIT_BREAKER_THRESHOLD")
-    connection_cooldown: int = Field(300, alias="BINANCE_WS_CONNECTION_COOLDOWN")  # 5 minutes
+    connection_cooldown: int = Field(60, alias="BINANCE_WS_CONNECTION_COOLDOWN")  # 1 minute (reduced from 5 min)
 
-    # Heartbeat monitoring
-    ping_interval: int = Field(45, alias="BINANCE_WS_PING_INTERVAL")  # seconds (increased from 30)
-    heartbeat_check_interval: int = Field(5, alias="BINANCE_WS_HEARTBEAT_CHECK_INTERVAL")  # seconds (decreased from 10)
-    message_timeout_multiplier: float = Field(3.0, alias="BINANCE_WS_MESSAGE_TIMEOUT_MULTIPLIER")  # increased from 2.0
+    # Heartbeat monitoring - OPTIMIZED for faster stall detection
+    ping_interval: int = Field(15, alias="BINANCE_WS_PING_INTERVAL")  # seconds (reduced from 45)
+    heartbeat_check_interval: int = Field(5, alias="BINANCE_WS_HEARTBEAT_CHECK_INTERVAL")  # seconds
+    message_timeout_multiplier: float = Field(2.0, alias="BINANCE_WS_MESSAGE_TIMEOUT_MULTIPLIER")  # reduced from 3.0
+
+    # Stall detection settings (for 1-5 second stalls)
+    stall_detection_enabled: bool = Field(True, alias="BINANCE_WS_STALL_DETECTION_ENABLED")
+    stall_threshold_seconds: float = Field(3.0, alias="BINANCE_WS_STALL_THRESHOLD_SECONDS")  # 3s silence = stall
+    stall_max_consecutive: int = Field(3, alias="BINANCE_WS_STALL_MAX_CONSECUTIVE")  # 3 consecutive = reconnect
 
     # Connection validation - 1% için BTC, ETH, SOL
     validate_ohlc_relationship: bool = Field(True, alias="BINANCE_WS_VALIDATE_OHLC")

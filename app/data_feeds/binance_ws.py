@@ -14,7 +14,7 @@ from app.data_feeds.constants import HEALTH_CHANNEL, KLINE_CHANNEL
 from app.utils.latency import get_latency_tracker
 from app.utils.logging import get_logger
 from app.utils.price_cache import price_cache
-from app.utils.redis import publish, publish_safe
+from app.utils.redis import publish, publish_safe, publish_async
 
 
 settings = get_settings()
@@ -368,16 +368,18 @@ class BinanceWebSocketClient:
                                     self._symbol, self._total_messages, self._consecutive_rejections, self._last_valid_price or 0
                                 )
 
-                            # Use safe publish with local queue fallback
-                            publish_safe(
-                                KLINE_CHANNEL,
-                                {
-                                    "symbol": self._symbol,
-                                    "interval": self._interval,
-                                    "payload": data,
-                                    "received_at": datetime.utcnow().isoformat(),
-                                    "trace_id": trace_id,  # Pass trace_id for downstream tracking
-                                },
+                            # Fire-and-forget async publish (non-blocking)
+                            asyncio.create_task(
+                                publish_async(
+                                    KLINE_CHANNEL,
+                                    {
+                                        "symbol": self._symbol,
+                                        "interval": self._interval,
+                                        "payload": data,
+                                        "received_at": datetime.utcnow().isoformat(),
+                                        "trace_id": trace_id,  # Pass trace_id for downstream tracking
+                                    },
+                                )
                             )
 
                         except Exception as inner_exc:

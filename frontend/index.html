@@ -61,6 +61,89 @@
         .scrollbar-thin::-webkit-scrollbar-thumb:hover {
             background: rgba(255,255,255,0.3);
         }
+        /* Trade reasoning tooltip */
+        .trade-tooltip {
+            position: fixed;
+            z-index: 9999;
+            max-width: 400px;
+            padding: 12px 16px;
+            background: #10121a;
+            border: 1px solid #283139;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+            pointer-events: none;
+            opacity: 0;
+            transform: translateY(4px);
+            transition: opacity 0.15s ease, transform 0.15s ease;
+        }
+        .trade-tooltip.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .trade-tooltip-header {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: #8a8a8a;
+            margin-bottom: 6px;
+        }
+        .trade-tooltip-content {
+            font-size: 13px;
+            line-height: 1.5;
+            color: #e0e0e0;
+            word-wrap: break-word;
+        }
+        .trade-tooltip-section {
+            padding: 8px 0;
+            border-bottom: 1px solid #283139;
+        }
+        .trade-tooltip-section:last-child {
+            border-bottom: none;
+            padding-bottom: 0;
+        }
+        .trade-tooltip-section:first-child {
+            padding-top: 0;
+        }
+        .trade-tooltip-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .trade-tooltip-label {
+            font-size: 11px;
+            color: #8a8a8a;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .trade-tooltip-value {
+            font-size: 13px;
+            color: #e0e0e0;
+            font-weight: 500;
+        }
+        .trade-tooltip-badge {
+            display: inline-flex;
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .trade-tooltip-badge.buy { background: rgba(34, 197, 94, 0.2); color: #22c55e; }
+        .trade-tooltip-badge.sell { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
+        .trade-tooltip-badge.hold { background: rgba(156, 163, 175, 0.2); color: #9ca3af; }
+        .trade-tooltip-badge.close { background: rgba(99, 102, 241, 0.2); color: #6366f1; }
+        .trade-tooltip-metrics {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        .trade-row-hoverable {
+            cursor: pointer;
+            transition: background-color 0.15s ease;
+        }
+        .trade-row-hoverable:hover {
+            background-color: rgba(255, 255, 255, 0.03);
+        }
     </style>
 </head>
 <body class="bg-background-dark font-display text-text-light">
@@ -273,21 +356,329 @@
 </div>
 
 <script>
-// Configuration
-const API_BASE = window.location.hostname === 'localhost'
-    ? 'http://localhost:8001'
-    : `http://${window.location.hostname}:8001`;
-const WS_URL = window.location.hostname === 'localhost'
-    ? 'ws://localhost:8001/ws/portfolio'
-    : `ws://${window.location.hostname}:8001/ws/portfolio`;
+// Endpoint keşfi: aynı origin'i dener, gerekirse 8001 portuna geri döner, manuel override için window.dashboardConfig kullanabilirsiniz.
+const dashboardConfig = window.dashboardConfig || {};
+const DEFAULT_API_PORT = 8001;
+const DEV_PORTS = ['3000', '4173', '5173'];
+const FALLBACK_HOST = window.location.hostname || 'localhost';
+
+let API_BASE = '';
+let WS_URL = '';
+
+function uniq(list) {
+    return Array.from(new Set(list.filter(Boolean)));
+}
+
+function toWsUrl(baseUrl) {
+    const apiUrl = new URL(baseUrl);
+    const wsProto = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${wsProto}//${apiUrl.host}/ws/portfolio`;
+}
+
+async function pingEndpoint(baseUrl, timeoutMs = 2000) {
+    try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        const resp = await fetch(`${baseUrl}/api/health`, { signal: controller.signal });
+        clearTimeout(timer);
+        return resp.ok;
+    } catch (error) {
+        console.warn(`Health check failed for ${baseUrl}:`, error?.message || error);
+        return false;
+    }
+}
+
+async function testWebSocket(wsUrl, timeoutMs = 5000) {
+    return new Promise((resolve) => {
+        try {
+            const socket = new WebSocket(wsUrl);
+            let resolved = false;
+
+            const cleanup = () => {
+                if (!resolved) {
+                    resolved = true;
+                    // Suppress close errors by clearing handlers before closing
+                    socket.onopen = null;
+                    socket.onerror = null;
+                    socket.onclose = null;
+                    try { socket.close(); } catch (e) {}
+                }
+            };
+
+            const timer = setTimeout(() => {
+                cleanup();
+                resolve(false);
+            }, timeoutMs);
+
+            socket.onopen = () => {
+                clearTimeout(timer);
+                cleanup();
+                resolve(true);
+            };
+            socket.onerror = () => {
+                clearTimeout(timer);
+                cleanup();
+                resolve(false);
+            };
+            socket.onclose = () => {
+                // Ignore close events during test
+            };
+        } catch (error) {
+            resolve(false);
+        }
+    });
+}
+
+async function resolveApiBase() {
+    const candidates = [];
+    const loc = window.location;
+    const proto = loc.protocol && loc.protocol !== 'file:' ? loc.protocol : 'http:';
+    const host = loc.hostname || FALLBACK_HOST;
+
+    // 1) Explicit override
+    if (dashboardConfig.apiBase) {
+        candidates.push(dashboardConfig.apiBase);
+    }
+
+    // 2) Current origin FIRST (Nginx proxy arkasında doğru çalışır)
+    if (loc.origin && loc.origin !== 'null') {
+        candidates.push(loc.origin);
+    }
+
+    // 3) Port 8001 fallback (dev ortamı için)
+    candidates.push(`${proto}//${host}:${DEFAULT_API_PORT}`);
+
+    // 4) Fallback plain http
+    candidates.push(`http://${FALLBACK_HOST}:${DEFAULT_API_PORT}`);
+
+    const uniqueCandidates = uniq(candidates);
+
+    // Try WebSocket handshake first (best signal for streaming)
+    for (const base of uniqueCandidates) {
+        const wsUrl = toWsUrl(base);
+        const ok = false; // Skip WebSocket test - let persistent connection handle it
+        if (ok) {
+            return base;
+        }
+    }
+
+    // Fallback: try health check
+    for (const base of uniqueCandidates) {
+        const ok = await pingEndpoint(base);
+        if (ok) return base;
+    }
+
+    return uniqueCandidates[0];
+}
+
+async function initEndpoints() {
+    const base = await resolveApiBase();
+    API_BASE = base;
+    WS_URL = dashboardConfig.wsUrl || toWsUrl(base);
+    console.log('Dashboard endpoints resolved', { API_BASE, WS_URL });
+}
 
 // State
 let currentSymbol = null;
+
+// WebSocket connection state tracking
+let wsConnecting = false;
+let wsReconnectTimeout = null;
 let ws = null;
 let prices = {};
 let portfolioData = null;
 let cachedTrades = [];
 let cachedSignals = [];
+let activeTooltip = null;
+
+// Find matching signal INDEX for a trade (by symbol + amount + entry_price)
+// Returns index in cachedSignals array, or -1 if not found
+function findSignalIndexForTrade(trade) {
+    if (!cachedSignals || cachedSignals.length === 0) return -1;
+
+    // Match by symbol + amount + price (more reliable than timestamp)
+    return cachedSignals.findIndex(signal => {
+        // 1. Symbol exact match
+        if (signal.symbol !== trade.symbol) return false;
+
+        // 2. Amount exact match (float tolerance for precision)
+        const signalAmount = parseFloat(signal.amount) || 0;
+        const tradeAmount = parseFloat(trade.amount) || 0;
+        const amountMatch = Math.abs(signalAmount - tradeAmount) < 0.0001;
+        if (!amountMatch) return false;
+
+        // 3. Price match with slippage tolerance (0.5%)
+        const signalPrice = parseFloat(signal.current_price) || 0;
+        const tradePrice = parseFloat(trade.entry_price) || 0;
+        if (signalPrice === 0 || tradePrice === 0) return false;
+
+        const priceTolerance = tradePrice * 0.005; // 0.5% slippage tolerance
+        const priceMatch = Math.abs(signalPrice - tradePrice) < priceTolerance;
+
+        return priceMatch;
+    });
+}
+
+// Show trade tooltip with exit_plan info
+function showReasoningTooltip(event, signal, trade) {
+    hideReasoningTooltip(); // Remove any existing tooltip
+
+    // Trade verisini kullan (signal null olabilir)
+    const action = trade.side || 'HOLD';
+    const actionClass = action.toLowerCase() === 'buy' ? 'buy' :
+                        action.toLowerCase() === 'sell' ? 'sell' : 'hold';
+
+    const symbolDisplay = (trade.symbol || '').replace('USDT', '/USD');
+    const tradeTime = trade.timestamp ? formatTimeAgo(trade.timestamp) : '';
+
+    // Trade bilgileri
+    const amount = trade.amount || 0;
+    const entryPrice = trade.entry_price || 0;
+    const pnl = trade.pnl || 0;
+    const leverage = trade.leverage || 1;
+
+    // Exit plan bilgileri (trade'den)
+    const exitPlan = trade.exit_plan || {};
+    const stopLoss = exitPlan.stop_loss;
+    const profitTarget = exitPlan.profit_target;
+    const invalidation = exitPlan.invalidation_condition;
+
+    const tooltip = document.createElement('div');
+    tooltip.className = 'trade-tooltip';
+    tooltip.innerHTML = `
+        <!-- Header -->
+        <div class="trade-tooltip-section">
+            <div class="trade-tooltip-row">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span class="trade-tooltip-badge ${actionClass}">${action}</span>
+                    <span style="font-weight: 600; color: #fff;">${symbolDisplay}</span>
+                </div>
+                <span class="trade-tooltip-label">${tradeTime}</span>
+            </div>
+        </div>
+
+        <!-- Trade Details -->
+        <div class="trade-tooltip-section">
+            <div class="trade-tooltip-metrics">
+                <div>
+                    <div class="trade-tooltip-label">Amount</div>
+                    <div class="trade-tooltip-value">${amount.toFixed(4)}</div>
+                </div>
+                <div>
+                    <div class="trade-tooltip-label">Entry</div>
+                    <div class="trade-tooltip-value">${formatCurrency(entryPrice)}</div>
+                </div>
+                <div>
+                    <div class="trade-tooltip-label">PnL</div>
+                    <div class="trade-tooltip-value" style="color: ${pnl >= 0 ? '#22c55e' : '#ef4444'}">${pnl >= 0 ? '+' : ''}${formatCurrency(pnl)}</div>
+                </div>
+                <div>
+                    <div class="trade-tooltip-label">Leverage</div>
+                    <div class="trade-tooltip-value">${leverage}x</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Exit Plan -->
+        <div class="trade-tooltip-section">
+            <div class="trade-tooltip-metrics">
+                <div>
+                    <div class="trade-tooltip-label">Stop Loss</div>
+                    <div class="trade-tooltip-value" style="color: #ef4444">${stopLoss ? formatCurrency(stopLoss) : 'N/A'}</div>
+                </div>
+                <div>
+                    <div class="trade-tooltip-label">Target</div>
+                    <div class="trade-tooltip-value" style="color: #22c55e">${profitTarget ? formatCurrency(profitTarget) : 'N/A'}</div>
+                </div>
+            </div>
+        </div>
+
+        ${invalidation ? `
+        <!-- Exit Condition -->
+        <div class="trade-tooltip-section">
+            <div class="trade-tooltip-label" style="margin-bottom: 6px;">Exit Condition</div>
+            <div class="trade-tooltip-content">${invalidation}</div>
+        </div>
+        ` : ''}
+    `;
+    document.body.appendChild(tooltip);
+    activeTooltip = tooltip;
+
+    // Position tooltip near cursor
+    const rect = event.target.closest('tr').getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+
+    let left = event.clientX + 10;
+    let top = rect.top - tooltipRect.height - 8;
+
+    // Adjust if tooltip goes off screen
+    if (left + tooltipRect.width > window.innerWidth) {
+        left = window.innerWidth - tooltipRect.width - 10;
+    }
+    if (top < 10) {
+        top = rect.bottom + 8;
+    }
+
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+
+    // Trigger animation
+    requestAnimationFrame(() => {
+        tooltip.classList.add('visible');
+    });
+}
+
+// Hide reasoning tooltip
+function hideReasoningTooltip() {
+    if (activeTooltip) {
+        activeTooltip.remove();
+        activeTooltip = null;
+    }
+}
+
+// Polling fallback state
+let wsConnected = false;
+let wsFailCount = 0;
+let pollingInterval = null;
+const POLLING_INTERVAL_MS = 3000; // 3 seconds when WS fails
+
+// HTTP Polling fallback for prices
+async function pollPrices() {
+    if (wsConnected) return; // Skip if WebSocket is working
+
+    try {
+        const symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'];
+        for (const symbol of symbols) {
+            const resp = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+            if (resp.ok) {
+                const data = await resp.json();
+                updatePrice(symbol, parseFloat(data.price));
+            }
+        }
+    } catch (error) {
+        console.warn('Price polling error:', error.message);
+    }
+}
+
+// Start/stop polling based on WebSocket status
+function startPolling() {
+    if (pollingInterval) return;
+    console.log('Starting HTTP polling fallback (WebSocket unavailable)');
+    pollingInterval = setInterval(() => {
+        pollPrices();
+        fetchPortfolio();
+    }, POLLING_INTERVAL_MS);
+    // Also poll immediately
+    pollPrices();
+}
+
+function stopPolling() {
+    if (pollingInterval) {
+        console.log('Stopping HTTP polling (WebSocket connected)');
+        clearInterval(pollingInterval);
+        pollingInterval = null;
+    }
+}
 
 // Format currency
 function formatCurrency(value) {
@@ -461,8 +852,9 @@ function updateTradesTable(trades) {
         const pnlClass = (trade.pnl || 0) >= 0 ? 'text-profit' : 'text-loss';
         const pnlSign = (trade.pnl || 0) >= 0 ? '+' : '';
 
+        // Her satıra hover class ekle - signal eşleştirmesi hover zamanında yapılacak
         return `
-            <tr class="${borderClass}">
+            <tr class="${borderClass} trade-row-hoverable" data-trade-index="${index}">
                 <td class="px-6 py-4 font-medium text-text-light whitespace-nowrap">${trade.symbol.replace('USDT', '/USD')}</td>
                 <td class="px-6 py-4 ${sideClass}">${trade.side}</td>
                 <td class="px-6 py-4 text-right">${trade.amount.toFixed(4)}</td>
@@ -472,6 +864,21 @@ function updateTradesTable(trades) {
             </tr>
         `;
     }).join('');
+
+    // Add hover event listeners for tooltip - use trade's exit_plan data directly
+    tbody.querySelectorAll('.trade-row-hoverable').forEach(row => {
+        row.addEventListener('mouseenter', (e) => {
+            const tradeIndex = parseInt(row.dataset.tradeIndex);
+            if (isNaN(tradeIndex) || !cachedTrades[tradeIndex]) return;
+
+            const trade = cachedTrades[tradeIndex];
+            // Signal aramaya gerek yok - trade.exit_plan verisini doğrudan kullan
+            showReasoningTooltip(e, null, trade);
+        });
+        row.addEventListener('mouseleave', () => {
+            hideReasoningTooltip();
+        });
+    });
 }
 
 // Fetch equity curve
@@ -646,20 +1053,60 @@ function updatePortfolioUIForSymbol(symbol) {
 }
 
 // WebSocket connection
+let pingInterval = null;
+
 function connectWebSocket() {
+    if (wsConnecting) {
+        console.log('Already connecting...');
+        return;
+    }
     if (ws && ws.readyState === WebSocket.OPEN) {
         return;
     }
+    wsConnecting = true;
 
+    // Clear any pending reconnect
+    if (wsReconnectTimeout) {
+        clearTimeout(wsReconnectTimeout);
+        wsReconnectTimeout = null;
+    }
+
+    console.log('Attempting WebSocket connection to:', WS_URL);
     ws = new WebSocket(WS_URL);
 
+    // Connection timeout - if not connected in 10 seconds, consider it failed
+    const connectionTimeout = setTimeout(() => {
+        if (ws && ws.readyState !== WebSocket.OPEN) {
+            console.log('WebSocket connection timeout');
+            ws.close();
+        }
+    }, 10000);
+
     ws.onopen = () => {
-        console.log('WebSocket connected');
+        clearTimeout(connectionTimeout);
+        console.log('WebSocket connected successfully!');
+        wsConnected = true;
+        wsConnecting = false; // Connection established
+        wsFailCount = 0;
+        stopPolling(); // Stop HTTP polling since WS is working
         updateConnectionStatus(true);
+
+        // IMPORTANT: Send immediate ping to prevent Cloudflare timeout
+        ws.send(JSON.stringify({ action: 'ping' }));
+
+        // Then subscribe to symbols
         ws.send(JSON.stringify({
             action: 'subscribe',
             symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
         }));
+
+        // Start heartbeat at 20 seconds (reduced from 25)
+        if (pingInterval) clearInterval(pingInterval);
+        pingInterval = setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: 'ping' }));
+            }
+        }, 20000); // Cloudflare timeout is 100s, so 20s gives us 5 pings buffer
     };
 
     ws.onmessage = (event) => {
@@ -667,6 +1114,8 @@ function connectWebSocket() {
             const data = JSON.parse(event.data);
             if (data.type === 'price_update') {
                 updatePrice(data.symbol, data.price);
+            } else if (data.type === 'pong') {
+                // Heartbeat response - connection is alive
             } else if (data.type === 'new_signal') {
                 // Real-time signal update
                 console.log('New signal received:', data.signal);
@@ -682,13 +1131,34 @@ function connectWebSocket() {
     };
 
     ws.onclose = () => {
+        clearTimeout(connectionTimeout);
         console.log('WebSocket disconnected');
+        wsConnected = false;
+        wsConnecting = false; // Connection lost
+        wsFailCount++;
         updateConnectionStatus(false);
-        setTimeout(connectWebSocket, 5000);
+        if (pingInterval) {
+            clearInterval(pingInterval);
+            pingInterval = null;
+        }
+
+        // Start polling fallback after 2 consecutive failures
+        if (wsFailCount >= 2 && !pollingInterval) {
+            console.log(`WebSocket failed ${wsFailCount} times, starting HTTP polling fallback`);
+            startPolling();
+        }
+
+        // Exponential backoff reconnection
+        const retryDelay = Math.min(5000 * wsFailCount, 30000);
+        console.log(`Retrying WebSocket in ${retryDelay/1000}s...`);
+        wsReconnectTimeout = setTimeout(connectWebSocket, retryDelay);
     };
 
     ws.onerror = (error) => {
+        clearTimeout(connectionTimeout);
         console.error('WebSocket error:', error);
+        wsConnected = false;
+        wsConnecting = false; // Connection failed
         updateConnectionStatus(false);
     };
 }
@@ -696,7 +1166,6 @@ function connectWebSocket() {
 // Update price from WebSocket
 function updatePrice(symbol, price) {
     prices[symbol] = price;
-    console.log(`Price update: ${symbol} = ${price}, cachedTrades: ${cachedTrades.length}`);
 
     // Update price display
     const priceEl = document.getElementById(`price-${symbol}`);
@@ -711,10 +1180,11 @@ function updatePrice(symbol, price) {
             position.current_price = price;
             position.unrealized_pnl = (price - position.entry_price) * position.position;
             position.unrealized_pnl_pct = ((price - position.entry_price) / position.entry_price) * 100;
+            position.equity = 10000 + (position.realized_pnl || 0) + position.unrealized_pnl;
 
             // Recalculate totals
             portfolioData.total_unrealized_pnl = portfolioData.symbols.reduce((sum, s) => sum + (s.unrealized_pnl || 0), 0);
-            portfolioData.total_equity = 10000 + portfolioData.total_realized_pnl + portfolioData.total_unrealized_pnl;
+            portfolioData.total_equity = 30000 + portfolioData.total_realized_pnl + portfolioData.total_unrealized_pnl;
 
             updatePortfolioUI(portfolioData);
         }
@@ -727,7 +1197,6 @@ function updatePrice(symbol, price) {
 // Update PnL for open trades when price changes
 function updateOpenTradesPnL(symbol, currentPrice) {
     if (!cachedTrades || cachedTrades.length === 0) {
-        console.log('updateOpenTradesPnL: No cached trades');
         return;
     }
 
@@ -737,11 +1206,8 @@ function updateOpenTradesPnL(symbol, currentPrice) {
         if (trade.symbol === symbol && !trade.close_price) {
             // PnL = (current_price - entry_price) * amount * direction - fees
             const direction = trade.side === 'BUY' ? 1 : -1;
-            const oldPnl = trade.pnl;
-            const fees = trade.fees || 0;
-            trade.pnl = (currentPrice - trade.entry_price) * trade.amount * direction - fees;
+            trade.pnl = (currentPrice - trade.entry_price) * trade.amount * direction;
             trade.current_price = currentPrice;  // Store current price for display
-            console.log(`PnL updated for ${symbol}: ${oldPnl?.toFixed(2)} -> ${trade.pnl.toFixed(2)} (price: ${currentPrice}, fees: ${fees})`);
             updated = true;
         }
     });
@@ -754,7 +1220,8 @@ function updateOpenTradesPnL(symbol, currentPrice) {
 // Fetch GLM signals from API
 async function fetchGLMSignals() {
     try {
-        const response = await fetch(`${API_BASE}/api/signals/recent?limit=10`);
+        // Fetch more signals (7 days, 100 limit) for better trade-signal matching
+        const response = await fetch(`${API_BASE}/api/signals/recent?limit=100&days=7`);
         if (!response.ok) throw new Error('Failed to fetch signals');
 
         const data = await response.json();
@@ -823,6 +1290,22 @@ function handleNewTrade(trade) {
 
     const row = document.createElement('tr');
     row.className = 'border-b border-border-dark hover:bg-background-dark/50 transition-colors';
+
+    // Find matching signal for reasoning tooltip
+    const signal = findSignalForTrade(trade);
+    const reasoning = signal ? (signal.reasoning || signal.reason_primary || '') : '';
+    const hasReasoning = reasoning.length > 0;
+
+    if (hasReasoning) {
+        row.classList.add('trade-row-hoverable');
+        row.dataset.reasoning = reasoning;
+        row.addEventListener('mouseenter', (e) => {
+            showReasoningTooltip(e, reasoning);
+        });
+        row.addEventListener('mouseleave', () => {
+            hideReasoningTooltip();
+        });
+    }
 
     const pnl = trade.pnl || 0;
     const pnlClass = pnl >= 0 ? 'text-profit' : 'text-loss';
@@ -906,7 +1389,9 @@ function updateAIInsightsUI(signals) {
 }
 
 // Initialize
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    await initEndpoints();
+
     // Initial fetch
     fetchPortfolio();
     fetchTrades();
