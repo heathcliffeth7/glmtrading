@@ -263,28 +263,30 @@ def check_all_exit_conditions(
     current_price: float,
     exit_plan: dict,
     is_long: bool,
-    interval_label: str = "3m"
+    interval_label: str = "3m",
+    skip_invalidation: bool = True
 ) -> Tuple[bool, str, str]:
     """
-    Tüm exit koşullarını kontrol et (stop loss, invalidation)
-    
-    NOT: Profit target kontrolü kaldırılmıştır. Pozisyonlar sadece stop loss veya
-    invalidation condition tetiklendiğinde otomatik kapanır.
-    
+    Tüm exit koşullarını kontrol et (stop loss)
+
+    NOT: Profit target kontrolü kaldırılmıştır.
+    NOT: Invalidation condition artık 15m WebSocket listener tarafından kontrol edilir.
+          Bu fonksiyon varsayılan olarak invalidation'ı atlar (skip_invalidation=True).
+
     Args:
         entry_price: Giriş fiyatı
         current_price: Güncel fiyat (mum kapanışı)
         exit_plan: {profit_target, stop_loss, invalidation_condition}
         is_long: LONG pozisyon mu?
-        interval_label: Invalidation kontrolü için mum periyodu etiketi
-    
+        interval_label: Log etiket (artık kullanılmıyor)
+        skip_invalidation: True ise invalidation kontrolü atlanır (varsayılan: True)
+
     Returns:
         (should_close: bool, trigger_type: str, reason: str)
-        trigger_type: "stop_loss" | "invalidation" | ""
+        trigger_type: "stop_loss" | ""
     """
     stop_loss = exit_plan.get("stop_loss")
-    invalidation_condition = exit_plan.get("invalidation_condition", "")
-    
+
     # Profit target kontrolü kaldırıldı - GLM CLOSE kararı ile manuel kapatma yapılabilir
     profit_target = exit_plan.get("profit_target")
     if profit_target:
@@ -298,21 +300,25 @@ def check_all_exit_conditions(
                 current_price,
                 profit_target
             )
-    
+
     # 1. Stop Loss kontrolü
     if stop_loss and check_stop_loss(entry_price, current_price, stop_loss, is_long):
         return True, "stop_loss", f"Stop loss triggered: {stop_loss:.2f}"
-    
-    # 2. Invalidation Condition kontrolü
-    if invalidation_condition and invalidation_condition != "N/A":
-        triggered, reason = check_invalidation_condition(
-            current_price, 
-            invalidation_condition, 
-            is_long,
-            interval_label=interval_label
-        )
-        if triggered:
-            return True, "invalidation", reason
-    
+
+    # 2. Invalidation Condition kontrolü - VARSAYILAN OLARAK ATLA
+    # Invalidation artık 15m WebSocket listener tarafından kontrol ediliyor
+    # Böylece "15m candle" koşulu yanlışlıkla 3m'de tetiklenmez
+    if not skip_invalidation:
+        invalidation_condition = exit_plan.get("invalidation_condition", "")
+        if invalidation_condition and invalidation_condition != "N/A":
+            triggered, reason = check_invalidation_condition(
+                current_price,
+                invalidation_condition,
+                is_long,
+                interval_label=interval_label
+            )
+            if triggered:
+                return True, "invalidation", reason
+
     # Hiçbir koşul sağlanmadı
     return False, "", ""

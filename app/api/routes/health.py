@@ -40,12 +40,21 @@ async def database_health_check(db: Session = Depends(get_db)):
     except Exception as e:
         checks["influxdb"] = {"status": "error", "message": str(e)}
 
-    # Redis check
+    # Redis check (using connection pool from manager)
     try:
-        import redis
-        r = redis.from_url("redis://localhost:6379/0")
+        from app.utils.redis_manager import get_redis_manager
+        manager = get_redis_manager()
+        r = manager.get_sync_client()
         r.ping()
-        checks["redis"] = {"status": "connected"}
+
+        # Include pool metrics
+        metrics = manager.get_health_metrics()
+        checks["redis"] = {
+            "status": "connected",
+            "latency_ms": round(metrics.latency_ms, 2),
+            "circuit_breaker": metrics.circuit_breaker_state,
+            "connections": manager.get_connection_count(),
+        }
     except Exception as e:
         checks["redis"] = {"status": "error", "message": str(e)}
 

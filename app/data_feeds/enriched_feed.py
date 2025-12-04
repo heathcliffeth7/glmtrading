@@ -27,6 +27,39 @@ technical_analyzer = TechnicalAnalyzer()
 _indicator_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ta-calc")
 
 
+async def write_derivatives_to_influx(symbol: str, futures_data: Dict[str, Any], interval: str = "30m") -> None:
+    """
+    Write futures/derivatives data to separate InfluxDB measurement.
+    This allows direct querying of funding rate, open interest, and L/S ratio.
+
+    Args:
+        symbol: Trading symbol (e.g., BTCUSDT)
+        futures_data: Dict containing funding_rate, open_interest, long_short_ratio
+        interval: Time interval for tagging (required for InfluxDB query filtering)
+    """
+    try:
+        timestamp = datetime.utcnow()
+        write_measurement(
+            measurement="derivatives",
+            tags={'symbol': symbol, 'interval': interval},
+            fields={
+                'funding_rate': float(futures_data.get('funding_rate', 0.0)),
+                'open_interest': float(futures_data.get('open_interest', 0.0)),
+                'long_short_ratio': float(futures_data.get('long_short_ratio', 0.0)),
+            },
+            timestamp=timestamp,
+        )
+        logger.debug(
+            "✅ Wrote derivatives: symbol=%s fr=%.8f oi=%.2f lsr=%.4f",
+            symbol,
+            futures_data.get('funding_rate', 0),
+            futures_data.get('open_interest', 0),
+            futures_data.get('long_short_ratio', 0),
+        )
+    except Exception as e:
+        logger.warning("Failed to write derivatives measurement: %s", e)
+
+
 async def fetch_binance_klines(symbol: str, interval: str = "1m", limit: int = 200) -> List[Dict]:
     """
     Fetch historical klines from Binance Spot API
@@ -161,7 +194,10 @@ def calculate_indicators_from_klines(klines: List[Dict]) -> Dict[str, Any]:
 
             # ATR
             indicators['atr_14'] = technical_analyzer.calculate_atr(high_prices, low_prices, close_prices)
-        
+
+            # ADX - Trend Strength Indicator (>25 trending, <20 ranging)
+            indicators['adx_14'] = technical_analyzer.calculate_adx(high_prices, low_prices, close_prices, 14)
+
         # Note: Additional indicators (CCI, MFI, OBV) can be added here in the future
 # Currently using core technical indicators from our TechnicalAnalyzer
         
@@ -337,6 +373,15 @@ async def aggregate_enriched_data(
             'open_interest': futures_snapshot.open_interest,
             'funding_rate': futures_snapshot.funding_rate,
         })
+
+        # Write to separate derivatives measurement for direct querying
+        # Normalize interval format: 30min → 30m (to match query format in short_term.py)
+        normalized_interval = interval.replace("min", "m")
+        await write_derivatives_to_influx(symbol, {
+            'funding_rate': futures_snapshot.funding_rate,
+            'open_interest': futures_snapshot.open_interest,
+            'long_short_ratio': futures_snapshot.long_short_ratio,
+        }, interval=normalized_interval)
     except Exception as exc:
         logger.warning("Could not fetch futures metrics: %s", exc)
     

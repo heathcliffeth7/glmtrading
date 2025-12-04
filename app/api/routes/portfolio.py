@@ -47,19 +47,37 @@ async def get_portfolio_summary(db: Session = Depends(get_db)):
             Trade.close_price.isnot(None)
         ).scalar() or 0.0
 
+        # Hedge pozisyon bilgileri
+        long_pos = portfolio.long_position or 0.0
+        short_pos = abs(portfolio.short_position or 0.0)
+        long_entry = portfolio.long_avg_price or 0.0
+        short_entry = portfolio.short_avg_price or 0.0
+        is_hedged = long_pos > 0.0001 and short_pos > 0.0001
+
+        # LONG PnL hesapla
+        long_unrealized = 0.0
+        if long_pos > 0.0001 and current_price > 0 and long_entry > 0:
+            long_unrealized = (current_price - long_entry) * long_pos
+
+        # SHORT PnL hesapla
+        short_unrealized = 0.0
+        if short_pos > 0.0001 and current_price > 0 and short_entry > 0:
+            short_unrealized = (short_entry - current_price) * short_pos
+
+        # Net pozisyon hesapları
         if abs(portfolio.position) > 0.0001 and current_price > 0:
-            unrealized_pnl = (current_price - portfolio.average_price) * portfolio.position
+            unrealized_pnl = long_unrealized + short_unrealized
             unrealized_pnl_pct = (
                 ((current_price - portfolio.average_price) / portfolio.average_price) * 100
                 if portfolio.average_price > 0 else 0.0
             )
-            margin_used = abs(portfolio.position * portfolio.average_price) / 10  # Assuming 10x default
+            margin_used = abs(portfolio.position * portfolio.average_price) / 10
             position_side = "LONG" if portfolio.position > 0 else "SHORT"
         else:
-            unrealized_pnl = 0.0
+            unrealized_pnl = long_unrealized + short_unrealized
             unrealized_pnl_pct = 0.0
             margin_used = 0.0
-            position_side = "FLAT"
+            position_side = "FLAT" if not is_hedged else ("LONG" if portfolio.position >= 0 else "SHORT")
 
         # Bu sembolün equity'si = 10K + sembol PnL
         symbol_equity = INITIAL_CAPITAL_PER_SYMBOL + symbol_realized + unrealized_pnl
@@ -76,6 +94,14 @@ async def get_portfolio_summary(db: Session = Depends(get_db)):
             equity=round(symbol_equity, 2),
             margin_used=round(margin_used, 2),
             leverage=10.0,
+            # Hedge detayları
+            long_position=round(long_pos, 6),
+            long_entry_price=round(long_entry, 2),
+            long_unrealized_pnl=round(long_unrealized, 2),
+            short_position=round(short_pos, 6),
+            short_entry_price=round(short_entry, 2),
+            short_unrealized_pnl=round(short_unrealized, 2),
+            is_hedged=is_hedged,
         ))
 
     # Toplam değerler = tüm sembollerin toplamı

@@ -87,6 +87,7 @@ try:
     from app.indicators.volume_analyzer import VolumeAnalyzer
     from app.indicators.funding_analyzer import FundingRateAnalyzer, calculate_adx, interpret_adx
     from app.indicators.liquidation_analyzer import LiquidationAnalyzer
+    from app.indicators.entry_analyzer import EntryAnalyzer, EntryConfirmation, CandlePattern
     from app.risk_manager.time_filter import TimeBasedFilter
     from app.risk_manager.correlation_guard import CorrelationGuard
     from app.risk_manager.drawdown_manager import DrawdownManager
@@ -94,6 +95,9 @@ try:
     from app.risk_manager.partial_tp_manager import PartialTakeProfitManager
     from app.risk_manager.trailing_stop import AdvancedTrailingStop
     from app.risk_manager.breakeven_manager import BreakevenManager
+    # v2.0: Hold Decision & Time Exit Managers
+    from app.risk_manager.hold_decision_engine import HoldDecisionEngine
+    from app.risk_manager.time_exit_manager import TimeBasedExitManager
     ENHANCED_FEATURES_AVAILABLE = True
 except ImportError as e:
     ENHANCED_FEATURES_ERRORS.append(str(e))
@@ -101,12 +105,14 @@ except ImportError as e:
 
 logger = logging.getLogger(__name__)
 
-# Dynamic risk parameters - ATR-based calculations instead of hard-coded dictionaries
-_MODE_PARAMS = {
-    "swing": {"sl_base": 1.5, "tp_rr": 2.5, "max_lev": 7},
-    "scalp": {"sl_base": 0.5, "tp_rr": 2.0, "max_lev": 15},
+# Dynamic risk parameters - Volatility-based (no swing/scalp modes)
+# Düşük volatilite = dar SL/TP + yüksek R:R, Yüksek volatilite = geniş SL/TP + düşük R:R
+_VOLATILITY_PARAMS = {
+    "low":     {"sl_mult": 0.8, "tp_rr": 2.0, "max_lev": 10},  # Dar piyasa - daha sıkı
+    "medium":  {"sl_mult": 1.0, "tp_rr": 1.8, "max_lev": 8},   # Normal
+    "high":    {"sl_mult": 1.2, "tp_rr": 1.5, "max_lev": 6},   # Volatil
+    "extreme": {"sl_mult": 1.5, "tp_rr": 1.3, "max_lev": 4},   # Çok volatil
 }
-_REGIME_INTENSITY = {"low": 0.8, "medium": 1.0, "high": 1.4, "extreme": 2.0}
 
 
 # =============================================================================
@@ -180,44 +186,14 @@ class Nof1PromptBuilder:
     """Builds NOF1.AI style prompts with full market context"""
 
     # =============================================================================
-    # HARD RULES - GLM Elite Swing Trader Framework
+    # FEW-SHOT TRAINING BLOCK - DEVRE DISI (GLM ozgur birakiliyor)
     # =============================================================================
-    HARD_RULES_BLOCK = """
-================================================================================
-DEGİŞTİRİLEMEZ KURALLAR (HARD RULES)
-================================================================================
+    FEW_SHOT_TRAINING = ''
 
-1. SL/TP TETİKLENMEDEN CLOSE VERİLMEZ
-   - Stop Loss fiyatına ulaşılmadıysa → HOLD
-   - Take Profit fiyatına ulaşılmadıysa → HOLD
-   - "Belirsizlik" gerekçesiyle kapatma YASAK
-
-2. MİNİMUM 4 SAAT HOLD SÜRESİ
-   - Pozisyon açıldıktan sonra 4 saat geçmeden CLOSE verilemez
-   - Exception: Sadece SL hit durumunda immediate close
-
-3. TEZ GEÇERSİZLİĞİ TANIMLI OLMALI
-   - CLOSE vermek için thesis invalidation level belirlenmeli
-   - "MTF çelişkili" = Normal volatilite, CLOSE değil
-   - 15M/30M noise CLOSE gerekçesi OLAMAZ
-
-4. FEE BREAK-EVEN KONTROLÜ
-   - |PnL| < %0.15 ise CLOSE verilmez (fee maliyeti)
-
-5. CLOSE İÇİN exit_validation ZORUNLU
-   - Geçerli değerler: SL_HIT, TP_HIT, THESIS_INVALID
-   - N/A veya belirtilmezse → HOLD verilmeli
-
-ÇIKIŞ KARARI CHECKLIST (CLOSE vermeden önce):
-□ SL fiyatına ulaşıldı mı?
-□ TP fiyatına ulaşıldı mı?
-□ 4H candle BODY invalidation altında KAPANDI mı?
-□ Hold süresi 4 saatten fazla mı?
-□ |PnL| > %0.15 mi?
-
-Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
-================================================================================
-"""
+    # =============================================================================
+    # HARD RULES - DEVRE DISI (GLM ozgur birakiliyor)
+    # =============================================================================
+    HARD_RULES_BLOCK = ""
 
     # Loss management multipliers for consecutive losses
     LOSS_MANAGEMENT = {
@@ -267,37 +243,28 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
         # How much raw series to show if needed
         self._series_tail = 6  # keep tiny to avoid token blowups
 
-        # Load swing trade mode from settings
-        self._settings = get_settings()  # Store settings reference for override checks
-        self._swing_mode = getattr(self._settings, 'swing_trade_mode', False)
-        self._swing_max_leverage = getattr(self._settings, 'swing_max_leverage', 7)
+        # Settings reference
+        self._settings = get_settings()
 
-        # Primary timeframe selection based on mode
-        self._primary_tf = "4h" if self._swing_mode else "30m"
+        # Primary timeframe - 4H for stability (no swing/scalp modes anymore)
+        self._primary_tf = "4h"
 
-        # MTF alignment weights (swing: 4H/1D heavy, scalp: equal)
-        if self._swing_mode:
-            self._mtf_weights = {
-                "1d": 3.0,    # Most important - big picture
-                "4h": 2.5,    # Primary TF
-                "1h": 1.5,    # Intermediate
-                "30m": 0.5,   # Low weight - noise
-                "15m": 0.2,   # Very low
-                "5m": 0.1,    # Almost ignore
-                "1m": 0.0,    # Ignore
-            }
-        else:
-            self._mtf_weights = {tf: 1.0 for tf in ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]}
+        # MTF alignment weights - HTF dominant for direction
+        self._mtf_weights = {
+            "1d": 4.0,    # Dominant - big picture trend
+            "4h": 3.0,    # Primary TF
+            "1h": 1.5,    # Secondary confirmation
+            "30m": 0.0,   # ZERO - noise, ignore
+            "15m": 0.0,   # ZERO - noise, ignore
+            "5m": 0.0,    # ZERO - ignore
+            "1m": 0.0,    # ZERO - ignore
+        }
 
-        # Log trading mode (risk params now calculated dynamically via _MODE_PARAMS)
-        if self._swing_mode:
-            logger.info("📊 Nof1PromptBuilder: SWING TRADE MODE enabled (primary TF: %s, max leverage: %dx)", self._primary_tf, self._swing_max_leverage)
-        else:
-            logger.info("📊 Nof1PromptBuilder: SCALP TRADE MODE (default)")
+        # Log trading mode (volatility-based, no swing/scalp)
+        logger.info("📊 Nof1PromptBuilder: VOLATILITY-BASED MODE (primary TF: %s)", self._primary_tf)
 
         # Initialize Enhanced Features
         self._enhanced_features_enabled = ENHANCED_FEATURES_AVAILABLE
-        mode = "swing" if self._swing_mode else "scalp"
 
         # SECURITY: Check if enhanced features are required but unavailable
         if self._settings.security.require_enhanced_features and not ENHANCED_FEATURES_AVAILABLE:
@@ -317,17 +284,22 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
 
         if self._enhanced_features_enabled:
             try:
-                self._volume_analyzer = VolumeAnalyzer(mode=mode)
-                self._funding_analyzer = FundingRateAnalyzer(mode=mode)
-                self._liquidation_analyzer = LiquidationAnalyzer(mode=mode)
-                self._time_filter = TimeBasedFilter(mode=mode)
-                self._correlation_guard = CorrelationGuard(mode=mode)
-                self._drawdown_manager = DrawdownManager(initial_equity=10000.0, mode=mode)
-                self._position_sizer = DynamicPositionSizer(mode=mode)
-                self._partial_tp_manager = PartialTakeProfitManager(mode=mode)
-                self._trailing_stop_manager = AdvancedTrailingStop(mode=mode)
-                self._breakeven_manager = BreakevenManager(mode=mode)
-                logger.info("✅ Enhanced features initialized | Mode: %s", mode)
+                # Volatility-based mode - no swing/scalp distinction
+                self._volume_analyzer = VolumeAnalyzer()
+                self._funding_analyzer = FundingRateAnalyzer()
+                self._liquidation_analyzer = LiquidationAnalyzer()
+                self._entry_analyzer = EntryAnalyzer()
+                self._time_filter = TimeBasedFilter()
+                self._correlation_guard = CorrelationGuard()
+                self._drawdown_manager = DrawdownManager(initial_equity=10000.0)
+                self._position_sizer = DynamicPositionSizer()
+                self._partial_tp_manager = PartialTakeProfitManager()
+                self._trailing_stop_manager = AdvancedTrailingStop()
+                self._breakeven_manager = BreakevenManager()
+                # v2.0: Hold Decision & Time Exit Managers
+                self._hold_engine = HoldDecisionEngine()
+                self._time_exit_manager = TimeBasedExitManager(weekend_rule_enabled=True)
+                logger.info("✅ Enhanced features initialized (volatility-based)")
             except Exception as e:
                 logger.error("Failed to initialize enhanced features: %s", e)
                 self._enhanced_features_enabled = False
@@ -543,37 +515,34 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
 
         rel = max(vol_ratio, atr_ratio)
 
-        # Relative intensity + absolute ATR% guard rails
-        if rel < 0.85 and atr_pct < 1.0:
+        # v3.3: Eşikler %20 artırıldı - "Extreme" uyarısı zorlaştırıldı
+        if rel < 0.9 and atr_pct < 1.2:
             return "low"
-        if rel < 1.25 and atr_pct < 1.8:
+        if rel < 1.5 and atr_pct < 2.5:  # Eskiden 1.25 ve 1.8'di
             return "medium"
-        if rel < 1.9 and atr_pct < 3.0:
+        if rel < 2.5 and atr_pct < 4.0:  # Eskiden 1.9 ve 3.0'dı
             return "high"
         return "extreme"
 
     def _sl_distance_bounds(self, atr_pct: float, vol: float, position_side: Optional[str] = None) -> Tuple[float, float, str]:
-        """ATR-based dynamic SL calculation (replaces hard-coded dictionary)"""
+        """Volatility-based dynamic SL calculation (no swing/scalp modes)"""
         if vol is None:
             vol = 0.5
         if atr_pct is None or atr_pct <= 0:
             atr_pct = 1.0  # Default fallback
 
         regime = self._vol_regime_key()
-        mode = "swing" if self._swing_mode else "scalp"
-        params = _MODE_PARAMS[mode]
-        intensity = _REGIME_INTENSITY[regime]
+        params = _VOLATILITY_PARAMS[regime]
 
-        side_mult = 1.2 if position_side == "SHORT" else 1.0
+        side_mult = 1.0  # Eşit muamele: SHORT ve LONG için aynı SL multiplier
 
-        # Min SL: ATR × base × intensity × side
-        min_distance_pct = atr_pct * params["sl_base"] * intensity * side_mult
+        # SL: ATR × sl_mult × side
+        min_distance_pct = atr_pct * params["sl_mult"] * side_mult
         min_distance_pct = max(min_distance_pct, 0.3)  # Floor: 0.3%
 
-        # Max SL: ATR × max_mult × intensity
-        max_mult = 3.0 if self._swing_mode else 2.0
-        max_cap = 15.0 if self._swing_mode else 8.0
-        max_distance_pct = atr_pct * max_mult * intensity
+        # Max SL: ATR × 1.5 (cap based on regime) - daha sıkı risk kontrolü
+        max_cap = 3.0 if regime in ["high", "extreme"] else 2.5
+        max_distance_pct = atr_pct * 1.5
         max_distance_pct = min(max_distance_pct, max_cap)
 
         # Ensure min <= max
@@ -583,29 +552,26 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
         return min_distance_pct, max_distance_pct, regime
 
     def _tp_distance_bounds(self, atr_pct: float, vol: float, sl_min: Optional[float] = None) -> Tuple[float, float, str]:
-        """ATR-based dynamic TP calculation with R:R ratio from SL (replaces hard-coded dictionary)"""
+        """Volatility-based dynamic TP calculation with R:R ratio (no swing/scalp modes)"""
         if vol is None:
             vol = 0.5
         if atr_pct is None or atr_pct <= 0:
             atr_pct = 1.0  # Default fallback
 
         regime = self._vol_regime_key()
-        mode = "swing" if self._swing_mode else "scalp"
-        params = _MODE_PARAMS[mode]
-        intensity = _REGIME_INTENSITY[regime]
+        params = _VOLATILITY_PARAMS[regime]
 
         # Min TP: SL × R:R ratio (ensures consistent risk/reward)
         if sl_min and sl_min > 0:
             min_tp_pct = sl_min * params["tp_rr"]
         else:
             # Fallback: ATR-based
-            min_tp_pct = atr_pct * params["sl_base"] * params["tp_rr"] * intensity
+            min_tp_pct = atr_pct * params["sl_mult"] * params["tp_rr"]
         min_tp_pct = max(min_tp_pct, 0.6)  # Floor: 0.6%
 
-        # Max TP: ATR × max_mult × intensity
-        max_mult = 5.0 if self._swing_mode else 3.0
-        max_cap = 30.0 if self._swing_mode else 15.0
-        max_tp_pct = atr_pct * max_mult * intensity
+        # Max TP: ATR × 2 (cap based on regime) - daha gerçekçi hedefler
+        max_cap = 5.0 if regime in ["high", "extreme"] else 4.0
+        max_tp_pct = atr_pct * 2.0
         max_tp_pct = min(max_tp_pct, max_cap)
 
         # Ensure min <= max
@@ -615,23 +581,20 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
         return min_tp_pct, max_tp_pct, regime
 
     def _recommended_leverage_cap(self, vol: float, position_side: Optional[str] = None) -> Tuple[int, str]:
-        """Dynamic leverage cap based on regime intensity (replaces hard-coded dictionary)"""
+        """Volatility-based dynamic leverage cap (no swing/scalp modes)"""
         regime = self._vol_regime_key()
-        mode = "swing" if self._swing_mode else "scalp"
-        base = _MODE_PARAMS[mode]["max_lev"]
-        intensity = _REGIME_INTENSITY[regime]
+        params = _VOLATILITY_PARAMS[regime]
+        cap = params["max_lev"]
 
-        # Cap = base / intensity (higher volatility = lower leverage)
-        cap = int(base / intensity)
+        # Eşit muamele: SHORT için leverage cezası kaldırıldı
+        # if position_side == "SHORT":
+        #     cap = int(cap * 0.9)
 
-        if position_side == "SHORT":
-            cap = int(cap * 0.9)  # Slightly lower leverage for shorts
-
-        # Performance-based reduction (REDUCED PENALTY for larger positions)
+        # Performance-based reduction
         if self._consecutive_losses >= 2:
-            cap = min(cap, 5)  # Increased from 3x to 5x - less aggressive
+            cap = min(cap, 5)
         if self._recent_win_rate <= 0.4 and len(self._performance_history) >= 5:
-            cap = min(cap, 6)  # Increased from 4x to 6x
+            cap = min(cap, 6)
 
         cap = max(1, min(cap, 20))
         return cap, regime
@@ -651,8 +614,9 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
             rr += 0.2  # Reduced from 0.5 - less aggressive penalty
         if self._recent_win_rate <= 0.4 and len(self._performance_history) >= 5:
             rr += 0.15  # Reduced from 0.3
-        if position_side == "SHORT":
-            rr += 0.2
+        # Eşit muamele: SHORT için R:R cezası kaldırıldı
+        # if position_side == "SHORT":
+        #     rr += 0.2
 
         return rr
 
@@ -688,7 +652,7 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
         )
 
     # ---------------------------------------------------------------------
-    # Market structure via pivots (fractal ZigZag-lite)
+    # Market structure via pivots - DELEGATED TO EntryAnalyzer (v4.0)
     # ---------------------------------------------------------------------
     def _detect_pivots(
         self,
@@ -697,80 +661,18 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
         window: int = 2,
         min_move_pct: float = 0.25
     ) -> List[Tuple[int, str, float]]:
-        pivots: List[Tuple[int, str, float]] = []
-        n = len(highs)
-        if n < (2 * window + 1):
-            return pivots
-
-        for i in range(window, n - window):
-            hi = highs[i]
-            lo = lows[i]
-            is_ph = all(hi > highs[j] for j in range(i - window, i + window + 1) if j != i)
-            is_pl = all(lo < lows[j] for j in range(i - window, i + window + 1) if j != i)
-
-            if is_ph:
-                pivots.append((i, "H", hi))
-            if is_pl:
-                pivots.append((i, "L", lo))
-
-        pivots.sort(key=lambda x: x[0])
-        filtered: List[Tuple[int, str, float]] = []
-        last_type = None
-        last_price = None
-
-        for idx, ptype, price in pivots:
-            if last_type is None:
-                filtered.append((idx, ptype, price))
-                last_type = ptype
-                last_price = price
-                continue
-
-            if ptype == last_type:
-                if (ptype == "H" and price > last_price) or (ptype == "L" and price < last_price):
-                    filtered[-1] = (idx, ptype, price)
-                    last_price = price
-                continue
-
-            move_pct = abs(price - last_price) / max(1e-9, last_price) * 100
-            if move_pct >= min_move_pct:
-                filtered.append((idx, ptype, price))
-                last_type = ptype
-                last_price = price
-
-        return filtered
+        """Delegate to EntryAnalyzer"""
+        if self._enhanced_features_enabled and hasattr(self, '_entry_analyzer'):
+            return self._entry_analyzer.detect_pivots(highs, lows, window, min_move_pct)
+        return []
 
     def _analyze_market_structure(self, hist_data: Dict[str, List[float]]) -> str:
-        if not hist_data or "high" not in hist_data or "low" not in hist_data:
-            return "UNKNOWN"
-
-        highs = hist_data["high"]
-        lows = hist_data["low"]
-
-        atr_pct = self._current_atr_pct or 0.0
-        vol = self._current_volatility or 0.5
-        min_move_pct = max(0.25, atr_pct * 0.3)
-
-        pivots = self._detect_pivots(highs, lows, window=2, min_move_pct=min_move_pct)
-        if len(pivots) < 4:
-            return "NEUTRAL (Insufficient pivots)"
-
-        swing_highs = [p for p in pivots if p[1] == "H"]
-        swing_lows = [p for p in pivots if p[1] == "L"]
-
-        if len(swing_highs) < 2 or len(swing_lows) < 2:
-            return "NEUTRAL (Incomplete swings)"
-
-        h1 = swing_highs[-2][2]
-        h2 = swing_highs[-1][2]
-        l1 = swing_lows[-2][2]
-        l2 = swing_lows[-1][2]
-
-        if h2 > h1 and l2 > l1:
-            return "BULLISH (Swing HH + HL)"
-        if h2 < h1 and l2 < l1:
-            return "BEARISH (Swing LH + LL)"
-
-        return "NEUTRAL (Mixed swings)"
+        """Delegate to EntryAnalyzer"""
+        if self._enhanced_features_enabled and hasattr(self, '_entry_analyzer'):
+            atr_pct = self._current_atr_pct or 0.0
+            vol = self._current_volatility or 0.5
+            return self._entry_analyzer.analyze_market_structure(hist_data, atr_pct, vol)
+        return "UNKNOWN"
 
     # ---------------------------------------------------------------------
     # PRE-CALCULATED ANALYSIS (Token Optimization)
@@ -892,125 +794,49 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
         elif regime_type == "RANGE":
             return "📦 REJİM: YATAY PİYASA - Destek/direnç seviyelerinde işlem, ortada HOLD, breakout bekle."
         else:  # CHOPPY
-            return "⚠️ REJİM: DALGALI - İşlem açmaktan KAÇIN, net trend bekle. Sadece confidence > 90% için gir."
+            return "⚠️ REJİM: DALGALI - İşlem açmaktan KAÇIN, net trend bekle. Sadece çok yüksek confidence için gir."
 
-    def _calculate_entry_quality(self, data_primary: Dict, mtf_alignment: Dict) -> Dict:
-        """Calculate entry quality score based on multiple factors (uses primary TF data)"""
-        score = 0
-        factors = []
+    def _check_liquidity_sweep(self, data_primary: Dict, mtf_alignment: Dict) -> bool:
+        """Delegate to EntryAnalyzer (v4.0)"""
+        if self._enhanced_features_enabled and hasattr(self, '_entry_analyzer'):
+            return self._entry_analyzer.check_liquidity_sweep(
+                close=data_primary.get("close", 0),
+                low=data_primary.get("low", 0),
+                high=data_primary.get("high", 0),
+                prev_swing_low=data_primary.get("prev_swing_low", data_primary.get("low", 0)),
+                prev_swing_high=data_primary.get("prev_swing_high", data_primary.get("high", 0)),
+                alignment=mtf_alignment.get("alignment", "")
+            )
+        return False
 
-        # Factor 1: MTF Alignment (max 30 points)
-        alignment = mtf_alignment.get("alignment", "UNKNOWN")
-        if alignment in ["STRONG_BULLISH", "STRONG_BEARISH"]:
-            score += 30
-            factors.append("Strong MTF alignment (+30)")
-        elif alignment in ["WEAK_BULLISH", "WEAK_BEARISH"]:
-            score += 15
-            factors.append("Weak MTF alignment (+15)")
-
-        # Factor 2: RSI not extreme (max 20 points)
+    def _generate_narrative(self, data_primary: Dict) -> str:
+        """
+        v4.0: Contextual Data Points (No Judgments)
+        Sadece ham veri, yorum GLM'e birakilir.
+        """
         rsi = data_primary.get("rsi_14", 50)
-        if 35 <= rsi <= 65:
-            score += 20
-            factors.append(f"RSI healthy zone ({rsi:.0f}) (+20)")
-        elif 25 <= rsi <= 75:
-            score += 10
-            factors.append(f"RSI moderate ({rsi:.0f}) (+10)")
-
-        # Factor 3: Price near EMA (max 25 points)
+        adx = data_primary.get("adx_14", 0)
         close = data_primary.get("close", 0)
         ema20 = data_primary.get("ema_20", 0)
-        if ema20 > 0 and close > 0:
-            dist = abs(close - ema20) / ema20 * 100
-            if dist < 0.5:
-                score += 25
-                factors.append(f"Price at EMA20 ({dist:.1f}%) (+25)")
-            elif dist < 1.0:
-                score += 15
-                factors.append(f"Price near EMA20 ({dist:.1f}%) (+15)")
 
-        # Factor 4: Volatility regime (max 25 points)
-        regime = self._vol_regime_key()
-        if regime in ["low", "medium"]:
-            score += 25
-            factors.append(f"Good vol regime ({regime}) (+25)")
-        elif regime == "high":
-            score += 10
-            factors.append(f"High vol regime (+10)")
+        # EMA mesafesi hesapla (yorum yok)
+        ema_dist_pct = ((close - ema20) / ema20 * 100) if ema20 > 0 else 0
 
-        # Grade
-        if score >= 80:
-            grade = "A+"
-        elif score >= 60:
-            grade = "A"
-        elif score >= 40:
-            grade = "B"
-        elif score >= 20:
-            grade = "C"
-        else:
-            grade = "D"
-
-        return {
-            "score": score,
-            "grade": grade,
-            "factors": factors,
-        }
+        return f"""
+CONTEXTUAL METRICS:
+• RSI Level: {rsi:.1f} (Reference: <30 oversold, >70 overbought)
+• ADX Strength: {adx:.1f} (Reference: >25 trending, <20 ranging)
+• Price vs EMA20: {ema_dist_pct:+.2f}%
+"""
 
     def _calculate_sr_distances(self, historical_arrays: Dict, current_price: float) -> Dict:
-        """Calculate nearest support/resistance levels and distances"""
-        if current_price <= 0:
-            return {
-                "nearest_support": 0,
-                "nearest_resistance": 0,
-                "support_dist_pct": 0,
-                "resistance_dist_pct": 0,
-                "rr_ratio": 0,
-                "levels": {},
-            }
-
-        # 4H high/low from historical
-        hist_4h = historical_arrays.get("4h", {})
-        h4_highs = hist_4h.get("high", [current_price])[-10:]
-        h4_lows = hist_4h.get("low", [current_price])[-10:]
-        h4_high = max(h4_highs) if h4_highs else current_price
-        h4_low = min(h4_lows) if h4_lows else current_price
-
-        # 1D high/low
-        hist_1d = historical_arrays.get("1d", {})
-        d1_highs = hist_1d.get("high", [current_price])[-5:]
-        d1_lows = hist_1d.get("low", [current_price])[-5:]
-        d1_high = max(d1_highs) if d1_highs else current_price
-        d1_low = min(d1_lows) if d1_lows else current_price
-
-        # Calculate distances
-        dist_h4_high = (h4_high - current_price) / current_price * 100 if h4_high > current_price else 0
-        dist_h4_low = (current_price - h4_low) / current_price * 100 if h4_low < current_price else 0
-        dist_d1_high = (d1_high - current_price) / current_price * 100 if d1_high > current_price else 0
-        dist_d1_low = (current_price - d1_low) / current_price * 100 if d1_low < current_price else 0
-
-        # Nearest support (below current price)
-        support_dist = min(dist_h4_low, dist_d1_low) if dist_h4_low > 0 or dist_d1_low > 0 else 0
-        nearest_support = h4_low if dist_h4_low <= dist_d1_low and dist_h4_low > 0 else d1_low
-
-        # Nearest resistance (above current price)
-        resistance_dist = min(dist_h4_high, dist_d1_high) if dist_h4_high > 0 or dist_d1_high > 0 else 0
-        nearest_resistance = h4_high if dist_h4_high <= dist_d1_high and dist_h4_high > 0 else d1_high
-
-        # Calculate R:R from current price
-        rr_ratio = resistance_dist / support_dist if support_dist > 0 else 0
-
+        """Delegate to EntryAnalyzer (v4.0)"""
+        if self._enhanced_features_enabled and hasattr(self, '_entry_analyzer'):
+            return self._entry_analyzer.calculate_sr_distances(historical_arrays, current_price)
         return {
-            "nearest_support": nearest_support,
-            "nearest_resistance": nearest_resistance,
-            "support_dist_pct": support_dist,
-            "resistance_dist_pct": resistance_dist,
-            "rr_ratio": rr_ratio,
-            "levels": {
-                "4h_high": h4_high,
-                "4h_low": h4_low,
-                "1d_high": d1_high,
-                "1d_low": d1_low,
-            }
+            "nearest_support": 0, "nearest_resistance": 0,
+            "support_dist_pct": 0, "resistance_dist_pct": 0,
+            "rr_ratio": 0, "levels": {},
         }
 
     def _build_pre_calculated_section(
@@ -1019,58 +845,76 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
         historical_arrays: Dict,
         current_price: float,
     ) -> str:
-        """Build pre-calculated analysis section for GLM"""
+        """
+        v4.0: RAW DATA BLOCKS (No Scoring)
+        GLM'in kendi analizini yapabilmesi icin ham verileri ve matematiksel mesafeleri sunar.
+        Puanlama yok - GLM ozgurce karar verecek.
+        """
         lines = [
             "",
             "=" * 80,
-            "PRE-CALCULATED ANALYSIS (Python-computed summaries)",
+            "MARKET DATA BLOCKS (RAW INTELLIGENCE)",
             "=" * 80,
             "",
         ]
 
-        # 1. MTF Alignment
-        mtf = self._calculate_mtf_alignment(current_snapshots)
-        trend_symbols = {"BULLISH": "↑", "BEARISH": "↓", "NEUTRAL": "→", "N/A": "?"}
+        # A. MTF Structure (Sadece veri, yorum yok)
+        data_4h = current_snapshots.get("4h", {})
+        data_1d = current_snapshots.get("1d", {})
+        data_1h = current_snapshots.get("1h", {})
 
-        lines.append(f"MTF ALIGNMENT: {mtf['alignment']} ({mtf['bullish_count']}/{mtf['total_valid']} bullish)")
+        lines.append("A. MULTI-TIMEFRAME STRUCTURE:")
+        d1_close = data_1d.get("close", 0)
+        d1_ema20 = data_1d.get("ema_20", 0)
+        d1_ema50 = data_1d.get("ema_50", 0)
+        lines.append(f"  [1D] Price: {d1_close:.2f} | EMA20: {d1_ema20:.2f} | EMA50: {d1_ema50:.2f}")
 
-        tf_line_1 = " | ".join(
-            f"{tf}:{trend_symbols.get(mtf['trends'].get(tf, 'N/A'), '?')}"
-            for tf in ["1m", "5m", "15m", "30m"]
-        )
-        tf_line_2 = " | ".join(
-            f"{tf}:{trend_symbols.get(mtf['trends'].get(tf, 'N/A'), '?')}"
-            for tf in ["1h", "4h", "1d"]
-        )
-        lines.append(f"  {tf_line_1}")
-        lines.append(f"  {tf_line_2}")
+        h4_close = data_4h.get("close", 0)
+        h4_ema20 = data_4h.get("ema_20", 0)
+        h4_ema50 = data_4h.get("ema_50", 0)
+        h4_rsi = data_4h.get("rsi_14", 50)
+        lines.append(f"  [4H] Price: {h4_close:.2f} | EMA20: {h4_ema20:.2f} | EMA50: {h4_ema50:.2f} | RSI: {h4_rsi:.1f}")
+
+        h1_close = data_1h.get("close", 0)
+        h1_ema20 = data_1h.get("ema_20", 0)
+        lines.append(f"  [1H] Price: {h1_close:.2f} | EMA20: {h1_ema20:.2f}")
         lines.append("")
 
-        # 2. Entry Quality (using primary timeframe)
-        data_primary = current_snapshots.get(self._primary_tf, {})
-        quality = self._calculate_entry_quality(data_primary, mtf)
+        # B. Momentum Vectors (Son 4 bar dizisi - GLM egilimi gorebilsin)
+        hist_4h = historical_arrays.get("4h", {})
+        lines.append("B. MOMENTUM VECTORS (Last 4 bars):")
+        if hist_4h:
+            rsi_series = hist_4h.get("rsi_14", [])[-4:]
+            if rsi_series:
+                lines.append(f"  RSI Sequence: {self._format_array(rsi_series, 1)}")
 
-        lines.append(f"ENTRY QUALITY: {quality['grade']} ({quality['score']}/100)")
-        for factor in quality["factors"]:
-            lines.append(f"  + {factor}")
+            macd_hist_series = hist_4h.get("macd_hist", [])[-4:]
+            if macd_hist_series:
+                lines.append(f"  MACD Hist Seq: {self._format_array(macd_hist_series, 4)}")
+        else:
+            lines.append("  (No historical data available)")
         lines.append("")
 
-        # 3. S/R Distances
+        # C. Key Levels & Distances (Matematiksel - yorum yok)
         sr = self._calculate_sr_distances(historical_arrays, current_price)
+        lines.append("C. PROXIMITY TO KEY LEVELS:")
+        lines.append(f"  Distance to Support: {sr['support_dist_pct']:.2f}% (Level: {sr['nearest_support']:.2f})")
+        lines.append(f"  Distance to Resistance: {sr['resistance_dist_pct']:.2f}% (Level: {sr['nearest_resistance']:.2f})")
 
-        lines.append("S/R CONTEXT:")
-        lines.append(f"  Support: ${sr['nearest_support']:,.2f} (-{sr['support_dist_pct']:.2f}%)")
-        lines.append(f"  Resistance: ${sr['nearest_resistance']:,.2f} (+{sr['resistance_dist_pct']:.2f}%)")
+        # EMA Uzakligi (Mean Reversion potansiyeli icin)
+        if h4_ema20 > 0 and current_price > 0:
+            ema_dist = (current_price - h4_ema20) / h4_ema20 * 100
+            lines.append(f"  Extension from 4H EMA20: {ema_dist:+.2f}%")
+
         if sr['rr_ratio'] > 0:
-            lines.append(f"  R:R from current: {sr['rr_ratio']:.2f}:1")
+            lines.append(f"  R:R Ratio: {sr['rr_ratio']:.2f}:1")
         lines.append("")
 
-        # 4. Regime Summary
+        # D. Volatility Context (Ham veri)
         regime = self._vol_regime_key()
         atr_pct = self._current_atr_pct or 0.0
         vol_ratio = self._vol_ratio or 1.0
-
-        lines.append(f"REGIME: {regime.upper()} | ATR: {atr_pct:.2f}% | Vol Ratio: {vol_ratio:.2f}x")
+        lines.append(f"D. VOLATILITY: Regime={regime.upper()} | ATR={atr_pct:.2f}% | Vol Ratio={vol_ratio:.2f}x")
         lines.append("")
 
         return "\n".join(lines)
@@ -1099,20 +943,17 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
         ]
 
         try:
-            # 1. Time Filter Analysis
+            # 1. Session Info (No judgments - just data)
             time_result = self._time_filter.analyze()
+            current_hour = datetime.utcnow().hour
             lines.extend([
-                "TIME FILTER:",
-                f"  Session: {time_result.session.value.upper()}",
-                f"  Quality: {time_result.quality.value.upper()}",
-                f"  Can Trade: {'YES' if time_result.can_trade else 'NO'}",
+                "SESSION INFO:",
+                f"  Session: {time_result.session.value}",
+                f"  Hour (UTC): {current_hour}",
             ])
-            if time_result.warnings:
-                for w in time_result.warnings[:2]:
-                    lines.append(f"  - {w}")
             lines.append("")
 
-            # 2. Volume Analysis (if data available)
+            # 2. Volume Data (Raw values only)
             hist_primary = historical_arrays.get(self._primary_tf, {})
             if hist_primary.get("close") and hist_primary.get("volume"):
                 closes = hist_primary["close"]
@@ -1120,24 +961,26 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
                 highs = hist_primary.get("high", closes)
                 lows = hist_primary.get("low", closes)
 
-                # CVD - returns Tuple[List[float], str]
-                cvd_values, cvd_trend = self._volume_analyzer.calculate_cvd(closes, highs, lows, volumes)
-                if cvd_values:  # Check if CVD calculation succeeded
+                # CVD - raw values only
+                cvd_values, _ = self._volume_analyzer.calculate_cvd(closes, highs, lows, volumes)
+                if cvd_values:
+                    # Show last 4 CVD values for GLM to analyze slope
+                    cvd_recent = cvd_values[-4:] if len(cvd_values) >= 4 else cvd_values
                     lines.extend([
-                        "VOLUME ANALYSIS:",
-                        f"  CVD Trend: {cvd_trend}",
+                        "VOLUME DATA:",
+                        f"  CVD Sequence: {self._format_array(cvd_recent, 0)}",
                     ])
 
-                    # VWAP if available - returns Dict[str, float]
+                    # VWAP - raw distance
                     vwap_result = self._volume_analyzer.calculate_vwap(highs, lows, closes, volumes)
                     if vwap_result.get("vwap") and current_price > 0:
                         vwap = vwap_result["vwap"]
                         vwap_dist = ((current_price - vwap) / vwap) * 100
-                        lines.append(f"  VWAP: ${vwap:,.2f} (Price {'+' if vwap_dist >= 0 else ''}{vwap_dist:.2f}%)")
+                        lines.append(f"  VWAP: {vwap:,.2f} | Price Distance: {vwap_dist:+.2f}%")
 
                     lines.append("")
 
-            # 3. ADX Trend Strength
+            # 3. ADX Data (Raw values - no interpretation)
             if hist_primary.get("high") and hist_primary.get("low") and hist_primary.get("close"):
                 highs = hist_primary["high"]
                 lows = hist_primary["low"]
@@ -1149,41 +992,74 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
                     plus_di_list = adx_result.get("plus_di", [])
                     minus_di_list = adx_result.get("minus_di", [])
 
-                    # Get latest values from lists
                     if adx_list and plus_di_list and minus_di_list:
                         adx_value = adx_list[-1]
                         plus_di = plus_di_list[-1]
                         minus_di = minus_di_list[-1]
 
-                        # Use interpret_adx (3 params) instead of get_adx_trade_filter (4 params)
-                        adx_interp = interpret_adx(adx_value, plus_di, minus_di)
+                        # Raw data only - GLM interprets
                         lines.extend([
-                            "ADX TREND STRENGTH:",
-                            f"  ADX: {adx_value:.1f} ({adx_interp.get('strength', 'N/A')})",
+                            "ADX DATA:",
+                            f"  ADX: {adx_value:.1f}",
                             f"  +DI: {plus_di:.1f} | -DI: {minus_di:.1f}",
-                            f"  Bias: {adx_interp.get('direction', 'NEUTRAL')}",
                         ])
-                        if adx_interp.get("strength") == "WEAK":
-                            lines.append(f"  Warning: {adx_interp.get('recommendation', 'No clear trend')}")
                         lines.append("")
 
-            # 4. Funding Rate Analysis
+            # 4. Funding Rate Analysis (with signals)
             if futures_data and futures_data.get("current"):
                 funding_rate = futures_data["current"].get("funding_rate", 0)
-                if funding_rate != 0:
-                    funding_result = self._funding_analyzer.analyze(funding_rate)
-                    if funding_result.get("feature_enabled"):
-                        lines.extend([
-                            "FUNDING RATE:",
-                            f"  Current: {funding_rate:.6f}",
-                            f"  Signal: {funding_result.get('signal', 'NEUTRAL')}",
-                        ])
-                        warnings = funding_result.get("warnings", [])
-                        for w in warnings[:1]:
-                            lines.append(f"  - {w}")
-                        lines.append("")
+                funding_avg = futures_data.get("averages", {}).get("funding_rate_avg", funding_rate)
 
-            # 5. Liquidation Analysis
+                if funding_rate != 0:
+                    lines.extend([
+                        "FUNDING RATE:",
+                        f"  Current: {funding_rate:.6f} ({funding_rate*100:.4f}%)",
+                        f"  8h Avg: {funding_avg:.6f}",
+                    ])
+
+                    # Funding Rate Analyzer - sinyal ve uyarı üret
+                    if self._funding_analyzer:
+                        # Trend direction'ı belirle
+                        trend_direction = "NEUTRAL"
+                        if hist_primary.get("close"):
+                            closes = hist_primary["close"]
+                            ema20 = sum(closes[-20:]) / min(20, len(closes)) if len(closes) >= 2 else closes[-1]
+                            if current_price > ema20 * 1.01:
+                                trend_direction = "BULLISH"
+                            elif current_price < ema20 * 0.99:
+                                trend_direction = "BEARISH"
+
+                        funding_analysis = self._funding_analyzer.analyze(
+                            current_rate=funding_rate,
+                            rate_8h_avg=funding_avg,
+                            rate_24h_avg=funding_avg,  # Simplified
+                            price_trend=trend_direction,
+                        )
+
+                        # Sinyal ve uyarı bilgisini ekle
+                        if funding_analysis.signal.value != "neutral":
+                            signal_emoji = {
+                                "contrarian_long": "🟢",
+                                "contrarian_short": "🔴",
+                                "squeeze_risk_long": "⚠️",
+                                "squeeze_risk_short": "⚠️",
+                            }.get(funding_analysis.signal.value, "")
+
+                            lines.append(f"  Signal: {signal_emoji} {funding_analysis.signal.value.upper()}")
+
+                            if funding_analysis.confidence_adjustment != 0:
+                                adj_sign = "+" if funding_analysis.confidence_adjustment > 0 else ""
+                                lines.append(f"  Confidence Adj: {adj_sign}{funding_analysis.confidence_adjustment}")
+
+                            if funding_analysis.warning:
+                                lines.append(f"  Warning: {funding_analysis.warning}")
+
+                            if funding_analysis.opportunity:
+                                lines.append(f"  Opportunity: {funding_analysis.opportunity}")
+
+                    lines.append("")
+
+            # 5. Liquidation Levels (Raw distances only)
             if current_price > 0 and hist_primary.get("high") and hist_primary.get("low"):
                 recent_high = max(hist_primary["high"][-20:]) if len(hist_primary["high"]) >= 20 else max(hist_primary["high"])
                 recent_low = min(hist_primary["low"][-20:]) if len(hist_primary["low"]) >= 20 else min(hist_primary["low"])
@@ -1194,36 +1070,27 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
                         symbol, current_price, recent_high, recent_low, oi
                     )
                     if liq_result.feature_enabled:
-                        lines.extend([
-                            "LIQUIDATION ZONES:",
-                            f"  Risk Level: {liq_result.risk_level.value.upper()}",
-                        ])
+                        lines.append("LIQUIDATION LEVELS:")
                         if liq_result.nearest_long_liq:
-                            lines.append(f"  Long Liq: ${liq_result.nearest_long_liq.price:,.0f} ({liq_result.nearest_long_liq.distance_pct:.1f}% below)")
+                            lines.append(f"  Long Liq: {liq_result.nearest_long_liq.price:,.0f} ({liq_result.nearest_long_liq.distance_pct:.1f}% below)")
                         if liq_result.nearest_short_liq:
-                            lines.append(f"  Short Liq: ${liq_result.nearest_short_liq.price:,.0f} ({liq_result.nearest_short_liq.distance_pct:.1f}% above)")
-                        for w in liq_result.warnings[:1]:
-                            lines.append(f"  - {w}")
+                            lines.append(f"  Short Liq: {liq_result.nearest_short_liq.price:,.0f} ({liq_result.nearest_short_liq.distance_pct:.1f}% above)")
                         lines.append("")
 
-            # 6. Drawdown Status
+            # 6. Drawdown Data (Raw percentages)
             equity = portfolio_metrics.get("equity", 10000)
             dd_status = self._drawdown_manager.get_status()
             if dd_status.get("feature_enabled"):
-                can_trade = dd_status.get("can_trade", True)
                 daily_dd = dd_status.get("current_daily_drawdown_pct", 0)
                 weekly_dd = dd_status.get("current_weekly_drawdown_pct", 0)
                 max_dd = dd_status.get("current_max_drawdown_pct", 0)
 
                 lines.extend([
-                    "DRAWDOWN STATUS:",
-                    f"  Daily DD: {daily_dd:.2f}% (Limit: {dd_status.get('daily_limit_pct', 5):.0f}%)",
-                    f"  Weekly DD: {weekly_dd:.2f}% (Limit: {dd_status.get('weekly_limit_pct', 10):.0f}%)",
-                    f"  Max DD: {max_dd:.2f}% (Limit: {dd_status.get('max_limit_pct', 20):.0f}%)",
-                    f"  Can Trade: {'YES' if can_trade else 'NO - DRAWDOWN LIMIT REACHED'}",
+                    "DRAWDOWN DATA:",
+                    f"  Daily: {daily_dd:.2f}%",
+                    f"  Weekly: {weekly_dd:.2f}%",
+                    f"  Max: {max_dd:.2f}%",
                 ])
-                if not can_trade:
-                    lines.append("  ⚠️ TRADING PAUSED DUE TO DRAWDOWN LIMIT")
                 lines.append("")
 
             # 7. Correlation Guard (if positions exist)
@@ -1239,12 +1106,116 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
                     ])
                     lines.append("")
 
+            # 8. TP/Hold Decision Summary (v3.1 - Token Efficient)
+            position_data = portfolio_metrics.get("open_position")
+            if position_data and position_data.get("entry_time"):
+                tp_hold_summary = self._build_tp_hold_summary(symbol, position_data, current_price)
+                if tp_hold_summary:
+                    lines.append(tp_hold_summary)
+                    lines.append("")
+
         except Exception as e:
             logger.warning("Error building enhanced features section: %s", e)
             lines.append(f"[Enhanced features error: {str(e)[:50]}]")
             lines.append("")
 
         return "\n".join(lines)
+
+    def _build_tp_hold_summary(
+        self,
+        symbol: str,
+        position_data: Dict,
+        current_price: float,
+    ) -> str:
+        """
+        Build compact TP/Hold summary for prompt (~50-80 tokens).
+
+        Format: TP: BALANCED | TP1✅ TP2⏳ | BE✅ TRAIL❌ | HOLD: 78% | 12.5h
+        """
+        try:
+            from datetime import datetime, timezone
+
+            entry_time = position_data.get("entry_time", "")
+            entry_price = position_data.get("entry_price", 0)
+            position_side = position_data.get("side", "LONG")
+            unrealized_pnl_pct = position_data.get("unrealized_pnl_pct", 0.0)
+            stop_loss = position_data.get("stop_loss", 0)
+
+            if not entry_time or entry_price <= 0:
+                return ""
+
+            current_time = datetime.now(timezone.utc).isoformat()
+
+            # Price change since entry
+            if entry_price > 0:
+                price_change_pct = ((current_price - entry_price) / entry_price) * 100
+                if position_side == "SHORT":
+                    price_change_pct = -price_change_pct
+            else:
+                price_change_pct = 0.0
+
+            parts = []
+
+            # 1. Time-based exit check
+            time_result = self._time_exit_manager.check_time_based_exit(
+                entry_time=entry_time,
+                current_time=current_time,
+                unrealized_pnl_pct=unrealized_pnl_pct,
+                price_change_since_entry_pct=price_change_pct,
+            )
+            time_summary = self._time_exit_manager.get_summary_for_prompt(time_result)
+            if time_summary:
+                parts.append(time_summary)
+
+            # 2. Hold decision (simplified - only if position has been held for a while)
+            hours_held = time_result.hours_held
+            if hours_held >= 1.0:
+                # Get trend info from cached data
+                current_trend = position_data.get("current_trend", "NEUTRAL")
+                trend_strength = position_data.get("trend_strength", "MODERATE")
+                rsi = position_data.get("rsi", 50)
+                volume_trend = position_data.get("volume_trend", "STABLE")
+                mtf_confluence = position_data.get("mtf_confluence", 50)
+
+                # Initialize position if not already
+                if symbol not in self._hold_engine._position_states:
+                    self._hold_engine.initialize_position(
+                        symbol=symbol,
+                        entry_price=entry_price,
+                        entry_time=entry_time,
+                        position_side=position_side,
+                        stop_loss=stop_loss if stop_loss > 0 else entry_price * 0.97,
+                    )
+
+                hold_eval = self._hold_engine.evaluate_hold(
+                    symbol=symbol,
+                    current_price=current_price,
+                    current_time=current_time,
+                    current_trend=current_trend,
+                    trend_strength=trend_strength,
+                    rsi=rsi,
+                    volume_trend=volume_trend,
+                    mtf_confluence=mtf_confluence,
+                    unrealized_pnl_pct=unrealized_pnl_pct,
+                )
+                hold_summary = self._hold_engine.get_summary_for_prompt(symbol, hold_eval)
+                if hold_summary:
+                    parts.append(hold_summary)
+
+            # 3. TP Status (if available)
+            tp_plan = position_data.get("tp_plan")
+            if tp_plan and hasattr(self._partial_tp_manager, 'get_compact_summary'):
+                tp_summary = self._partial_tp_manager.get_compact_summary(tp_plan)
+                if tp_summary:
+                    parts.append(tp_summary)
+
+            if parts:
+                return "POSITION MGT: " + " | ".join(parts)
+            return ""
+
+        except Exception as e:
+            logger.debug("Error building TP/Hold summary: %s", e)
+            return ""
 
     # ---------------------------------------------------------------------
     # BTC CORRELATION CONTEXT (for ETH/SOL trading)
@@ -1470,15 +1441,25 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
         stop_loss = max(0.01, stop_loss)
         profit_target = max(0.01, profit_target)
 
+        # v3.0: TP1 (Micro-Harvesting) = 0.5R, halfway to breakeven
+        if signal == "BUY":
+            tp1_price = entry_price * (1 + sl_dist * 0.5 / 100)
+        else:
+            tp1_price = entry_price * (1 - sl_dist * 0.5 / 100)
+        tp1_price = max(0.01, tp1_price)
+
         logger.info(
-            "📐 Exit Plan Calculated: signal=%s entry=%.2f SL=%.2f (%.2f%%) TP=%.2f (%.2f%%) R:R=%.2f lev=%dx",
-            signal, entry_price, stop_loss, sl_dist, profit_target, tp_dist, final_rr, leverage
+            "📐 Exit Plan: %s entry=%.2f SL=%.2f TP1=%.2f(0.5R) TP2=%.2f R:R=%.2f lev=%dx",
+            signal, entry_price, stop_loss, tp1_price, profit_target, final_rr, leverage
         )
 
         return {
             "stop_loss": round(stop_loss, 2),
             "profit_target": round(profit_target, 2),
+            "tp1_price": round(tp1_price, 2),  # v3.0: Micro-Harvesting
+            "tp1_action": "TP1'de %50 kapat, SL'yi Entry'ye çek",
             "invalidation_condition": invalidation,
+            "invalidation_timeframe": "15m",  # Invalidation kontrolü için gereken mum periyodu
             "leverage": leverage,
             "sl_distance_pct": round(sl_dist, 2),
             "tp_distance_pct": round(tp_dist, 2),
@@ -1504,10 +1485,7 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
         historical_arrays = raw_market_data.get("historical_arrays", {})
         futures_data = raw_market_data.get("futures_data", {})
 
-        # BTC Correlation Context for ETH/SOL trades
-        btc_context = None
-        if symbol in ["ETHUSDT", "SOLUSDT"]:
-            btc_context = self._fetch_btc_correlation_context()
+        # GLM özgürlüğü: BTC correlation context kaldırıldı
 
         # Cache historical_arrays for exit plan calculation (used by manager.py)
         self._cached_historical_arrays = historical_arrays
@@ -1571,9 +1549,7 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
 
         self._update_performance_tracking(portfolio_metrics)
 
-        # Dynamic Regime Detection
-        regime_type = self._detect_market_regime_type(historical_arrays, current_snapshots)
-        regime_instructions = self._get_regime_instructions(regime_type)
+        # GLM özgürlüğü: Regime/direction/btc_context hesaplamaları kaldırıldı
 
         sections = []
         sections.append(self._build_header(runtime_minutes, current_time))
@@ -1593,19 +1569,13 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
         if enhanced_section:
             sections.append(enhanced_section)
 
-        # Feedback Loop - Son 5 işlem bilgisi
+        # Feedback Loop - Son 5 işlem bilgisi (sadece veri, uyarı yok)
         feedback_section = self._build_feedback_section(portfolio_metrics)
         if feedback_section:
             sections.append(feedback_section)
 
-        # Instructions with CoT, regime info and BTC context
-        sections.append(self._build_instructions(
-            symbol=symbol,
-            atr_value=atr_value,
-            current_price=current_price,
-            regime_instructions=regime_instructions,
-            btc_context=btc_context
-        ))
+        # Minimal instructions - GLM tamamen özgür
+        sections.append(self._build_instructions(symbol=symbol))
 
         return "\n\n".join(sections)
 
@@ -1684,9 +1654,7 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
             f"Sonuç: {wins}W/{losses}L | Streak: {streak}{streak_type} | Ort: {avg_pnl:+.1f}%",
         ]
 
-        # Warning if losing streak
-        if streak >= 2 and streak_type == "L":
-            lines.append("⚠️ UYARI: Ardışık kayıp serisi - daha seçici ol!")
+        # GLM özgürlüğü: Uyarı kaldırıldı - GLM kendi kararını verecek
 
         # Show last trade direction for bias consideration
         if trades:
@@ -1700,33 +1668,10 @@ Tümü "Hayır" ise → CLOSE VERİLMEZ, HOLD ver
         return "\n".join(lines)
 
     def _build_header(self, runtime_minutes: int, current_time: datetime) -> str:
-        mode_label = "SWING" if self._swing_mode else "SCALP"
-        tf_label = "4-hour" if self._swing_mode else "30-minute"
+        # GLM özgürlüğü: Minimal header, trading mode/regime yok
+        return f"""Runtime: {runtime_minutes} min | Time: {current_time} | Invocation: {self._invocation_count}
 
-        header = f"""It has been {runtime_minutes} minutes since you started trading. The current time is {current_time} and you've been invoked {self._invocation_count} times. Below, we are providing you with a variety of state data, price data, and predictive signals so you can discover alpha. Below that is your current account information, value, performance, positions, etc.
-
-🎯 TRADING MODE: {mode_label} (Primary TF: {self._primary_tf})
-
-ALL OF THE PRICE OR SIGNAL DATA BELOW IS ORDERED: OLDEST → NEWEST
-
-Timeframes note: Unless stated otherwise in a section title, the primary timeframe is {tf_label} intervals. Additional timeframes are provided for comprehensive analysis."""
-
-        if self._consecutive_losses >= 2:
-            header += f"""
-
-⚠️⚠️⚠️ PERFORMANCE ALERT: You have {self._consecutive_losses} consecutive losses.
-- Increase selectivity.
-- Reduce position size.
-- Prefer HOLD unless setup is A+.
-- Consider bias flip if losses were same-direction. ⚠️⚠️⚠️"""
-
-        if self._recent_win_rate <= 0.4 and len(self._performance_history) >= 5:
-            header += f"""
-
-🟡 WIN-RATE WARNING: Recent win rate is {self._recent_win_rate:.0%} over last {len(self._performance_history)} trades.
-Be conservative; wait for clearer alignment."""
-
-        return header
+DATA ORDER: OLDEST → NEWEST"""
 
     def _build_market_state(
         self,
@@ -1752,21 +1697,13 @@ Be conservative; wait for clearer alignment."""
         atr_pct = self._current_atr_pct or 0.0
         regime_key = self._vol_regime_key()
 
-        if regime_key == "low":
-            market_regime = "Low Volatility (Stable)"
-        elif regime_key == "medium":
-            market_regime = "Medium Volatility (Normal)"
-        elif regime_key == "high":
-            market_regime = "High Volatility (Active)"
-        else:
-            market_regime = "Extreme Volatility (Dangerous)"
-
+        # GLM özgürlüğü: Sadece ham veri, yargı/etiket yok
         lines.extend([
             "",
-            "RISK & VOLATILITY REGIME:",
-            f"• Volatility Score (legacy): {volatility_score:.2f} (0.0-1.0 scale)",
-            f"• Market Regime (relative): {market_regime}",
-            f"• ATR (14-period): {atr_value:.2f} (~{atr_pct:.2f}% expected move)",
+            "VOLATILITY DATA:",
+            f"• Volatility Score: {volatility_score:.2f}",
+            f"• Volatility Regime: {regime_key.upper()}",
+            f"• ATR (14-period): {atr_value:.2f} ({atr_pct:.2f}%)",
             "",
         ])
 
@@ -1852,7 +1789,7 @@ Be conservative; wait for clearer alignment."""
             fomo_long_band = ema20 + 2 * atr_value if (ema20 and atr_value) else None
             fomo_short_band = ema20 - 2 * atr_value if (ema20 and atr_value) else None
 
-            tf_label = "4-hour" if self._swing_mode else "30-minute"
+            tf_label = self._primary_tf.upper()  # "4H" - volatility-based, no swing/scalp
             lines.extend([
                 f"PRIMARY TIMEFRAME ({tf_label}) - ENHANCED ANALYSIS:",
                 f"Trend Direction: {trend_direction} ({trend_strength})",
@@ -1866,10 +1803,9 @@ Be conservative; wait for clearer alignment."""
 
             if fomo_long_band and fomo_short_band:
                 lines.extend([
-                    "NO-TRADE / FOMO ZONES (numeric):",
-                    f"• LONG FOMO band ≈ EMA20 + 2*ATR = {fomo_long_band:.2f}",
-                    f"• SHORT FOMO band ≈ EMA20 - 2*ATR = {fomo_short_band:.2f}",
-                    "Rule: If price is beyond these bands + RSI extreme, avoid chasing.",
+                    "VOLATILITY BANDS (EMA20 ± 2*ATR):",
+                    f"• Upper Band: {fomo_long_band:.2f}",
+                    f"• Lower Band: {fomo_short_band:.2f}",
                     "",
                 ])
 
@@ -1894,18 +1830,18 @@ Be conservative; wait for clearer alignment."""
             cur_f = futures_data.get("current", {})
             avg_f = futures_data.get("averages", {})
 
-            fr = cur_f.get("funding_rate", 0)
-            oi = cur_f.get("open_interest", 0)
-            lsr = cur_f.get("long_short_ratio", 0)
+            fr = cur_f.get("funding_rate")  # None if missing, allows 0 as valid value
+            oi = cur_f.get("open_interest")  # None if missing, allows 0 as valid value
+            lsr = cur_f.get("long_short_ratio")  # None if missing, allows 0 as valid value
 
             lines.extend([
-                f"Funding Rate: {fr:.8f}" if fr else "Funding Rate: N/A",
+                f"Funding Rate: {fr:.8f}" if fr is not None else "Funding Rate: N/A",
                 f"  (8h avg: {avg_f.get('funding_rate_avg', 0):.8f})",
                 "",
-                f"Open Interest: {oi:.2f}" if oi else "Open Interest: N/A",
+                f"Open Interest: {oi:.2f}" if oi is not None else "Open Interest: N/A",
                 f"  (20p avg: {avg_f.get('open_interest_avg', 0):.2f})",
                 "",
-                f"Long/Short Ratio: {lsr:.4f}" if lsr else "Long/Short Ratio: N/A",
+                f"Long/Short Ratio: {lsr:.4f}" if lsr is not None else "Long/Short Ratio: N/A",
                 f"  (20p avg: {avg_f.get('long_short_ratio_avg', 0):.4f})",
                 "",
             ])
@@ -1949,6 +1885,9 @@ Be conservative; wait for clearer alignment."""
                 )
             else:
                 lines.append(f"{tf.upper()}: No data available")
+
+        # v3.2: Narrative Context - yorumlanmış veri
+        lines.append(self._generate_narrative(data_primary))
 
         return "\n".join(lines)
 
@@ -2119,180 +2058,27 @@ Be conservative; wait for clearer alignment."""
 
         return "\n".join(lines)
 
-    def _build_instructions(
-        self,
-        symbol: str = "BTCUSDT",
-        atr_value: float = 0.0,
-        current_price: float = 0.0,
-        regime_instructions: str = "",
-        btc_context: Optional[Dict[str, Any]] = None,
-    ) -> str:
+    def _build_instructions(self, symbol: str = "BTCUSDT", **kwargs) -> str:
         """
-        Instructions with integrated Chain of Thought - GLM thinks step-by-step BEFORE outputting JSON.
-        Now includes Capital Preservation persona and dynamic regime/BTC context.
+        GLM için minimal talimatlar - tamamen özgür analiz.
         """
-
-        # Dynamic confidence threshold based on performance
-        confidence_threshold = 0.80
-        if self._consecutive_losses >= 2:
-            confidence_threshold = 0.90
-        if self._recent_win_rate <= 0.4 and len(self._performance_history) >= 5:
-            confidence_threshold = max(confidence_threshold, 0.88)
-
-        vol = self._current_volatility or 0.5
-        regime_key = self._vol_regime_key()
-
-        # Build warnings section
-        warnings = []
-        if self._consecutive_losses >= 2:
-            warnings.append(f"⚠️ UYARI: {self._consecutive_losses} ardışık kayıp - daha seçici ol!")
-
-        if self._recent_win_rate <= 0.4 and len(self._performance_history) >= 5:
-            warnings.append(f"🟡 Win rate düşük ({self._recent_win_rate:.0%}) - konservatif ol!")
-
-        warnings_block = "\n".join(warnings) + "\n" if warnings else ""
-
-        # Build BTC correlation block for ETH/SOL (with multi-TF consensus)
-        btc_block = ""
-        if btc_context and symbol != "BTCUSDT":
-            btc_trend = btc_context.get("trend", "NEUTRAL")
-            btc_rsi = btc_context.get("rsi", 50)
-            consensus = btc_context.get("consensus_trend", btc_trend)
-            has_conflict = btc_context.get("has_conflict", False)
-            agreement_pct = btc_context.get("agreement_pct", 0)
-            tf_trends = btc_context.get("tf_trends", {})
-
-            # Build TF summary string (compact)
-            tf_summary = "/".join(f"{tf}:{t[0]}" for tf, t in tf_trends.items()) if tf_trends else ""
-
-            if has_conflict:
-                # Mixed signals across timeframes - warn about increased risk
-                btc_block = (
-                    f"\n⚠️ BTC KORELASYON: KARISIK SİNYALLER!\n"
-                    f"   TF Trendleri: {tf_summary}\n"
-                    f"   RSI: {btc_rsi:.0f} | Konsensüs yok - DİKKATLİ OL!\n"
-                )
-            elif consensus == "BEAR":
-                btc_block = (
-                    f"\n📊 BTC KORELASYON: {consensus} (RSI: {btc_rsi:.0f})\n"
-                    f"   TF Uyumu: %{agreement_pct:.0f} | BTC bearish iken LONG riskli!\n"
-                )
-            elif consensus == "BULL":
-                btc_block = (
-                    f"\n📊 BTC KORELASYON: {consensus} (RSI: {btc_rsi:.0f})\n"
-                    f"   TF Uyumu: %{agreement_pct:.0f} | BTC bullish - trend uyumlu\n"
-                )
-            else:
-                btc_block = f"\n📊 BTC KORELASYON: {consensus} (RSI: {btc_rsi:.0f}) - Nötr\n"
-
-        # Add regime instructions if provided
-        regime_block = f"\n{regime_instructions}\n" if regime_instructions else ""
-
-        # Get loss management settings
-        loss_config = self.LOSS_MANAGEMENT.get(min(self._consecutive_losses, 4), self.LOSS_MANAGEMENT[0])
-        size_mult = loss_config.get("size_mult", 1.0)
-        extra_confluence = loss_config.get("extra_confluence", 0)
-        required_grade = loss_config.get("require_grade", None)
-
-        loss_warning = ""
-        if self._consecutive_losses >= 2:
-            loss_warning = f"""
-⚠️ KAYIP SERİSİ UYARISI: {self._consecutive_losses} ardışık kayıp
-   • Position size çarpanı: {size_mult:.0%}
-   • Ekstra confluence gereksinimi: +{extra_confluence} puan
-   {"• Sadece " + required_grade + " grade setup'lar!" if required_grade else ""}
-"""
-
         return f"""
-{self.HARD_RULES_BLOCK}
 ================================================================================
-KARAR SÜRECİ (ÖNCE DÜŞÜN, SONRA JSON)
+GOREV: Market verilerini analiz et ve sinyal ver
 ================================================================================
-{warnings_block}{regime_block}{btc_block}{loss_warning}
-ROLE: Disciplined Swing Trader
-PRIME DIRECTIVE: Sermayeyi koru > Kar ara. Şüphe durumunda HOLD.
 
---------------------------------------------------------------------------------
-ANALİZ ADIMLARI (SESLİ DÜŞÜN)
---------------------------------------------------------------------------------
-### ADIM 1: POZİSYON KONTROLÜ (AÇIK POZİSYON VARSA)
-- SL tetiklendi mi? → Hayır → HOLD
-- TP tetiklendi mi? → Hayır → HOLD
-- Thesis invalidation (4H close)? → Değilse → HOLD
-- Hold süresi < 4 saat? → HOLD (cooldown)
-- PnL < %0.15? → HOLD (fee break-even)
-⚠️ "Çelişkili sinyal" veya "belirsizlik" = HOLD, CLOSE değil
-
-### ADIM 2: FOMO KONTROLÜ
-- LONG: Fiyat > EMA20 + 2*ATR VE RSI > 70 → ALIM YAPMA
-- SHORT: Fiyat < EMA20 - 2*ATR VE RSI < 30 → SATIŞ YAPMA
-
-### ADIM 3: MTF UYUMU
-- PRE-CALCULATED MTF ALIGNMENT bölümüne bak
-- 4H ve 30M uyumlu olmalı
-- KARŞI trend'de işlem AÇMA
-
-### ADIM 4: GİRİŞ KALİTESİ
-- PRE-CALCULATED ENTRY QUALITY bölümündeki nota bak
-- A+ veya A tercih edilir, B ve altı → confidence -10%
-
-### ADIM 5: REJİM
-- Mevcut rejim: {regime_key.upper()}
-- Güven eşiği: {confidence_threshold:.0%}
-
---------------------------------------------------------------------------------
-KARAR SEÇENEKLERİ
---------------------------------------------------------------------------------
-1) HOLD (varsayılan) → confidence < {confidence_threshold:.0%} veya net setup yok
-2) BUY → bullish setup, confluence ≥ 80, ADX > 25, FOMO yok
-3) SELL → bearish setup, confluence ≥ 80, ADX > 25, FOMO yok
-4) CLOSE → SADECE: SL hit, TP hit, veya 4H thesis invalidation
-   ⚠️ CLOSE için exit_validation ZORUNLU!
-
---------------------------------------------------------------------------------
-ÇIKTI FORMATI (DÜŞÜNCE + JSON)
---------------------------------------------------------------------------------
-Önce 2-3 cümle DÜŞÜNCE sürecini yaz, sonra JSON bloğunu ver.
-
-Örnek format (YENİ POZİSYON):
-
-DÜŞÜNCE:
-FOMO kontrolü OK. MTF 5/7 bullish. Entry kalitesi A. BTC uyumlu.
-RSI 48 sağlıklı bölgede. Pullback tamamlanmış, giriş uygun.
-
+CIKTI FORMATI (JSON):
 ```json
 {{
   "{symbol}": {{
-    "signal": "BUY",
-    "confidence": 85,
-    "reasoning": "MTF bullish uyumu, EMA20 desteği, RSI sağlıklı",
-    "exit_validation": "N/A"
+    "signal": "BUY" | "SELL" | "HOLD",
+    "confidence": <0-100>,
+    "reasoning": "Analiz aciklamasi (TURKCE yazilmali)"
   }}
 }}
 ```
 
-Örnek format (POZİSYON KAPATMA):
-
-DÜŞÜNCE:
-SL seviyesine ulaşıldı. Risk yönetimi gereği pozisyon kapatılmalı.
-
-```json
-{{
-  "{symbol}": {{
-    "signal": "CLOSE",
-    "confidence": 95,
-    "reasoning": "Stop loss tetiklendi, risk yönetimi",
-    "exit_validation": "SL_HIT"
-  }}
-}}
-```
-
-**ÖNEMLİ:**
-- "reasoning" alanı HER ZAMAN TÜRKÇE yazılmalıdır
-- "exit_validation" alanı ZORUNLU: SL_HIT | TP_HIT | THESIS_INVALID | N/A
-- CLOSE için exit_validation "N/A" ise → HOLD ver!
-
-**KRİTİK:** Emin değilsen → HOLD. Kötü bir trade açmak, fırsat kaçırmaktan daha kötü.
+NOT: "reasoning" alani MUTLAKA TURKCE yazilmalidir.
 """
 
     def _format_array(self, values: List[float], decimals: int = 2) -> str:

@@ -298,17 +298,20 @@
 <th class="px-6 py-3" scope="col">Side</th>
 <th class="px-6 py-3 text-right" scope="col">Amount</th>
 <th class="px-6 py-3 text-right" scope="col">Entry Price</th>
+<th class="px-6 py-3 text-right" scope="col">Exit Price</th>
 <th class="px-6 py-3 text-right" scope="col">PnL</th>
 <th class="px-6 py-3 text-right" scope="col">Time</th>
+<th class="px-6 py-3 text-right" scope="col">Exit Time</th>
 </tr>
 </thead>
 <tbody id="trades-tbody">
 <tr>
-<td colspan="6" class="px-6 py-4 text-center text-text-secondary">Loading trades...</td>
+<td colspan="8" class="px-6 py-4 text-center text-text-secondary">Loading trades...</td>
 </tr>
 </tbody>
 </table>
 </div>
+<div id="trades-pagination" class="mt-3 px-2"></div>
 </div>
 </div>
 <div class="lg:col-span-1 flex flex-col gap-6">
@@ -474,7 +477,27 @@ async function resolveApiBase() {
 async function initEndpoints() {
     const base = await resolveApiBase();
     API_BASE = base;
-    WS_URL = dashboardConfig.wsUrl || toWsUrl(base);
+
+    const loc = window.location;
+    const apiUrl = new URL(base);
+    const originPort = loc.port || (loc.protocol === 'https:' ? '443' : '80');
+    const apiPort = apiUrl.port || (apiUrl.protocol === 'https:' ? '443' : '80');
+    const sameOrigin = (
+        loc.origin &&
+        loc.origin !== 'null' &&
+        loc.hostname === apiUrl.hostname &&
+        originPort === apiPort &&
+        loc.protocol === apiUrl.protocol
+    );
+    const originIsDev = DEV_PORTS.includes(originPort);
+
+    // Prefer explicit wsUrl override. Otherwise use API_BASE unless the page and API truly share the same origin (avoids hitting the static dev server on :3000).
+    const wsBase = dashboardConfig.wsUrl
+        ? null
+        : (sameOrigin && !originIsDev) ? loc.origin : base;
+
+    WS_URL = dashboardConfig.wsUrl || toWsUrl(wsBase);
+
     console.log('Dashboard endpoints resolved', { API_BASE, WS_URL });
 }
 
@@ -489,6 +512,12 @@ let prices = {};
 let portfolioData = null;
 let cachedTrades = [];
 let cachedSignals = [];
+
+// Trades pagination state
+let currentTradesPage = 1;
+let totalTradesPages = 1;
+let tradesPerPage = 10;
+let totalTradesCount = 0;
 let activeTooltip = null;
 
 // Find matching signal INDEX for a trade (by symbol + amount + entry_price)
@@ -524,9 +553,11 @@ function showReasoningTooltip(event, signal, trade) {
     hideReasoningTooltip(); // Remove any existing tooltip
 
     // Trade verisini kullan (signal null olabilir)
-    const action = trade.side || 'HOLD';
-    const actionClass = action.toLowerCase() === 'buy' ? 'buy' :
-                        action.toLowerCase() === 'sell' ? 'sell' : 'hold';
+    const sideLabel = trade.action_label || trade.side || 'HOLD';
+    const actionLower = sideLabel.toLowerCase();
+    const actionClass = actionLower === 'buy' ? 'buy' :
+                        actionLower === 'sell' ? 'sell' :
+                        actionLower.includes('partial') ? 'hold' : 'hold';
 
     const symbolDisplay = (trade.symbol || '').replace('USDT', '/USD');
     const tradeTime = trade.timestamp ? formatTimeAgo(trade.timestamp) : '';
@@ -537,11 +568,21 @@ function showReasoningTooltip(event, signal, trade) {
     const pnl = trade.pnl || 0;
     const leverage = trade.leverage || 1;
 
-    // Exit plan bilgileri (trade'den)
+    // Exit plan bilgileri (trade'den) - HOLD/CLOSE/PARTIAL için gösterme
     const exitPlan = trade.exit_plan || {};
     const stopLoss = exitPlan.stop_loss;
     const profitTarget = exitPlan.profit_target;
     const invalidation = exitPlan.invalidation_condition;
+    const hideExitPlan = actionLower === 'hold' || actionLower === 'close' || actionLower.includes('partial');
+
+    // Reasoning - önce exit_plan'dan, yoksa signals'dan al
+    let reasoning = exitPlan.reasoning || '';
+    if (!reasoning) {
+        const signalIdx = findSignalIndexForTrade(trade);
+        if (signalIdx >= 0 && cachedSignals[signalIdx]) {
+            reasoning = cachedSignals[signalIdx].reasoning || '';
+        }
+    }
 
     const tooltip = document.createElement('div');
     tooltip.className = 'trade-tooltip';
@@ -550,7 +591,7 @@ function showReasoningTooltip(event, signal, trade) {
         <div class="trade-tooltip-section">
             <div class="trade-tooltip-row">
                 <div style="display: flex; align-items: center; gap: 8px;">
-                    <span class="trade-tooltip-badge ${actionClass}">${action}</span>
+                    <span class="trade-tooltip-badge ${actionClass}">${sideLabel}</span>
                     <span style="font-weight: 600; color: #fff;">${symbolDisplay}</span>
                 </div>
                 <span class="trade-tooltip-label">${tradeTime}</span>
@@ -579,6 +620,7 @@ function showReasoningTooltip(event, signal, trade) {
             </div>
         </div>
 
+        ${hideExitPlan ? '' : `
         <!-- Exit Plan -->
         <div class="trade-tooltip-section">
             <div class="trade-tooltip-metrics">
@@ -598,6 +640,14 @@ function showReasoningTooltip(event, signal, trade) {
         <div class="trade-tooltip-section">
             <div class="trade-tooltip-label" style="margin-bottom: 6px;">Exit Condition</div>
             <div class="trade-tooltip-content">${invalidation}</div>
+        </div>
+        ` : ''}`}
+
+        ${reasoning ? `
+        <!-- Gerekçe (Reasoning) -->
+        <div class="trade-tooltip-section">
+            <div class="trade-tooltip-label" style="margin-bottom: 6px;">Gerekçe</div>
+            <div class="trade-tooltip-content" style="max-height: 150px; overflow-y: auto;">${reasoning}</div>
         </div>
         ` : ''}
     `;
@@ -641,6 +691,12 @@ let wsConnected = false;
 let wsFailCount = 0;
 let pollingInterval = null;
 const POLLING_INTERVAL_MS = 3000; // 3 seconds when WS fails
+
+// Data flow health tracking
+let lastDataReceived = Date.now();
+let dataFlowHealthy = true;
+const DATA_FLOW_TIMEOUT_MS = 20000; // 20 seconds without data = unhealthy
+let dataFlowMonitor = null;
 
 // HTTP Polling fallback for prices
 async function pollPrices() {
@@ -722,6 +778,14 @@ function updateConnectionStatus(connected) {
             </span>
             <span class="text-sm text-profit font-medium">Live</span>
         `;
+    } else if (pollingInterval) {
+        statusEl.innerHTML = `
+            <span class="relative flex h-2.5 w-2.5">
+                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+                <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-primary"></span>
+            </span>
+            <span class="text-sm text-primary font-medium">HTTP fallback</span>
+        `;
     } else {
         statusEl.innerHTML = `
             <span class="relative flex h-2.5 w-2.5">
@@ -776,60 +840,174 @@ function updatePositionsUI(symbols) {
         'SOLUSDT': { color: 'sol', name: 'SOL/USD', icon: 'sunny' }
     };
 
-    container.innerHTML = symbols.map(pos => {
+    const cards = [];
+
+    symbols.forEach(pos => {
         const info = symbolIcons[pos.symbol] || { color: 'primary', name: pos.symbol, icon: 'monetization_on' };
-        const hasPosition = Math.abs(pos.position) > 0.0001;
+        const baseSymbol = pos.symbol.replace('USDT', '');
 
-        if (!hasPosition) return '';
-
-        const pnlClass = pos.unrealized_pnl >= 0 ? 'text-profit' : 'text-loss';
-        const pnlSign = pos.unrealized_pnl >= 0 ? '+' : '';
-
-        return `
-            <div class="bg-panel-dark p-4 rounded-xl border border-border-dark flex flex-col gap-3">
-                <div class="flex justify-between items-center">
-                    <div class="flex items-center gap-2">
-                        <span class="material-symbols-outlined text-${info.color}">${info.icon}</span>
-                        <span class="font-bold text-text-light">${info.name}</span>
+        // Hedge durumu: hem LONG hem SHORT varsa ayrı kartlar göster
+        if (pos.is_hedged) {
+            // LONG kart
+            if (pos.long_position > 0.0001) {
+                const longPnlClass = pos.long_unrealized_pnl >= 0 ? 'text-profit' : 'text-loss';
+                const longPnlSign = pos.long_unrealized_pnl >= 0 ? '+' : '';
+                cards.push(`
+                    <div class="bg-panel-dark p-4 rounded-xl border border-border-dark flex flex-col gap-3">
+                        <div class="flex justify-between items-center">
+                            <div class="flex items-center gap-2">
+                                <span class="material-symbols-outlined text-${info.color}">${info.icon}</span>
+                                <span class="font-bold text-text-light">${info.name}</span>
+                                <span class="text-xs px-1.5 py-0.5 rounded bg-profit/20 text-profit">HEDGE</span>
+                            </div>
+                            <span class="text-lg font-bold text-text-light">${formatCurrency(pos.current_price)}</span>
+                        </div>
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="text-text-secondary">Position</span>
+                            <span class="text-profit font-medium">LONG: ${pos.long_position.toFixed(4)} ${baseSymbol}</span>
+                        </div>
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="text-text-secondary">Entry Price</span>
+                            <span class="text-text-light">${formatCurrency(pos.long_entry_price)}</span>
+                        </div>
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="text-text-secondary">PnL</span>
+                            <span class="${longPnlClass} font-medium">${longPnlSign}${formatCurrency(pos.long_unrealized_pnl)}</span>
+                        </div>
                     </div>
-                    <span id="price-${pos.symbol}" class="text-lg font-bold text-text-light">${formatCurrency(pos.current_price)}</span>
+                `);
+            }
+
+            // SHORT kart
+            if (pos.short_position > 0.0001) {
+                const shortPnlClass = pos.short_unrealized_pnl >= 0 ? 'text-profit' : 'text-loss';
+                const shortPnlSign = pos.short_unrealized_pnl >= 0 ? '+' : '';
+                cards.push(`
+                    <div class="bg-panel-dark p-4 rounded-xl border border-border-dark flex flex-col gap-3">
+                        <div class="flex justify-between items-center">
+                            <div class="flex items-center gap-2">
+                                <span class="material-symbols-outlined text-${info.color}">${info.icon}</span>
+                                <span class="font-bold text-text-light">${info.name}</span>
+                                <span class="text-xs px-1.5 py-0.5 rounded bg-loss/20 text-loss">HEDGE</span>
+                            </div>
+                            <span class="text-lg font-bold text-text-light">${formatCurrency(pos.current_price)}</span>
+                        </div>
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="text-text-secondary">Position</span>
+                            <span class="text-loss font-medium">SHORT: ${pos.short_position.toFixed(4)} ${baseSymbol}</span>
+                        </div>
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="text-text-secondary">Entry Price</span>
+                            <span class="text-text-light">${formatCurrency(pos.short_entry_price)}</span>
+                        </div>
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="text-text-secondary">PnL</span>
+                            <span class="${shortPnlClass} font-medium">${shortPnlSign}${formatCurrency(pos.short_unrealized_pnl)}</span>
+                        </div>
+                    </div>
+                `);
+            }
+        } else {
+            // Normal tek pozisyon (hedge değil)
+            const hasPosition = Math.abs(pos.position) > 0.0001;
+            if (!hasPosition) return;
+
+            const pnlClass = pos.unrealized_pnl >= 0 ? 'text-profit' : 'text-loss';
+            const pnlSign = pos.unrealized_pnl >= 0 ? '+' : '';
+
+            cards.push(`
+                <div class="bg-panel-dark p-4 rounded-xl border border-border-dark flex flex-col gap-3">
+                    <div class="flex justify-between items-center">
+                        <div class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-${info.color}">${info.icon}</span>
+                            <span class="font-bold text-text-light">${info.name}</span>
+                        </div>
+                        <span id="price-${pos.symbol}" class="text-lg font-bold text-text-light">${formatCurrency(pos.current_price)}</span>
+                    </div>
+                    <div class="flex justify-between items-center text-sm">
+                        <span class="text-text-secondary">Position</span>
+                        <span class="text-text-light">${pos.position_side}: ${Math.abs(pos.position).toFixed(4)} ${baseSymbol}</span>
+                    </div>
+                    <div class="flex justify-between items-center text-sm">
+                        <span class="text-text-secondary">Entry Price</span>
+                        <span class="text-text-light">${formatCurrency(pos.entry_price)}</span>
+                    </div>
+                    <div class="flex justify-between items-center text-sm">
+                        <span class="text-text-secondary">PnL</span>
+                        <span class="${pnlClass} font-medium">${pnlSign}${formatCurrency(pos.unrealized_pnl)} (${formatPercent(pos.unrealized_pnl_pct)})</span>
+                    </div>
                 </div>
-                <div class="flex justify-between items-center text-sm">
-                    <span class="text-text-secondary">Position</span>
-                    <span class="text-text-light">${pos.position_side}: ${Math.abs(pos.position).toFixed(4)} ${pos.symbol.replace('USDT', '')}</span>
-                </div>
-                <div class="flex justify-between items-center text-sm">
-                    <span class="text-text-secondary">Entry Price</span>
-                    <span class="text-text-light">${formatCurrency(pos.entry_price)}</span>
-                </div>
-                <div class="flex justify-between items-center text-sm">
-                    <span class="text-text-secondary">PnL</span>
-                    <span class="${pnlClass} font-medium">${pnlSign}${formatCurrency(pos.unrealized_pnl)} (${formatPercent(pos.unrealized_pnl_pct)})</span>
-                </div>
-            </div>
-        `;
-    }).filter(html => html).join('') || `
+            `);
+        }
+    });
+
+    container.innerHTML = cards.length > 0 ? cards.join('') : `
         <div class="bg-panel-dark p-4 rounded-xl border border-border-dark">
             <p class="text-sm text-text-secondary">No open positions</p>
         </div>
     `;
 }
 
-// Fetch trades
-async function fetchTrades(symbol = null) {
+// Fetch trades with pagination
+async function fetchTrades(symbol = null, page = 1) {
     try {
-        let url = `${API_BASE}/api/trades?per_page=10&status=all`;
+        let url = `${API_BASE}/api/trades?per_page=${tradesPerPage}&page=${page}&status=all`;
         if (symbol) url += `&symbol=${symbol}`;
 
         const response = await fetch(url);
         if (!response.ok) throw new Error('Failed to fetch trades');
 
         const data = await response.json();
-        cachedTrades = data.trades || [];  // Cache for real-time PnL updates
+        cachedTrades = data.trades || [];
+        totalTradesCount = data.total || 0;
+        currentTradesPage = data.page || 1;
+        totalTradesPages = Math.ceil(totalTradesCount / tradesPerPage) || 1;
+
         updateTradesTable(cachedTrades);
+        updateTradesPagination();
     } catch (error) {
         console.error('Trades fetch error:', error);
     }
+}
+
+// Update trades pagination UI
+function updateTradesPagination() {
+    const paginationEl = document.getElementById('trades-pagination');
+    if (!paginationEl) return;
+
+    const prevDisabled = currentTradesPage <= 1;
+    const nextDisabled = currentTradesPage >= totalTradesPages;
+
+    paginationEl.innerHTML = `
+        <div class="flex items-center justify-between">
+            <span class="text-sm text-text-secondary">
+                Toplam ${totalTradesCount} trade
+            </span>
+            <div class="flex items-center gap-2">
+                <button
+                    onclick="goToTradesPage(${currentTradesPage - 1})"
+                    ${prevDisabled ? 'disabled' : ''}
+                    class="px-3 py-1.5 text-sm rounded-lg border border-border-dark ${prevDisabled ? 'text-text-secondary cursor-not-allowed opacity-50' : 'text-text-light hover:bg-panel-light cursor-pointer'}">
+                    Onceki
+                </button>
+                <span class="text-sm text-text-light px-2">
+                    ${currentTradesPage} / ${totalTradesPages}
+                </span>
+                <button
+                    onclick="goToTradesPage(${currentTradesPage + 1})"
+                    ${nextDisabled ? 'disabled' : ''}
+                    class="px-3 py-1.5 text-sm rounded-lg border border-border-dark ${nextDisabled ? 'text-text-secondary cursor-not-allowed opacity-50' : 'text-text-light hover:bg-panel-light cursor-pointer'}">
+                    Sonraki
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+// Navigate to specific trades page
+function goToTradesPage(page) {
+    if (page < 1 || page > totalTradesPages) return;
+    fetchTrades(currentSymbol, page);
 }
 
 // Update trades table
@@ -839,7 +1017,7 @@ function updateTradesTable(trades) {
     if (!trades || trades.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="6" class="px-6 py-4 text-center text-text-secondary">No trades found</td>
+                <td colspan="8" class="px-6 py-4 text-center text-text-secondary">No trades found</td>
             </tr>
         `;
         return;
@@ -848,19 +1026,41 @@ function updateTradesTable(trades) {
     tbody.innerHTML = trades.map((trade, index) => {
         const isLast = index === trades.length - 1;
         const borderClass = isLast ? '' : 'border-b border-border-dark';
-        const sideClass = trade.side === 'BUY' ? 'text-profit' : 'text-loss';
+        const isPartial = !!trade.is_partial_close;
+        const sideLabel = trade.action_label || trade.side || '-';
+        const sideClass = isPartial ? 'text-primary' : (trade.side === 'BUY' ? 'text-profit' : 'text-loss');
         const pnlClass = (trade.pnl || 0) >= 0 ? 'text-profit' : 'text-loss';
         const pnlSign = (trade.pnl || 0) >= 0 ? '+' : '';
+        const baseSymbol = trade.symbol ? trade.symbol.replace('USDT', '') : '';
+        const remainingHtml = isPartial && trade.remaining_amount
+            ? `<div class="text-xs text-primary mt-1">Kalan: ${Number(trade.remaining_amount).toFixed(4)} ${baseSymbol}</div>`
+            : '';
+        const closedHtml = isPartial
+            ? `<div class="text-xs text-text-light mt-1">Kapatılan: ${trade.amount.toFixed(4)} ${baseSymbol}</div>`
+            : '';
+
+        // Time formatting - full date/time format
+        const entryTimeFormatted = new Date(trade.timestamp).toLocaleString('tr-TR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+        const exitTimeFormatted = trade.close_time
+            ? new Date(trade.close_time).toLocaleString('tr-TR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+            : '-';
+        const exitPriceFormatted = trade.close_price ? formatCurrency(trade.close_price) : '-';
 
         // Her satıra hover class ekle - signal eşleştirmesi hover zamanında yapılacak
         return `
             <tr class="${borderClass} trade-row-hoverable" data-trade-index="${index}">
                 <td class="px-6 py-4 font-medium text-text-light whitespace-nowrap">${trade.symbol.replace('USDT', '/USD')}</td>
-                <td class="px-6 py-4 ${sideClass}">${trade.side}</td>
-                <td class="px-6 py-4 text-right">${trade.amount.toFixed(4)}</td>
+                <td class="px-6 py-4 ${sideClass}">${sideLabel}</td>
+                <td class="px-6 py-4 text-right">
+                    ${isPartial ? '' : trade.amount.toFixed(4)}
+                    ${closedHtml}
+                    ${remainingHtml}
+                </td>
                 <td class="px-6 py-4 text-right">${formatCurrency(trade.entry_price)}</td>
+                <td class="px-6 py-4 text-right">${exitPriceFormatted}</td>
                 <td class="px-6 py-4 text-right ${pnlClass}">${pnlSign}${formatCurrency(trade.pnl || 0)}</td>
-                <td class="px-6 py-4 text-right">${timeAgo(trade.timestamp)}</td>
+                <td class="px-6 py-4 text-right">${entryTimeFormatted}</td>
+                <td class="px-6 py-4 text-right">${exitTimeFormatted}</td>
             </tr>
         `;
     }).join('');
@@ -983,7 +1183,8 @@ function updatePnLHistogram(data) {
 // Filter by symbol
 function filterBySymbol(symbol) {
     currentSymbol = symbol;
-    fetchTrades(symbol);
+    currentTradesPage = 1;  // Reset to first page when filter changes
+    fetchTrades(symbol, 1);
 
     // Update equity curve for selected symbol
     fetchEquityCurve(30, symbol);
@@ -1100,22 +1301,45 @@ function connectWebSocket() {
             symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
         }));
 
-        // Start heartbeat at 20 seconds (reduced from 25)
+        // Start heartbeat at 10 seconds (faster than Cloudflare timeout)
+        // Also check connection state and auto-reconnect if needed
         if (pingInterval) clearInterval(pingInterval);
         pingInterval = setInterval(() => {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ action: 'ping' }));
+            } else if (!wsConnecting && !wsReconnectTimeout) {
+                console.log('Connection lost in ping check, reconnecting...');
+                connectWebSocket();
             }
-        }, 20000); // Cloudflare timeout is 100s, so 20s gives us 5 pings buffer
+        }, 10000); // 10s for faster disconnect detection
+
+        // Start data flow monitor - reconnect if no data for too long
+        if (dataFlowMonitor) clearInterval(dataFlowMonitor);
+        dataFlowMonitor = setInterval(() => {
+            if (wsConnected && Date.now() - lastDataReceived > DATA_FLOW_TIMEOUT_MS) {
+                console.log('No data received for 20s while connected, forcing reconnect');
+                dataFlowHealthy = false;
+                wsFailCount = 0; // Reset for faster reconnect
+                if (ws) {
+                    try { ws.close(); } catch (_) {}
+                }
+                connectWebSocket();
+            }
+        }, 5000); // Check every 5 seconds
     };
 
     ws.onmessage = (event) => {
+        // Track data flow health
+        lastDataReceived = Date.now();
+        dataFlowHealthy = true;
+
         try {
             const data = JSON.parse(event.data);
             if (data.type === 'price_update') {
                 updatePrice(data.symbol, data.price);
-            } else if (data.type === 'pong') {
+            } else if (data.type === 'pong' || data.type === 'heartbeat') {
                 // Heartbeat response - connection is alive
+                // Both client pong and server heartbeat keep connection active
             } else if (data.type === 'new_signal') {
                 // Real-time signal update
                 console.log('New signal received:', data.signal);
@@ -1133,24 +1357,26 @@ function connectWebSocket() {
     ws.onclose = () => {
         clearTimeout(connectionTimeout);
         console.log('WebSocket disconnected');
+        const wasStale = !dataFlowHealthy && wsConnected;
         wsConnected = false;
         wsConnecting = false; // Connection lost
         wsFailCount++;
+        startPolling(); // Keep data fresh while reconnecting
         updateConnectionStatus(false);
         if (pingInterval) {
             clearInterval(pingInterval);
             pingInterval = null;
         }
-
-        // Start polling fallback after 2 consecutive failures
-        if (wsFailCount >= 2 && !pollingInterval) {
-            console.log(`WebSocket failed ${wsFailCount} times, starting HTTP polling fallback`);
-            startPolling();
+        if (dataFlowMonitor) {
+            clearInterval(dataFlowMonitor);
+            dataFlowMonitor = null;
         }
 
-        // Exponential backoff reconnection
-        const retryDelay = Math.min(5000 * wsFailCount, 30000);
-        console.log(`Retrying WebSocket in ${retryDelay/1000}s...`);
+        // Faster retry if connection was working but data stopped (stale)
+        const retryDelay = wasStale
+            ? Math.min(1000 * (wsFailCount + 1), 5000)  // 1-5s for stale
+            : Math.min(2000 * wsFailCount, 10000);      // 2-10s normal
+        console.log(`Retrying WebSocket in ${retryDelay/1000}s (wasStale: ${wasStale})`);
         wsReconnectTimeout = setTimeout(connectWebSocket, retryDelay);
     };
 
@@ -1159,6 +1385,7 @@ function connectWebSocket() {
         console.error('WebSocket error:', error);
         wsConnected = false;
         wsConnecting = false; // Connection failed
+        startPolling();
         updateConnectionStatus(false);
     };
 }
@@ -1310,17 +1537,31 @@ function handleNewTrade(trade) {
     const pnl = trade.pnl || 0;
     const pnlClass = pnl >= 0 ? 'text-profit' : 'text-loss';
     const pnlSign = pnl >= 0 ? '+' : '';
+    const isPartial = !!trade.is_partial_close;
+    const sideLabel = trade.action_label || trade.side || '-';
+    const sideBadgeClass = isPartial
+        ? 'bg-primary/20 text-primary'
+        : (trade.side === 'BUY' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss');
+    const baseSymbol = trade.symbol ? trade.symbol.replace('USDT', '') : '';
+    const remainingHtml = isPartial && trade.remaining_amount
+        ? `<div class="text-[11px] text-primary mt-1">Kalan: ${Number(trade.remaining_amount).toFixed(4)} ${baseSymbol}</div>`
+        : '';
+    const closedHtml = isPartial
+        ? `<div class="text-[11px] text-text-light mt-1">Kapatılan: ${Number(trade.amount || 0).toFixed(4)} ${baseSymbol}</div>`
+        : '';
 
     row.innerHTML = `
         <td class="py-3 px-4">
             <span class="font-medium">${trade.symbol || '-'}</span>
         </td>
         <td class="py-3 px-4">
-            <span class="px-2 py-1 rounded text-xs font-medium ${
-                trade.side === 'BUY' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
-            }">${trade.side || '-'}</span>
+            <span class="px-2 py-1 rounded text-xs font-medium ${sideBadgeClass}">${sideLabel}</span>
         </td>
-        <td class="py-3 px-4 text-right">${trade.amount?.toFixed(4) || '-'}</td>
+        <td class="py-3 px-4 text-right">
+            ${isPartial ? '' : (trade.amount?.toFixed(4) || '-')}
+            ${closedHtml}
+            ${remainingHtml}
+        </td>
         <td class="py-3 px-4 text-right">${formatCurrency(trade.entry_price)}</td>
         <td class="py-3 px-4 text-right ${pnlClass}">
             ${pnlSign}${formatCurrency(pnl)}
@@ -1344,6 +1585,9 @@ function handleNewTrade(trade) {
     while (tbody.children.length > 10) {
         tbody.removeChild(tbody.lastChild);
     }
+
+    // Portfolio değişti; en güncel pozisyonları çek
+    fetchPortfolio().catch(err => console.error('Portfolio refresh failed after trade:', err));
 }
 
 // Update AI Insights UI with GLM signals
@@ -1401,6 +1645,43 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Connect WebSocket
     connectWebSocket();
+
+    // Visibility API: Reconnect when page becomes visible again
+    // Browsers suspend WebSocket connections when tab is hidden, Cloudflare may drop them
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            console.log('Page visible, checking WebSocket...');
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                wsFailCount = 0; // Reset fail count for fresh reconnect
+                connectWebSocket();
+            }
+        }
+    });
+
+    // Network transitions (mobile): reconnect quickly when back online/focused
+    window.addEventListener('online', () => {
+        console.log('Network online, reconnecting WebSocket');
+        wsFailCount = 0;
+        startPolling(); // keep data updating until WS ready
+        connectWebSocket();
+    });
+
+    window.addEventListener('offline', () => {
+        console.log('Network offline, switching to polling mode');
+        wsConnected = false;
+        startPolling();
+        updateConnectionStatus(false);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            try { ws.close(); } catch (_) {}
+        }
+    });
+
+    window.addEventListener('focus', () => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            console.log('Window focused, ensuring WebSocket connected');
+            connectWebSocket();
+        }
+    });
 
     // Refresh data periodically (WebSocket handles real-time updates, polling is fallback)
     setInterval(fetchPortfolio, 30000);

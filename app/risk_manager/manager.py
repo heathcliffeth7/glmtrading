@@ -905,6 +905,9 @@ class RiskManager:
                 # GLM shouldn't output invalidation for HOLD.
                 exit_plan = None
 
+            # Translate reasoning to Turkish if it's in English
+            reasoning = self._translate_to_turkish(reasoning)
+
             return {
                 "action": action,
                 "amount": amount,
@@ -918,6 +921,53 @@ class RiskManager:
         except Exception as e:  # noqa: BLE001
             logger.error("Error parsing GLM content: %s", e)
             return None
+
+    def _translate_to_turkish(self, text: str) -> str:
+        """
+        Translate English text to Turkish using GLM.
+        If the text is already in Turkish, returns it unchanged.
+        """
+        if not text or len(text) < 20:
+            return text
+
+        # Check for common English words/patterns
+        english_markers = [
+            'the ', 'market', 'price', 'trend', 'bearish', 'bullish',
+            'support', 'resistance', 'momentum', 'indicates', 'suggests',
+            'trading', 'position', 'volume', 'level', 'break', 'strong',
+            'despite', 'therefore', 'however', 'confluence'
+        ]
+
+        text_lower = text.lower()
+        english_word_count = sum(1 for marker in english_markers if marker in text_lower)
+
+        # If less than 3 English markers found, assume it's already Turkish
+        if english_word_count < 3:
+            return text
+
+        logger.info("🌐 İngilizce gerekçe tespit edildi (%d marker), çeviriliyor...", english_word_count)
+
+        try:
+            translation_prompt = (
+                "Aşağıdaki İngilizce kripto analiz metnini Türkçe'ye çevir. "
+                "Sadece çeviriyi yaz, başka bir şey ekleme. "
+                "Teknik terimleri (RSI, EMA, MACD, support, resistance) olduğu gibi bırak:\n\n"
+                f"{text}"
+            )
+
+            response = self._glm.request([
+                {"role": "user", "content": translation_prompt}
+            ])
+
+            if response and "choices" in response:
+                translated = response["choices"][0]["message"]["content"].strip()
+                logger.info("✅ Çeviri tamamlandı: %d → %d karakter", len(text), len(translated))
+                return translated
+
+        except Exception as e:
+            logger.warning("⚠️ Çeviri başarısız: %s - orijinal metin kullanılıyor", e)
+
+        return text
 
     def _prepare_json_payload(self, raw: str) -> str:
         """Clean GLM response so that json.loads accepts multi-line reasoning."""
@@ -1367,6 +1417,60 @@ IMPORTANT:
         if value <= 0:
             return 1.0  # Default to 1x if invalid
         return max(1.0, min(value, 20.0))
+
+    # --- Prompt Logging ---
+
+    def _write_prompt_to_file(self, symbol: str, system_message: str, user_content: str, estimated_tokens: int) -> None:
+        """GLM'e gönderilen prompt'u dosyaya yaz - analiz için"""
+        try:
+            from pathlib import Path
+            from datetime import datetime
+
+            # Log dosyası yolu
+            log_dir = Path("/root/trading/logs")
+            log_dir.mkdir(exist_ok=True)
+            log_file = log_dir / "glm_prompts.log"
+
+            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write("\n" + "=" * 100 + "\n")
+                f.write(f"📤 GLM PROMPT | {timestamp} | {symbol}\n")
+                f.write(f"📊 Stats: {len(user_content)} chars, ~{estimated_tokens} tokens\n")
+                f.write("=" * 100 + "\n\n")
+                f.write("🔷 SYSTEM MESSAGE:\n")
+                f.write("-" * 50 + "\n")
+                f.write(system_message + "\n\n")
+                f.write("🔷 USER CONTENT:\n")
+                f.write("-" * 50 + "\n")
+                f.write(user_content + "\n")
+                f.write("=" * 100 + "\n\n")
+
+            logger.info("📝 Prompt logged to %s", log_file)
+
+        except Exception as e:
+            logger.warning("Failed to write prompt to file: %s", e)
+
+    def _write_response_to_file(self, response_content: str, estimated_tokens: int) -> None:
+        """GLM'den gelen yanıtı dosyaya yaz - analiz için"""
+        try:
+            from pathlib import Path
+            from datetime import datetime
+
+            log_file = Path("/root/trading/logs/glm_prompts.log")
+
+            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write("\n" + "-" * 100 + "\n")
+                f.write(f"📥 GLM RESPONSE | {timestamp}\n")
+                f.write(f"📊 Stats: {len(response_content)} chars, ~{estimated_tokens} tokens\n")
+                f.write("-" * 100 + "\n")
+                f.write(response_content + "\n")
+                f.write("-" * 100 + "\n\n")
+
+        except Exception as e:
+            logger.warning("Failed to write response to file: %s", e)
 
     # --- Fallback & Guardrail Helpers ---
 
@@ -2138,43 +2242,13 @@ IMPORTANT:
             # Log prompt size
             estimated_tokens = len(content) // 4
             logger.info("📤 NOF1 GLM Prompt: %d chars, ~%d tokens", len(content), estimated_tokens)
-            
-            # === PROMPT GÖNDERİM ÖNCESİ DOĞRULAMA ===
-            # Prompt'un tam içeriğinin API'ye gönderilmeden önce doğru olduğunu kontrol et
-            system_message = """Sen SERMAYEYİ KORUMA ÖNCELİKLİ bir profesyonel kripto türev traderısın.
 
-TEMEL PRENSİP: "Capital Preservation First, Alpha Second"
-- Önce sermayeni koru, sonra kar fırsatlarını değerlendir
-- Şüphe durumunda HOLD - agresif olmak yerine sabırlı ol
-- Stop-loss'ları sıkı tut, R:R en az 2:1 olmalı
-- Tek bir işlemde portföyün %2'sinden fazla risk alma
-- Fırsatları kaçırmaktan korkma - kötü bir trade açmak, fırsat kaçırmaktan daha kötü
+            # GLM özgürlüğü: Minimal system message - hiçbir kural/kısıtlama yok
+            system_message = "Sen bir kripto analisti. Verileri analiz et ve JSON formatında yanıt ver."
 
-KRİTİK KURALLAR:
-1. JSON yanıtındaki 'reasoning' alanı HER ZAMAN TÜRKÇE yazılmalıdır - İngilizce yazmak YASAKTIR
-2. Her karar için TÜM timeframe'leri (1m, 30m, 4h) analiz et
-3. Fiyat seviyelerini, destek/direnç noktalarını KESIN RAKAMLARLA açıkla
-4. HOLD kararları da detaylı gerekçe gerektirir
-5. Emin değilsen → HOLD"""
-            system_len = len(system_message)
-            user_content_len = len(content)
-            total_prompt_len = system_len + user_content_len
-            
-            logger.info(
-                "📤 GLM Prompt Validation: system=%d chars, user=%d chars, total=%d chars",
-                system_len,
-                user_content_len,
-                total_prompt_len,
-            )
-            
-            # Prompt içeriğinin son 200 karakterini logla (tam içeriğin gönderildiğini doğrulamak için)
-            if len(content) > 200:
-                logger.debug(
-                    "📤 User prompt (last 200 chars): %s",
-                    content[-200:],
-                )
-            else:
-                logger.debug("📤 User prompt (full): %s", content)
+            # === PROMPT'U DOSYAYA KAYDET ===
+            symbol = raw_market_data.get("symbol", "UNKNOWN")
+            self._write_prompt_to_file(symbol, system_message, content, estimated_tokens)
 
             return [
                 {
@@ -2544,6 +2618,9 @@ KRİTİK KURALLAR:
         response_tokens = len(raw_content) // 4  # Rough estimate
         logger.info("📥 GLM Response: %d chars, ~%d tokens (estimated)", len(raw_content), response_tokens)
         logger.info("🔍 Raw GLM response (first 500 chars): %s", raw_content[:500])
+
+        # GLM yanıtını dosyaya kaydet
+        self._write_response_to_file(raw_content, response_tokens)
 
         # Empty-content guard: attempt alternative fields, else hard HOLD to avoid JSON parse spam
         if not raw_content or not raw_content.strip():

@@ -2,12 +2,19 @@
 Partial Take Profit Manager - Kademeli kar alma sistemi.
 
 Features:
-- 3 kademeli TP: 1R=%40, 2R=%30, 3R=%30 (trailing)
+- 3-4 kademeli TP: Strateji bazlı dağılım
 - TP1 sonrası breakeven hareketi
 - TP2 sonrası trailing aktivasyonu
 - Risk azaltma ve kar kilitleme
+- Dinamik strateji seçimi (Conservative/Balanced/Aggressive)
+- S/R seviyelerine snap özelliği
 
 Supports both Scalp (15-30m) and Swing (4H) trading modes.
+
+v2.0 Features:
+- TPStrategy enum for dynamic strategy selection
+- Automatic strategy selection based on market conditions
+- S/R level snapping for smarter TP placement
 """
 
 from dataclasses import dataclass, field
@@ -17,6 +24,13 @@ from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class TPStrategy(Enum):
+    """TP strateji tipleri"""
+    CONSERVATIVE = "conservative"  # Hızlı kar al - düşük vol, zayıf trend
+    BALANCED = "balanced"          # Dengeli - orta koşullar
+    AGGRESSIVE = "aggressive"      # Trendi sür - güçlü trend, yüksek confluence
 
 
 class TPStatus(Enum):
@@ -49,10 +63,23 @@ class PartialTPPlan:
     trailing_active: bool = False
     trailing_stop: Optional[float] = None
     created_at: Optional[datetime] = None
+    strategy: TPStrategy = TPStrategy.BALANCED  # v2.0: Selected strategy
 
     def __post_init__(self):
         self.remaining_quantity = self.initial_quantity
         self.created_at = datetime.utcnow()
+
+    @property
+    def risk_per_unit(self) -> float:
+        """1R = Entry ile SL arası mesafe"""
+        return abs(self.entry_price - self.stop_loss)
+
+    @property
+    def remaining_position_pct(self) -> float:
+        """Henüz kapatılmamış pozisyon yüzdesi"""
+        if self.initial_quantity <= 0:
+            return 0.0
+        return (self.remaining_quantity / self.initial_quantity) * 100
 
 
 class PartialTakeProfitManager:
@@ -61,6 +88,7 @@ class PartialTakeProfitManager:
     - TP level triggering
     - Breakeven adjustment after TP1
     - Trailing stop activation after TP2
+    - Dynamic strategy selection (v2.0)
 
     Mode-aware configuration for Scalp vs Swing trading.
     """
@@ -78,6 +106,28 @@ class PartialTakeProfitManager:
             "percentages": [33, 33, 34],   # Equal distribution (changed from 35/35/30)
             "atr_pct": 1.0,                # Trailing distance (changed from 1.5)
         }
+    }
+
+    # v2.0: Strategy-based TP distributions
+    STRATEGY_DISTRIBUTIONS = {
+        TPStrategy.CONSERVATIVE: [
+            {"r": 0.5, "pct": 30},   # 0.5R'de %30 - Hızlı kar al
+            {"r": 1.0, "pct": 40},   # 1R'de %40
+            {"r": 1.5, "pct": 20},   # 1.5R'de %20
+            {"r": 2.0, "pct": 10},   # 2R'de kalan %10
+        ],
+        TPStrategy.BALANCED: [
+            {"r": 1.0, "pct": 25},   # 1R'de %25
+            {"r": 2.0, "pct": 35},   # 2R'de %35
+            {"r": 3.0, "pct": 25},   # 3R'de %25
+            {"r": 4.0, "pct": 15},   # 4R'de kalan %15
+        ],
+        TPStrategy.AGGRESSIVE: [
+            {"r": 1.5, "pct": 20},   # 1.5R'de %20
+            {"r": 3.0, "pct": 30},   # 3R'de %30
+            {"r": 5.0, "pct": 30},   # 5R'de %30
+            {"r": 8.0, "pct": 20},   # 8R'de kalan %20 (runner)
+        ],
     }
 
     def __init__(
@@ -189,6 +239,253 @@ class PartialTakeProfitManager:
         )
 
         return plan
+
+    # =========================================================================
+    # v2.0: Dynamic Strategy Selection Methods
+    # =========================================================================
+
+    def select_strategy(
+        self,
+        trend_strength: str,
+        volatility_regime: str,
+        mtf_confluence: float,
+        win_rate: float = 0.50,
+    ) -> TPStrategy:
+        """
+        Piyasa koşullarına göre en uygun TP stratejisini seç.
+
+        Args:
+            trend_strength: "STRONG", "MODERATE", "WEAK"
+            volatility_regime: "low", "medium", "high", "extreme"
+            mtf_confluence: MTF uyum skoru (0-100)
+            win_rate: Son işlemlerin win rate'i (0-1)
+
+        Returns:
+            TPStrategy enum value
+        """
+        score = 0
+
+        # Trend gücü
+        trend_upper = trend_strength.upper() if trend_strength else "MODERATE"
+        if trend_upper == "STRONG":
+            score += 2
+        elif trend_upper == "MODERATE":
+            score += 1
+        elif trend_upper == "WEAK":
+            score -= 1
+
+        # Volatilite
+        vol_lower = volatility_regime.lower() if volatility_regime else "medium"
+        if vol_lower in ["low", "medium"]:
+            score += 1  # Düşük vol = trend sürebilir
+        elif vol_lower == "extreme":
+            score -= 2  # Yüksek vol = hızlı kar al
+
+        # MTF uyumu
+        if mtf_confluence >= 70:
+            score += 2
+        elif mtf_confluence >= 55:
+            score += 1
+        else:
+            score -= 1
+
+        # Win rate (düşükse daha konservatif)
+        if win_rate < 0.45:
+            score -= 2
+        elif win_rate > 0.60:
+            score += 1
+
+        # Strateji seçimi
+        if score >= 4:
+            strategy = TPStrategy.AGGRESSIVE
+        elif score >= 1:
+            strategy = TPStrategy.BALANCED
+        else:
+            strategy = TPStrategy.CONSERVATIVE
+
+        logger.info(
+            "Strategy selected: %s | Score: %d | Trend: %s, Vol: %s, MTF: %.0f, WR: %.0f%%",
+            strategy.value, score, trend_strength, volatility_regime, mtf_confluence, win_rate * 100
+        )
+
+        return strategy
+
+    def _snap_to_sr(
+        self,
+        tp_price: float,
+        sr_levels: List[float],
+        position_side: str,
+        snap_threshold_pct: float = 1.0,
+    ) -> float:
+        """
+        TP fiyatı S/R seviyesine yakınsa, S/R'yi kullan.
+        Akıllı TP yerleşimi için.
+
+        Args:
+            tp_price: Hesaplanan TP fiyatı
+            sr_levels: S/R seviyeleri listesi
+            position_side: "LONG" veya "SHORT"
+            snap_threshold_pct: Snap için max mesafe yüzdesi
+
+        Returns:
+            Adjust edilmiş TP fiyatı
+        """
+        if not sr_levels or tp_price <= 0:
+            return tp_price
+
+        for sr in sr_levels:
+            if sr <= 0:
+                continue
+
+            distance_pct = abs(tp_price - sr) / tp_price * 100
+
+            if distance_pct <= snap_threshold_pct:
+                # LONG için S/R'nin biraz altında, SHORT için biraz üstünde
+                if position_side == "LONG":
+                    adjusted = sr * 0.998  # %0.2 altında
+                else:
+                    adjusted = sr * 1.002  # %0.2 üstünde
+
+                logger.debug(
+                    "TP snapped to S/R: %.2f -> %.2f (S/R: %.2f, dist: %.2f%%)",
+                    tp_price, adjusted, sr, distance_pct
+                )
+                return adjusted
+
+        return tp_price
+
+    def create_tp_plan_advanced(
+        self,
+        symbol: str,
+        entry_price: float,
+        stop_loss: float,
+        position_side: str,
+        quantity: float,
+        # Market context for strategy selection
+        trend_strength: str = "MODERATE",
+        volatility_regime: str = "medium",
+        mtf_confluence: float = 50.0,
+        win_rate: float = 0.50,
+        sr_levels: Optional[List[float]] = None,
+    ) -> Optional[PartialTPPlan]:
+        """
+        Dinamik strateji seçimi ile TP planı oluştur.
+        S/R seviyelerine göre TP'leri ayarla.
+
+        Args:
+            symbol: Trading pair
+            entry_price: Entry price
+            stop_loss: Stop loss price
+            position_side: "LONG" or "SHORT"
+            quantity: Total position size
+            trend_strength: Trend gücü
+            volatility_regime: Volatilite rejimi
+            mtf_confluence: MTF uyum skoru
+            win_rate: Recent win rate
+            sr_levels: S/R seviyeleri (optional)
+
+        Returns:
+            PartialTPPlan with dynamic strategy or None
+        """
+        if not self.feature_enabled:
+            return None
+
+        # Calculate risk (R)
+        if position_side == "LONG":
+            risk = entry_price - stop_loss
+        else:
+            risk = stop_loss - entry_price
+
+        if risk <= 0:
+            logger.error(
+                "Invalid risk calculation: entry=%.2f, sl=%.2f, side=%s",
+                entry_price, stop_loss, position_side
+            )
+            return None
+
+        # Select strategy based on market conditions
+        strategy = self.select_strategy(
+            trend_strength, volatility_regime, mtf_confluence, win_rate
+        )
+
+        # Get distribution for selected strategy
+        distribution = self.STRATEGY_DISTRIBUTIONS[strategy]
+
+        # Create TP levels
+        levels = []
+        for idx, level_config in enumerate(distribution):
+            r_mult = level_config["r"]
+            pct = level_config["pct"]
+
+            # Calculate TP price
+            if position_side == "LONG":
+                tp_price = entry_price + (risk * r_mult)
+            else:
+                tp_price = entry_price - (risk * r_mult)
+
+            # Snap to S/R if provided
+            if sr_levels:
+                tp_price = self._snap_to_sr(tp_price, sr_levels, position_side)
+
+            levels.append(TPLevel(
+                level_id=idx + 1,
+                price=round(tp_price, 2),
+                percentage=pct,
+            ))
+
+        # Create plan
+        plan = PartialTPPlan(
+            entry_price=entry_price,
+            position_side=position_side,
+            initial_quantity=quantity,
+            stop_loss=stop_loss,
+            levels=levels,
+            strategy=strategy,
+        )
+
+        self.active_plans[symbol] = plan
+
+        # Log creation
+        level_str = ", ".join([
+            f"TP{l.level_id}=${l.price:.2f}({l.percentage}%)"
+            for l in levels
+        ])
+        logger.info(
+            "Created Advanced TP Plan for %s: Strategy=%s | Entry=%.2f, SL=%.2f | %s",
+            symbol, strategy.value, entry_price, stop_loss, level_str
+        )
+
+        return plan
+
+    def get_compact_summary(self, symbol: str) -> str:
+        """
+        Get compact summary for GLM prompt (~40 tokens).
+
+        Args:
+            symbol: Trading pair
+
+        Returns:
+            Compact string like: "TP: BALANCED | TP1✓ TP2○ TP3○ TP4○ | BE✓ TRAIL○"
+        """
+        if symbol not in self.active_plans:
+            return ""
+
+        plan = self.active_plans[symbol]
+
+        # Status emojis - using ASCII for compatibility
+        tp_status = []
+        for level in plan.levels:
+            status_char = "Y" if level.status == TPStatus.TRIGGERED else "O"
+            tp_status.append(f"TP{level.level_id}{status_char}")
+
+        be_status = "Y" if plan.is_breakeven else "O"
+        trail_status = "Y" if plan.trailing_active else "O"
+
+        return (
+            f"TP: {plan.strategy.value.upper()} | "
+            f"{' '.join(tp_status)} | "
+            f"BE{be_status} TRAIL{trail_status}"
+        )
 
     def check_and_execute(
         self,

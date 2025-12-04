@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 class SymbolPosition(BaseModel):
     """Single symbol position details"""
     symbol: str
-    position: float
+    position: float  # Net pozisyon
     position_side: str = Field(..., pattern="^(LONG|SHORT|FLAT)$")
     entry_price: float
     current_price: float
@@ -18,6 +18,14 @@ class SymbolPosition(BaseModel):
     equity: float = 10000.0  # Bu sembolün equity'si (10K + PnL)
     margin_used: float
     leverage: float = 1.0
+    # Hedge pozisyonları için detaylı bilgi
+    long_position: float = 0.0
+    long_entry_price: float = 0.0
+    long_unrealized_pnl: float = 0.0
+    short_position: float = 0.0
+    short_entry_price: float = 0.0
+    short_unrealized_pnl: float = 0.0
+    is_hedged: bool = False  # Hem LONG hem SHORT varsa True
 
 
 class PortfolioSummary(BaseModel):

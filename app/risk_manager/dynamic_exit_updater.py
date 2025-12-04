@@ -25,10 +25,16 @@ class DynamicExitUpdater:
     ) -> Tuple[bool, Optional[str]]:
         """
         Exit plan güncellemesi gerekli mi değerlendir
-        
+
+        DEVRE DISI: GLM'den exit plan isteme kaldirildi.
+        TP/SL tamamen Python tarafinda ATR-bazli hesaplaniyor.
+
         Returns:
             (should_update, reason)
         """
+        # GLM exit plan updates disabled - TP/SL calculated by Python only
+        return False, "GLM exit updates disabled - using Python ATR-based calculations"
+
         position_id = position_data.get('position_id')
         exit_plan_history = position_data.get('exit_plan_history', {})
         updates = exit_plan_history.get('updates', [])

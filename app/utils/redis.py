@@ -16,7 +16,10 @@ settings = get_settings()
 logger = get_logger(__name__)
 
 
-_publisher = redis.Redis.from_url(str(settings.redis.url))
+def _get_publisher() -> redis.Redis:
+    """Get sync Redis client from connection manager (with pooling)"""
+    from app.utils.redis_manager import get_redis_manager
+    return get_redis_manager().get_sync_client()
 
 # Local message queue for Redis failure resilience
 _local_queue: deque = deque(maxlen=1000)  # Keep last 1000 messages
@@ -36,36 +39,37 @@ def _start_retry_thread() -> None:
     
     def _retry_worker():
         global _redis_connected
-        
+
         while True:
             time.sleep(5)  # Check every 5 seconds
-            
+
             with _queue_lock:
                 if not _local_queue:
                     continue
-                
+
                 # Try to reconnect and flush queue
                 try:
-                    # Test connection
-                    _publisher.ping()
+                    # Get client from manager (with circuit breaker)
+                    publisher = _get_publisher()
+                    publisher.ping()
                     _redis_connected = True
-                    
+
                     # Flush queued messages
                     flushed = 0
                     while _local_queue:
                         channel, payload = _local_queue.popleft()
                         try:
-                            _publisher.publish(channel, json.dumps(payload, default=str))
+                            publisher.publish(channel, json.dumps(payload, default=str))
                             flushed += 1
                         except Exception as e:
                             # Re-queue if publish fails
                             _local_queue.appendleft((channel, payload))
                             logger.warning("Failed to flush queued message: %s", e)
                             break
-                    
+
                     if flushed > 0:
                         logger.info("✅ Redis reconnected, flushed %d queued messages", flushed)
-                        
+
                 except Exception:
                     _redis_connected = False
     
@@ -76,7 +80,7 @@ def _start_retry_thread() -> None:
 
 def publish(channel: str, payload: Dict[str, Any]) -> None:
     """Original publish function - raises exception on failure"""
-    _publisher.publish(channel, json.dumps(payload, default=str))
+    _get_publisher().publish(channel, json.dumps(payload, default=str))
 
 
 def publish_safe(channel: str, payload: Dict[str, Any]) -> None:
@@ -91,9 +95,9 @@ def publish_safe(channel: str, payload: Dict[str, Any]) -> None:
         payload: Message payload
     """
     global _redis_connected
-    
+
     try:
-        _publisher.publish(channel, json.dumps(payload, default=str))
+        _get_publisher().publish(channel, json.dumps(payload, default=str))
         _redis_connected = True
     except Exception as e:
         logger.warning("⚠️ Redis publish failed, queuing message locally: %s", e)
@@ -128,9 +132,9 @@ def get_redis_client() -> redis.Redis:
     Get Redis client for direct operations (e.g., set/get for notifications)
 
     Returns:
-        Redis client instance
+        Redis client instance (from connection pool)
     """
-    return _publisher
+    return _get_publisher()
 
 
 # =============================================================================
@@ -152,16 +156,9 @@ def _get_loop_id() -> int:
 
 
 async def _ensure_async_client() -> aioredis.Redis:
-    """Get or create async Redis client for current event loop."""
-    loop_id = _get_loop_id()
-    if loop_id not in _async_clients or _async_clients[loop_id] is None:
-        _async_clients[loop_id] = aioredis.from_url(
-            str(settings.redis.url),
-            max_connections=10,
-            decode_responses=True
-        )
-        logger.debug("Async Redis client initialized for loop %d", loop_id)
-    return _async_clients[loop_id]
+    """Get or create async Redis client for current event loop (from manager)."""
+    from app.utils.redis_manager import get_redis_manager
+    return await get_redis_manager().get_async_client()
 
 
 def _get_async_queue() -> asyncio.Queue:

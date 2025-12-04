@@ -14,6 +14,7 @@ from app.executor.executor import Executor, ExecutionResult
 from app.executor.ledger import engine
 from app.risk_manager.manager import RiskDecision, RiskManager
 from app.risk_manager.glm_client import GLMClient
+from app.risk_manager.partial_tp_manager import PartialTakeProfitManager
 from app.utils.logging import configure_logging, get_logger
 from app.utils.telegram import format_markdown, telegram_client
 from app.monitoring.service_monitor import monitor_all, verify_htf_data
@@ -460,7 +461,7 @@ class AutomatedRunner:
             'signal': signal,
             'decision': decision,
             'metrics_before': metrics_before,
-            'backtest_data': backtest_data,
+            'backtest_data': None,
             'timing_tracker': timing_tracker,
         }
     
@@ -579,6 +580,20 @@ class AutomatedRunner:
                         position_id,
                         telemetry.get("price", 0.0)
                     )
+
+                    # Create Partial TP Plan for the new position
+                    try:
+                        await self._create_partial_tp_plan(
+                            symbol=symbol,
+                            position_id=position_id,
+                            entry_price=telemetry.get("price", 0.0),
+                            stop_loss=exit_plan.get("stop_loss", 0.0) if exit_plan else 0.0,
+                            position_side=telemetry.get("position_side"),
+                            quantity=telemetry.get("amount", 0.0),
+                            signal=signal,
+                        )
+                    except Exception as tp_exc:
+                        logger.error("[%s] Failed to create partial TP plan: %s", symbol, tp_exc)
 
         # Remove from advanced monitoring if position closed
         if result.status == "EXECUTED" and result.telemetry:
@@ -1639,6 +1654,143 @@ class AutomatedRunner:
 
         # Return empty dict on failure
         return {}
+
+    async def _create_partial_tp_plan(
+        self,
+        symbol: str,
+        position_id: str,
+        entry_price: float,
+        stop_loss: float,
+        position_side: str,
+        quantity: float,
+        signal = None,
+    ) -> None:
+        """
+        Pozisyon açıldığında partial TP planı oluştur ve Redis'e kaydet.
+
+        Signal'dan market context (trend, volatility, confluence) alarak
+        dinamik strateji seçimi yapar (CONSERVATIVE/BALANCED/AGGRESSIVE).
+
+        Args:
+            symbol: Trading pair
+            position_id: Position ID
+            entry_price: Entry price
+            stop_loss: Stop loss price
+            position_side: "LONG" or "SHORT"
+            quantity: Position quantity
+            signal: Agent signal (market context için)
+        """
+        try:
+            import json
+            from app.utils.redis import get_redis_client
+
+            if entry_price <= 0 or stop_loss <= 0 or quantity <= 0:
+                logger.warning("[%s] Invalid data for TP plan: entry=%.2f sl=%.2f qty=%.6f",
+                              symbol, entry_price, stop_loss, quantity)
+                return
+
+            # Market context'i signal'dan al (varsa)
+            trend_strength = "MODERATE"
+            volatility_regime = "medium"
+            mtf_confluence = 60.0
+
+            if signal:
+                try:
+                    # Signal metadata'dan market context çıkar
+                    signal_data = signal.signal_data if hasattr(signal, 'signal_data') else {}
+                    metadata = signal.metadata if hasattr(signal, 'metadata') else {}
+
+                    # Trend strength
+                    trend_score = signal_data.get("trend_score", 0)
+                    if trend_score > 0.7:
+                        trend_strength = "STRONG"
+                    elif trend_score > 0.4:
+                        trend_strength = "MODERATE"
+                    else:
+                        trend_strength = "WEAK"
+
+                    # Volatility regime
+                    volatility = signal_data.get("volatility", metadata.get("volatility", 0.5))
+                    if volatility > 0.8:
+                        volatility_regime = "extreme"
+                    elif volatility > 0.6:
+                        volatility_regime = "high"
+                    elif volatility > 0.3:
+                        volatility_regime = "medium"
+                    else:
+                        volatility_regime = "low"
+
+                    # MTF confluence
+                    confluence = signal_data.get("mtf_confluence", signal_data.get("confluence_score", 60))
+                    mtf_confluence = float(confluence) if confluence else 60.0
+
+                    logger.info(
+                        "[%s] Market context from signal: trend=%s vol=%s confluence=%.0f",
+                        symbol, trend_strength, volatility_regime, mtf_confluence
+                    )
+                except Exception as sig_exc:
+                    logger.debug("[%s] Could not extract market context from signal: %s", symbol, sig_exc)
+
+            # Partial TP Manager oluştur
+            partial_tp_manager = PartialTakeProfitManager(mode="swing", feature_enabled=True)
+
+            # Dinamik strateji ile TP planı oluştur
+            plan = partial_tp_manager.create_tp_plan_advanced(
+                symbol=symbol,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                position_side=position_side,
+                quantity=quantity,
+                trend_strength=trend_strength,
+                volatility_regime=volatility_regime,
+                mtf_confluence=mtf_confluence,
+            )
+
+            if not plan:
+                logger.warning("[%s] Failed to create TP plan", symbol)
+                return
+
+            # Redis'e kaydet
+            redis_key = f"partial_tp:{symbol}:{position_id}"
+            plan_data = {
+                "entry_price": plan.entry_price,
+                "position_side": plan.position_side,
+                "initial_quantity": plan.initial_quantity,
+                "stop_loss": plan.stop_loss,
+                "remaining_quantity": plan.remaining_quantity,
+                "is_breakeven": plan.is_breakeven,
+                "trailing_active": plan.trailing_active,
+                "trailing_stop": plan.trailing_stop,
+                "strategy": plan.strategy.value,
+                "levels": [
+                    {
+                        "level_id": l.level_id,
+                        "price": l.price,
+                        "percentage": l.percentage,
+                        "status": l.status.value,
+                    }
+                    for l in plan.levels
+                ],
+            }
+
+            try:
+                redis = get_redis_client()
+                redis.setex(redis_key, 86400, json.dumps(plan_data))  # 24 saat TTL
+                logger.info(
+                    "[%s] ✅ Partial TP plan created and saved | Strategy=%s | Levels: %s",
+                    symbol,
+                    plan.strategy.value,
+                    ", ".join([f"TP{l.level_id}=${l.price:.2f}({l.percentage}%)" for l in plan.levels])
+                )
+            except Exception as redis_exc:
+                error_str = str(redis_exc).lower()
+                if "read only" in error_str:
+                    logger.warning("[%s] Redis read-only, TP plan not persisted", symbol)
+                else:
+                    logger.error("[%s] Failed to save TP plan to Redis: %s", symbol, redis_exc)
+
+        except Exception as e:
+            logger.error("[%s] Failed to create partial TP plan: %s", symbol, e, exc_info=True)
 
 
 async def run_automated(

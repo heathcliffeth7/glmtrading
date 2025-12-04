@@ -2,7 +2,7 @@ from datetime import date, datetime
 from typing import Optional, List
 
 import os
-from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, String, create_engine, text, JSON
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, String, create_engine, text, JSON, event
 from sqlalchemy.orm import DeclarativeBase, Session
 
 from app.config.settings import get_settings
@@ -33,6 +33,7 @@ class Trade(Base):
     pnl = Column(Float, default=0.0)  # Realized PnL (kapanışta hesaplanır)
     exit_plan = Column(JSON, nullable=True)  # Nof1.ai style exit plan: {stop_loss, invalidation_condition} (profit_target removed - not required)
     exit_plan_history = Column(JSON, nullable=True)  # Tüm exit plan güncellemelerin logu: {"updates": [...]}
+    entry_reasoning = Column(String(1000), nullable=True)  # Pozisyon açılış gerekçesi (kapanış logunda gösterilecek)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
 
@@ -192,6 +193,20 @@ else:
 
 engine = create_engine(_db_url, **_engine_kwargs)
 
+# Protect Postgres from hanging transactions that block the API.
+if not _db_url.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def _set_pg_timeouts(dbapi_conn, _conn_record):
+        """
+        Set per-connection safety guards so zombie transactions
+        do not hold row locks and stall the dashboard.
+        """
+        with dbapi_conn.cursor() as cur:
+            cur.execute("SET application_name = 'trading-api'")
+            cur.execute("SET idle_in_transaction_session_timeout = 60000")  # 60s
+            # Allow heavier portfolio syncs to finish; still keep a ceiling to avoid runaway queries.
+            cur.execute("SET statement_timeout = 60000")  # 60s
+
 # Optional: auto-create schema for test databases (e.g., in-memory SQLite)
 if os.getenv("TEST_AUTOCREATE_SCHEMA", "").lower() in {"1", "true", "yes"}:
     Base.metadata.create_all(engine)
@@ -226,39 +241,57 @@ def get_daily_pnl(session: Session, current_date: Optional[date] = None) -> Dail
     return record
 
 
-def generate_position_id() -> str:
-    """Yeni pozisyon için unique ID üret"""
+def generate_position_id(symbol: str = None) -> str:
+    """Yeni pozisyon için sembol bazlı unique ID üret
+
+    Args:
+        symbol: Sembol (örn: BTCUSDT). Verilirse sembol bazlı ID üretir.
+
+    Returns:
+        Format: POS-{symbol}-YYYYMMDD-NNN (sembol varsa)
+                POS-YYYYMMDD-NNN (sembol yoksa, geriye uyumluluk)
+    """
     from datetime import datetime
-    # Format: POS-YYYYMMDD-NNN
     date_str = datetime.utcnow().strftime("%Y%m%d")
+
+    # Sembol bazlı prefix (veya geriye uyumlu format)
+    if symbol:
+        prefix = f"POS-{symbol}-{date_str}"
+        like_pattern = f"POS-{symbol}-{date_str}-%"
+        parts_count = 4  # POS-BTCUSDT-20251203-001
+    else:
+        prefix = f"POS-{date_str}"
+        like_pattern = f"POS-{date_str}-%"
+        parts_count = 3  # POS-20251203-001
+
     # Basit sayaç - son pozisyon ID'sini bul ve artır
     try:
         with Session(engine) as counter_session:
             latest_trade = counter_session.query(Trade)\
-                .filter(Trade.position_id.like(f"POS-{date_str}-%"))\
+                .filter(Trade.position_id.like(like_pattern))\
                 .order_by(Trade.timestamp.desc())\
                 .first()
             if latest_trade and latest_trade.position_id:
                 # Son pozisyon ID'sini parçala ve artır
                 parts = latest_trade.position_id.split("-")
-                if len(parts) == 3 and parts[2].isdigit():
-                    counter = int(parts[2]) + 1
+                if len(parts) == parts_count and parts[-1].isdigit():
+                    counter = int(parts[-1]) + 1
                 else:
                     counter = 1
             else:
                 counter = 1
     except Exception:
         counter = 1
-    
-    return f"POS-{date_str}-{counter:03d}"
+
+    return f"{prefix}-{counter:03d}"
 
 
 def record_trade(
-    session: Session, 
-    symbol: str, 
-    side: str, 
-    amount: float, 
-    price: float, 
+    session: Session,
+    symbol: str,
+    side: str,
+    amount: float,
+    price: float,
     pnl: float,
     leverage: float = 1.0,
     fees: float = 0.0,
@@ -266,6 +299,7 @@ def record_trade(
     position_side: Optional[str] = None,
     position_id: Optional[str] = None,
     exit_plan: Optional[dict] = None,
+    entry_reasoning: Optional[str] = None,
 ) -> Trade:
     """
     Record a trade
@@ -283,17 +317,18 @@ def record_trade(
     
     trade = Trade(
         position_id=position_id,
-        symbol=symbol, 
-        side=side, 
+        symbol=symbol,
+        side=side,
         position_side=position_side,
-        amount=amount, 
-        price=price, 
+        amount=amount,
+        price=price,
         close_price=close_price,
         leverage=leverage,
         notional_value=notional_value,
         fees=fees,
         pnl=pnl,
         exit_plan=exit_plan,
+        entry_reasoning=entry_reasoning[:1000] if entry_reasoning else None,
     )
     session.add(trade)
     return trade
@@ -359,10 +394,7 @@ def close_open_trades(
         remaining_open_fee = open_fee_total - closed_open_fee
 
         old_trade_pnl = float(trade.pnl or 0.0)
-        if is_full_close:
-            old_closed_pnl = old_trade_pnl
-        else:
-            old_closed_pnl = old_trade_pnl * ratio
+        old_closed_pnl = old_trade_pnl if is_full_close else old_trade_pnl * ratio
 
         closing_fee = 0.0
         if fee_rate > 0:
@@ -372,35 +404,44 @@ def close_open_trades(
         gross_pnl = (close_price - trade.price) * close_part if trade.side == "BUY" else (trade.price - close_price) * close_part
         new_pnl = gross_pnl - closed_open_fee - closing_fee
 
-        # Trade değerlerini güncelle (kapalı kısım)
-        trade.amount = close_part
-        trade.close_price = close_price
-        trade.close_time = now
-        if trade.price and close_part:
-            trade.notional_value = trade.price * close_part
-        trade.fees = closed_open_fee + closing_fee
-        trade.pnl = new_pnl
-
-        # Kalan açık kısmı yeni trade olarak ekle
-        if not is_full_close:
+        if is_full_close:
+            # Tam kapanış - mevcut kaydı kapat
+            trade.amount = close_part
+            trade.close_price = close_price
+            trade.close_time = now
+            trade.notional_value = (trade.price * close_part) if trade.price and close_part else None
+            trade.fees = closed_open_fee + closing_fee
+            trade.pnl = new_pnl
+        else:
+            # Kısmi kapanış: mevcut kaydı kalan miktarla açık bırak, kapanan kısmı yeni kayıt olarak ekle
             open_remainder = original_amount - close_part
             remaining_pnl = old_trade_pnl - old_closed_pnl
-            split = Trade(
+
+            # Güncel kaydı kalan açık miktara indir
+            trade.amount = open_remainder
+            trade.close_price = None
+            trade.close_time = None
+            trade.notional_value = (trade.price * open_remainder) if trade.price and open_remainder else None
+            trade.fees = remaining_open_fee
+            trade.pnl = remaining_pnl
+
+            # Kapanan kısmı yeni trade olarak kaydet (exit ayrıntılarıyla)
+            closed_trade = Trade(
                 position_id=trade.position_id,
                 symbol=trade.symbol,
                 side=trade.side,
                 position_side=trade.position_side,
-                amount=open_remainder,
+                amount=close_part,
                 price=trade.price,
-                close_price=close_price,  # Kapanış fiyatı (kısmi kapanışta da aynı fiyat kullanılır)
-                close_time=None,  # Bu kısım henüz kapanmadı
+                close_price=close_price,
+                close_time=now,
                 leverage=trade.leverage,
-                notional_value=(trade.price * open_remainder) if trade.price and open_remainder else None,
-                fees=remaining_open_fee,
-                pnl=remaining_pnl,
+                notional_value=(trade.price * close_part) if trade.price and close_part else None,
+                fees=closed_open_fee + closing_fee,
+                pnl=new_pnl,
                 timestamp=trade.timestamp,
             )
-            session.add(split)
+            session.add(closed_trade)
 
         delta = new_pnl - old_closed_pnl
         realized_delta += delta

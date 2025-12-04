@@ -1,6 +1,6 @@
 """Trades API Routes"""
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 import numpy as np
 from fastapi import APIRouter, Depends, Query
@@ -16,10 +16,82 @@ from app.api.schemas.trade import (
     PnLStats,
 )
 from app.executor.ledger import Trade
+from app.utils.influx import query_historical_snapshots
+from app.utils.logging import get_logger
 
 router = APIRouter()
+logger = get_logger(__name__)
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+
+def _fetch_signals_for_reasoning(symbols: List[str], hours: int = 30 * 24) -> List[Dict[str, Any]]:
+    """InfluxDB'den signals çek (reasoning için)"""
+    signals = []
+    try:
+        for sym in symbols:
+            result = query_historical_snapshots(
+                measurement="trading_signals",
+                symbol=sym,
+                interval="30min",
+                limit=500,
+                hours=hours
+            )
+            if result:
+                # Symbol'ü her record'a ekle (query_historical_snapshots exclude ediyor)
+                for record in result:
+                    record["symbol"] = sym
+                signals.extend(result)
+    except Exception as e:
+        logger.warning("Failed to fetch signals for reasoning: %s", e)
+    return signals
+
+
+def _find_matching_signal(
+    signals: List[Dict[str, Any]],
+    trade_timestamp: datetime,
+    symbol: str,
+    action: str  # Artık kullanılmıyor ama API uyumluluğu için tutuldu
+) -> Optional[Dict[str, Any]]:
+    """Trade ile eşleşen signal'i bul (±5 dakika tolerance, sadece symbol+timestamp)"""
+    from datetime import timezone
+
+    # Trade timestamp'ı timezone-aware yap
+    if trade_timestamp.tzinfo is None:
+        trade_time = trade_timestamp.replace(tzinfo=timezone.utc)
+    else:
+        trade_time = trade_timestamp
+
+    best_match = None
+    best_diff = float('inf')
+
+    for signal in signals:
+        # Symbol eşleşmesi
+        if signal.get('symbol') != symbol:
+            continue
+
+        # Timestamp eşleşmesi (±5 dakika) - EN YAKIN olanı bul
+        signal_time_str = signal.get('timestamp', '')
+        try:
+            if isinstance(signal_time_str, str):
+                signal_time_str = signal_time_str.replace('Z', '+00:00')
+                if '+' not in signal_time_str and signal_time_str.count(':') >= 2:
+                    signal_time_str += '+00:00'
+                signal_time = datetime.fromisoformat(signal_time_str)
+            else:
+                continue
+
+            if signal_time.tzinfo is None:
+                signal_time = signal_time.replace(tzinfo=timezone.utc)
+
+            time_diff = abs((trade_time - signal_time).total_seconds())
+            if time_diff < 300 and time_diff < best_diff:  # 5 dakika içinde ve en yakın
+                best_diff = time_diff
+                best_match = signal
+        except Exception:
+            continue
+
+    return best_match
 
 
 @router.get("", response_model=TradeListResponse)
@@ -32,6 +104,26 @@ async def get_trades(
 ):
     """Get paginated trade list"""
     query = db.query(Trade)
+
+    # Açık pozisyonları (close_price IS NULL) map'leyelim: aynı position_id açık kaldıysa kısmi kapanış demektir
+    open_trades = (
+        db.query(Trade)
+        .filter(Trade.close_price.is_(None))
+        .filter(Trade.position_id.isnot(None))
+        .all()
+    )
+    # Sembol + position_id kombinasyonu ile map oluştur (farklı semboller aynı position_id paylaşabilir)
+    open_trades_by_position: Dict[str, Trade] = {}
+    for ot in open_trades:
+        if not ot.position_id:
+            continue
+        # Sembol bazlı key: "BTCUSDT:POS-20251202-010"
+        key = f"{ot.symbol}:{ot.position_id}"
+        # Aynı key için en güncel kaydı tut
+        prev = open_trades_by_position.get(key)
+        if not prev or (ot.timestamp and prev.timestamp and ot.timestamp > prev.timestamp):
+            open_trades_by_position[key] = ot
+    open_position_keys = set(open_trades_by_position.keys())
 
     # Filter by symbol
     if symbol:
@@ -50,14 +142,35 @@ async def get_trades(
     offset = (page - 1) * per_page
     trades = query.order_by(Trade.timestamp.desc()).offset(offset).limit(per_page).all()
 
+    # Fetch signals for reasoning enrichment (eski trade'ler için)
+    symbols_to_fetch = [symbol.upper()] if symbol else SYMBOLS
+    signals = _fetch_signals_for_reasoning(symbols_to_fetch, hours=30 * 24)
+
     # Convert to response
     trade_responses = []
     for t in trades:
+        is_closed = t.close_price is not None
+        # Sembol bazlı partial close kontrolü
+        position_key = f"{t.symbol}:{t.position_id}" if t.position_id else None
+        is_partial_close = bool(is_closed and position_key and position_key in open_position_keys)
+        action_label = "PARTIAL CLOSE" if is_partial_close else ("CLOSE" if is_closed else t.side)
+        remaining_amount = None
+        if is_partial_close and position_key:
+            open_trade = open_trades_by_position.get(position_key)
+            remaining_amount = open_trade.amount if open_trade else None
+
         pnl_pct = None
         if t.pnl and t.price and t.amount:
             position_value = t.price * t.amount
             if position_value > 0:
                 pnl_pct = (t.pnl / position_value) * 100
+
+        # Exit plan enrichment - reasoning yoksa signals'dan bul
+        exit_plan = dict(t.exit_plan) if t.exit_plan else {}
+        if not exit_plan.get('reasoning') and t.timestamp and t.side in ('BUY', 'SELL'):
+            matching_signal = _find_matching_signal(signals, t.timestamp, t.symbol, t.side)
+            if matching_signal and matching_signal.get('reasoning'):
+                exit_plan['reasoning'] = matching_signal['reasoning']
 
         trade_responses.append(TradeResponse(
             id=t.id,
@@ -74,7 +187,10 @@ async def get_trades(
             fees=t.fees or 0.0,
             timestamp=t.timestamp.isoformat() if t.timestamp else "",
             close_time=t.close_time.isoformat() if t.close_time else None,
-            exit_plan=t.exit_plan,
+            exit_plan=exit_plan,
+            is_partial_close=is_partial_close,
+            action_label=action_label,
+            remaining_amount=remaining_amount,
         ))
 
     return TradeListResponse(

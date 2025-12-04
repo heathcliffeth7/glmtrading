@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional
 
 import redis
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app.config.settings import get_settings
 from app.data_feeds.constants import KLINE_CHANNEL
@@ -455,6 +456,8 @@ _listeners_started: Dict[str, bool] = {}
 _listener_threads: Dict[str, threading.Thread] = {}
 _listener_last_message: Dict[str, datetime] = {}
 _listener_reconnect_count: Dict[str, int] = {}
+_listener_cooldown_threads: Dict[str, threading.Thread] = {}
+_restart_locks: Dict[str, threading.Lock] = {}  # Prevent concurrent restarts per symbol
 
 
 def _initialize_price_from_rest(symbol: str) -> None:
@@ -477,13 +480,64 @@ def _initialize_price_from_rest(symbol: str) -> None:
         logger.warning("⚠️ Could not initialize cache from REST: %s", exc)
 
 
-def _health_check_monitor(symbol: str, max_silence_seconds: int = 30) -> None:
+def _reset_reconnect_counter(symbol_key: str) -> None:
+    """Reset reconnect counter when a listener is healthy again."""
+    _listener_reconnect_count[symbol_key] = 0
+
+
+def _schedule_delayed_restart(symbol: str, delay_seconds: int = 60) -> None:
+    """
+    After exhausting fast retries, keep trying with a slower cadence instead of giving up.
+    Ensures we always eventually recover when the upstream feed comes back.
+    """
+    symbol_key = symbol.upper()
+
+    # Avoid spawning multiple cooldown threads per symbol
+    existing = _listener_cooldown_threads.get(symbol_key)
+    if existing and existing.is_alive():
+        return
+
+    def _delayed() -> None:
+        try:
+            logger.warning(
+                "⏳ Cooldown reached for %s - retrying listener start in %ds",
+                symbol_key,
+                delay_seconds,
+            )
+            time.sleep(delay_seconds)
+            ensure_price_cache_listener(symbol)
+        finally:
+            _listener_cooldown_threads.pop(symbol_key, None)
+
+    thread = threading.Thread(
+        target=_delayed,
+        name=f"listener-cooldown-{symbol_key.lower()}",
+        daemon=True,
+    )
+    _listener_cooldown_threads[symbol_key] = thread
+    thread.start()
+
+
+def _health_check_monitor(symbol: str, max_silence_seconds: Optional[int] = None) -> None:
     """
     Monitor listener health and restart if necessary.
     Runs in separate daemon thread.
+
+    Args:
+        symbol: Trading symbol
+        max_silence_seconds: Override threshold (uses settings if None)
     """
     symbol_key = symbol.upper()
-    logger.info("🏥 Health check monitor started for %s", symbol_key)
+
+    # Use symbol-specific threshold from settings if not explicitly provided
+    if max_silence_seconds is None:
+        thresholds = settings.redis.price_cache_monitor_thresholds
+        max_silence_seconds = thresholds.get(symbol_key, thresholds.get("default", 60))
+
+    logger.info(
+        "🏥 Health check monitor started for %s (max_silence: %ds)",
+        symbol_key, max_silence_seconds
+    )
     
     while True:
         try:
@@ -525,34 +579,54 @@ def _health_check_monitor(symbol: str, max_silence_seconds: int = 30) -> None:
 
 
 def _restart_listener(symbol: str, max_attempts: int = 5) -> None:
-    """Restart listener with exponential backoff"""
+    """Restart listener with exponential backoff (with lock to prevent concurrent restarts)"""
     symbol_key = symbol.upper()
-    reconnect_count = _listener_reconnect_count.get(symbol_key, 0)
-    
-    if reconnect_count >= max_attempts:
-        logger.critical(
-            "❌ FAILED to restart listener for %s after %d attempts",
-            symbol_key, max_attempts
-        )
+
+    # Get or create lock for this symbol
+    if symbol_key not in _restart_locks:
+        _restart_locks[symbol_key] = threading.Lock()
+
+    restart_lock = _restart_locks[symbol_key]
+
+    # Try to acquire lock - if already locked, another restart is in progress
+    if not restart_lock.acquire(blocking=False):
+        logger.debug("⏭️ Restart already in progress for %s, skipping", symbol_key)
         return
-    
-    reconnect_count += 1
-    _listener_reconnect_count[symbol_key] = reconnect_count
-    
-    # Exponential backoff: 1s, 2s, 4s, 8s, 16s (max 30s)
-    backoff = min(2 ** (reconnect_count - 1), 30)
-    logger.warning(
-        "🔄 Restarting listener for %s (attempt %d/%d) in %.1fs...",
-        symbol_key, reconnect_count, max_attempts, backoff
-    )
-    time.sleep(backoff)
-    
-    # Clear old state
-    _listener_threads.pop(symbol_key, None)
-    _listener_last_message.pop(symbol_key, None)
-    
-    # Restart
-    ensure_price_cache_listener(symbol)
+
+    try:
+        reconnect_count = _listener_reconnect_count.get(symbol_key, 0)
+
+        if reconnect_count >= max_attempts:
+            logger.critical(
+                "❌ FAILED to restart listener for %s after %d attempts - entering cooldown and will keep retrying",
+                symbol_key, max_attempts
+            )
+            _listener_threads.pop(symbol_key, None)
+            _listener_last_message.pop(symbol_key, None)
+            _reset_reconnect_counter(symbol_key)
+            # Keep trying with a slower cadence so we never get stuck permanently
+            _schedule_delayed_restart(symbol, delay_seconds=60)
+            return
+
+        reconnect_count += 1
+        _listener_reconnect_count[symbol_key] = reconnect_count
+
+        # Exponential backoff: 1s, 2s, 4s, 8s, 16s (max 30s)
+        backoff = min(2 ** (reconnect_count - 1), 30)
+        logger.warning(
+            "🔄 Restarting listener for %s (attempt %d/%d) in %.1fs...",
+            symbol_key, reconnect_count, max_attempts, backoff
+        )
+        time.sleep(backoff)
+
+        # Clear old state
+        _listener_threads.pop(symbol_key, None)
+        _listener_last_message.pop(symbol_key, None)
+
+        # Restart
+        ensure_price_cache_listener(symbol)
+    finally:
+        restart_lock.release()
 
 
 def _normalize_kline_payload(
@@ -646,16 +720,20 @@ def ensure_price_cache_listener(symbol: str, channel: str = KLINE_CHANNEL) -> No
     # STEP 2: Start WebSocket listener
     def _run() -> None:
         logger.info("🔌 WebSocket listener thread STARTING for %s", symbol_key)
-        client = None
         pubsub = None
+        pubsub_name = f"price_listener_{symbol_key}"
         message_count = 0
         consecutive_errors = 0
-        max_consecutive_errors = 5
-        
+        timeout_errors = 0  # Separate counter for transient timeout errors
+        max_timeout_errors = 3  # Allow more timeout errors before reconnect
+        # Use configurable max_consecutive_errors from settings (default: 10)
+        max_consecutive_errors = settings.redis.max_consecutive_errors
+
         try:
-            # Create Redis connection
-            client = redis.Redis.from_url(str(settings.redis.url))
-            pubsub = client.pubsub()
+            # Get pubsub from connection manager (with pooling)
+            from app.utils.redis_manager import get_redis_manager
+            manager = get_redis_manager()
+            pubsub = manager.get_pubsub(pubsub_name)
             pubsub.subscribe(channel)
             
             logger.info("✅ WebSocket listener CONNECTED for %s", symbol_key)
@@ -701,6 +779,7 @@ def ensure_price_cache_listener(symbol: str, channel: str = KLINE_CHANNEL) -> No
                         # Update cache with explicit Binance websocket source
                         price_cache.set(symbol_key, close_price, source="binance_websocket")
                         _listener_last_message[symbol_key] = datetime.now(timezone.utc)
+                        _reset_reconnect_counter(symbol_key)
                         message_count += 1
                         consecutive_errors = 0  # Reset error counter
                         
@@ -717,10 +796,12 @@ def ensure_price_cache_listener(symbol: str, channel: str = KLINE_CHANNEL) -> No
                 except json.JSONDecodeError as exc:
                     logger.error("❌ JSON decode error: %s", exc)
                     consecutive_errors += 1
+                    timeout_errors = 0  # Reset timeout counter on other errors
                 except Exception as exc:
                     logger.error("❌ Message processing error: %s", exc, exc_info=True)
                     consecutive_errors += 1
-                
+                    timeout_errors = 0  # Reset timeout counter on other errors
+
                 # Too many consecutive errors? Reconnect
                 if consecutive_errors >= max_consecutive_errors:
                     logger.error(
@@ -728,22 +809,32 @@ def ensure_price_cache_listener(symbol: str, channel: str = KLINE_CHANNEL) -> No
                         consecutive_errors
                     )
                     break
-            
+
+        except RedisTimeoutError as exc:
+            # Socket timeout is transient - don't crash immediately
+            timeout_errors += 1
+            logger.warning(
+                "⚠️ Redis socket timeout for %s (transient %d/%d): %s",
+                symbol_key, timeout_errors, max_timeout_errors, exc
+            )
+            if timeout_errors >= max_timeout_errors:
+                logger.error(
+                    "❌ Too many socket timeouts (%d) for %s, forcing reconnect",
+                    timeout_errors, symbol_key
+                )
+                # Don't return - let finally block handle cleanup and restart
         except redis.ConnectionError as exc:
             logger.error("❌ Redis connection error for %s: %s", symbol_key, exc)
         except Exception as exc:
             logger.error("❌ Listener crashed for %s: %s", symbol_key, exc, exc_info=True)
         finally:
-            # Cleanup
+            # Cleanup via manager
             try:
-                if pubsub:
-                    pubsub.unsubscribe(channel)
-                    pubsub.close()
-                if client:
-                    client.close()
+                from app.utils.redis_manager import get_redis_manager
+                get_redis_manager().release_pubsub(pubsub_name)
             except Exception:
                 pass
-            
+
             # Clear flags to allow restart
             _listeners_started.pop(symbol_key, None)
             logger.warning("🔌 WebSocket listener DISCONNECTED for %s", symbol_key)
@@ -768,6 +859,7 @@ def ensure_price_cache_listener(symbol: str, channel: str = KLINE_CHANNEL) -> No
             _listeners_started[symbol_key] = True
             _listener_threads[symbol_key] = thread
             _listener_last_message[symbol_key] = datetime.now(timezone.utc)
+            _reset_reconnect_counter(symbol_key)
             logger.info("✅ Listener thread CONFIRMED RUNNING for %s", symbol_key)
             
             # Start health check monitor

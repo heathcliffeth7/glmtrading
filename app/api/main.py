@@ -12,6 +12,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI
+from sqlalchemy import text
 
 from app.api.config import get_dashboard_settings
 from app.api.middleware.cors import setup_cors
@@ -75,7 +76,7 @@ async def lifespan(app: FastAPI):
     try:
         from app.executor.ledger import engine
         with engine.connect() as conn:
-            conn.execute("SELECT 1")
+            conn.execute(text("SELECT 1"))
         logger.info("Database connection verified")
     except Exception as e:
         logger.error(f"Database connection failed: {e}")

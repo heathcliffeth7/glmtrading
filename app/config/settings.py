@@ -66,6 +66,23 @@ class RedisSettings(BaseSettings):
 
     url: AnyUrl = Field("redis://localhost:6379/0", alias="REDIS_URL")
 
+    # Redis connection reliability settings
+    socket_timeout: int = Field(30, alias="REDIS_SOCKET_TIMEOUT")  # Normal operations (30s)
+    pubsub_socket_timeout: int = Field(60, alias="REDIS_PUBSUB_SOCKET_TIMEOUT")  # Blocking listen (60s)
+    socket_keepalive: bool = Field(True, alias="REDIS_SOCKET_KEEPALIVE")
+    max_consecutive_errors: int = Field(10, alias="REDIS_MAX_CONSECUTIVE_ERRORS")
+
+    # Symbol-specific health monitor thresholds (in seconds)
+    price_cache_monitor_thresholds: dict = Field(
+        default={
+            "BTCUSDT": 45,      # BTC: 45s (volatile, can have traffic gaps)
+            "ETHUSDT": 45,      # ETH: 45s
+            "SOLUSDT": 45,      # SOL: 45s
+            "default": 60,      # Conservative 60s default
+        },
+        description="Symbol-specific silence thresholds for pub/sub health monitor"
+    )
+
 
 class InfluxSettings(BaseSettings):
     model_config = SettingsConfigDict(

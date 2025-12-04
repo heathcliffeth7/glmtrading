@@ -350,13 +350,14 @@ def calculate_adx(
         if len(values) < period:
             return result
 
-        # First value is simple sum
+        # First value is SMA (Simple Moving Average), not sum
         first_sum = sum(values[:period])
-        result.append(first_sum)
+        result.append(first_sum / period)  # FIX: Divide by period for SMA
 
         # Subsequent values use Wilder's formula
+        # Correct formula: smoothed = (prev * (period-1) + current) / period
         for i in range(period, len(values)):
-            smoothed = result[-1] - (result[-1] / period) + values[i]
+            smoothed = (result[-1] * (period - 1) + values[i]) / period
             result.append(smoothed)
 
         return result
@@ -391,11 +392,11 @@ def calculate_adx(
     # ADX (smoothed DX)
     adx_values = wilder_smooth(dx, period)
 
-    # Normalize to period
-    adx_normalized = [v / period for v in adx_values]
+    # ADX değerleri 0-100 aralığında olmalı, normalizasyon yapılmamalı
+    # Eski hatalı kod: adx_normalized = [v / period for v in adx_values]
 
     return {
-        "adx": adx_normalized,
+        "adx": adx_values,
         "plus_di": plus_di,
         "minus_di": minus_di,
     }

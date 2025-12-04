@@ -359,21 +359,85 @@ class TechnicalAnalyzer:
         try:
             series = pd.Series(prices)
             delta = series.diff()
-            
+
             gain = delta.where(delta > 0, 0.0)
             loss = -delta.where(delta < 0, 0.0)
-            
+
             # Wilder's Smoothing
             avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
             avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
-            
+
             rs = avg_gain / avg_loss
             rsi = 100 - (100 / (1 + rs))
-            
+
             # Handle potential division by zero (if avg_loss is 0, RSI is 100)
             if float(avg_loss.iloc[-1]) == 0:
                 return 100.0
-                
+
             return float(rsi.iloc[-1])
         except Exception:
             return 50.0
+
+    def calculate_adx(self, high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> float:
+        """
+        ADX (Average Directional Index) hesapla
+
+        Args:
+            high: En yüksek fiyatlar dizisi
+            low: En düşük fiyatlar dizisi
+            close: Kapanış fiyatları dizisi
+            period: ADX periyodu (varsayılan 14)
+
+        Returns:
+            ADX değeri (0-100 arası, >25 trending, <20 ranging)
+        """
+        if len(close) < period * 2:
+            return 0.0
+
+        try:
+            if TALIB_AVAILABLE:
+                adx_values = talib.ADX(high, low, close, timeperiod=period)
+                return float(adx_values[-1]) if not np.isnan(adx_values[-1]) else 0.0
+            else:
+                return self._calculate_adx_manual(high, low, close, period)
+        except Exception as e:
+            logger.error(f"ADX hesaplama hatası: {e}")
+            return 0.0
+
+    def _calculate_adx_manual(self, high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> float:
+        """Manuel ADX hesaplama (Wilder's Smoothing ile)"""
+        try:
+            high_s = pd.Series(high)
+            low_s = pd.Series(low)
+            close_s = pd.Series(close)
+
+            # +DM (Plus Directional Movement)
+            plus_dm = high_s.diff()
+            minus_dm = -low_s.diff()
+
+            # Apply conditions
+            plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+            minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+            # True Range
+            tr1 = high_s - low_s
+            tr2 = (high_s - close_s.shift(1)).abs()
+            tr3 = (low_s - close_s.shift(1)).abs()
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+            # Wilder's Smoothing (alpha = 1/period)
+            atr = tr.ewm(alpha=1/period, adjust=False).mean()
+            plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr)
+            minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr)
+
+            # DX = |+DI - -DI| / (+DI + -DI) * 100
+            dx = (plus_di - minus_di).abs() / (plus_di + minus_di) * 100
+
+            # ADX = Wilder smoothed DX
+            adx = dx.ewm(alpha=1/period, adjust=False).mean()
+
+            result = float(adx.iloc[-1])
+            return result if not pd.isna(result) else 0.0
+        except Exception as e:
+            logger.error(f"Manuel ADX hesaplama hatası: {e}")
+            return 0.0

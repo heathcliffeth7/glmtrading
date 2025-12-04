@@ -24,9 +24,117 @@ from app.utils.influx import query_latest
 from app.utils.price_cache import ensure_price_cache_listener, price_cache
 from app.utils.logging import get_logger
 from app.utils.telegram import format_markdown, telegram_client
+import os
+from pathlib import Path
 
 
 logger = get_logger(__name__)
+
+# Trade log dosyası
+TRADE_LOG_DIR = Path("/root/trading/logs")
+TRADE_LOG_FILE = TRADE_LOG_DIR / "trades.log"
+
+def _ensure_log_dir():
+    """Log klasörünü oluştur"""
+    TRADE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+def log_trade_to_file(
+    symbol: str,
+    action: str,
+    entry_price: float,
+    close_price: float = None,
+    pnl: float = None,
+    reasoning: str = None,
+    amount: float = None,
+    leverage: float = None,
+    stop_loss: float = None,
+    take_profit: float = None,
+    entry_reasoning: str = None,  # Açılış gerekçesi (kapanışta gösterilir)
+):
+    """
+    Trade bilgilerini log dosyasına yaz.
+
+    Açılış Format:
+    [2025-12-02 10:30:00] BTCUSDT | BUY (LONG) | Entry: $95000.00 | Amt: 0.05 | Lev: 7x | SL: $94000 | TP: $97000
+      Entry: Güçlü yükseliş trendi...
+    ---
+
+    Kapanış Format (birleşik - tüm bilgiler):
+    [2025-12-02 11:00:00] BTCUSDT | CLOSE_LONG
+      Entry: $95000.00 | Amt: 0.05 | Lev: 7x | SL: $94000 | TP: $97000
+      Exit:  $96000.00 | PnL: +$350.00
+      Entry: Güçlü yükseliş trendi...
+      Exit: Take profit hedefine ulaşıldı...
+    ---
+    """
+    try:
+        _ensure_log_dir()
+
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+        if close_price and pnl is not None:
+            # Kapanış işlemi - birleşik format (tüm açılış bilgileri dahil)
+            pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+
+            with open(TRADE_LOG_FILE, "a", encoding="utf-8") as f:
+                # Ana başlık
+                f.write(f"[{timestamp}] {symbol} | {action}\n")
+
+                # Açılış detayları
+                entry_line = f"  Entry: ${entry_price:.2f}"
+                if amount:
+                    entry_line += f" | Amt: {amount:.4f}"
+                if leverage:
+                    entry_line += f" | Lev: {leverage:.0f}x"
+                if stop_loss:
+                    entry_line += f" | SL: ${stop_loss:.2f}"
+                if take_profit:
+                    entry_line += f" | TP: ${take_profit:.2f}"
+                f.write(entry_line + "\n")
+
+                # Kapanış detayları
+                f.write(f"  Exit:  ${close_price:.2f} | PnL: {pnl_str}\n")
+
+                # Açılış gerekçesi
+                if entry_reasoning:
+                    clean_entry = entry_reasoning.replace("\n", " ").strip()
+                    if len(clean_entry) > 400:
+                        clean_entry = clean_entry[:400] + "..."
+                    f.write(f"  Entry Reason: {clean_entry}\n")
+
+                # Kapanış gerekçesi
+                if reasoning:
+                    clean_exit = reasoning.replace("\n", " ").strip()
+                    if len(clean_exit) > 400:
+                        clean_exit = clean_exit[:400] + "..."
+                    f.write(f"  Exit Reason: {clean_exit}\n")
+                f.write("---\n")
+        else:
+            # Açılış işlemi
+            position_type = "LONG" if action == "BUY" else "SHORT"
+            log_line = f"[{timestamp}] {symbol} | {action} ({position_type}) | Entry: ${entry_price:.2f}"
+            if amount:
+                log_line += f" | Amt: {amount:.4f}"
+            if leverage:
+                log_line += f" | Lev: {leverage:.0f}x"
+            if stop_loss:
+                log_line += f" | SL: ${stop_loss:.2f}"
+            if take_profit:
+                log_line += f" | TP: ${take_profit:.2f}"
+
+            with open(TRADE_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(log_line + "\n")
+                if reasoning:
+                    clean_reasoning = reasoning.replace("\n", " ").strip()
+                    if len(clean_reasoning) > 500:
+                        clean_reasoning = clean_reasoning[:500] + "..."
+                    f.write(f"  Entry Reason: {clean_reasoning}\n")
+                f.write("---\n")
+
+        logger.info("📝 Trade logged: %s %s @ %.2f", symbol, action, entry_price)
+
+    except Exception as e:
+        logger.error("Failed to log trade to file: %s", e)
 
 
 @dataclass
@@ -89,7 +197,8 @@ class Executor:
         
         # CLOSE sonrası cooldown mekanizması
         self._last_close_time = None
-        self._close_cooldown_seconds = 0  # Cooldown kaldırıldı - hızlı müdahale için
+        self._close_cooldown_seconds = 60  # 60 saniye cooldown - duplicate close prevention
+        self._symbol_close_timestamps: Dict[str, datetime] = {}  # Per-symbol close tracking
         
         # STOP-LOSS sistemi
         self._stop_loss_enabled = True
@@ -110,6 +219,11 @@ class Executor:
         # WebSocket stop-loss monitoring
         self._stop_loss_monitoring_active = False
         self._last_sl_tp_notification = None
+
+        # Race condition prevention for duplicate CLOSE
+        import threading
+        self._close_lock = threading.Lock()
+        self._closing_in_progress: Dict[str, bool] = {}
 
     def get_current_position_id(self, session: Session, symbol: str) -> Optional[str]:
         """DEPRECATED: Tek pozisyon varsayar. get_position_id_by_side kullanın."""
@@ -238,18 +352,18 @@ class Executor:
                 )
                 if last_trade and last_trade.price:
                     price_change_pct = abs((price - last_trade.price) / last_trade.price) * 100
-                    if price_change_pct > 5.0:
+                    if price_change_pct > 10.0:
                         logger.warning(
-                            "❌ BLOCKED by extreme price change: %.2f%% > 5.00%% (last: $%.2f, current: $%.2f)",
+                            "❌ BLOCKED by extreme price change: %.2f%% > 10.00%% (last: $%.2f, current: $%.2f)",
                             price_change_pct, last_trade.price, price
                         )
                         return ExecutionResult(
                             status="BLOCKED",
-                            details=f"Extreme price movement: {price_change_pct:.2f}% > 5% threshold"
+                            details=f"Extreme price movement: {price_change_pct:.2f}% > 10% threshold"
                         )
                     else:
                         logger.info(
-                            "✅ Price change OK: %.2f%% ≤ 5.00%% (last: $%.2f, current: $%.2f)",
+                            "✅ Price change OK: %.2f%% ≤ 10.00%% (last: $%.2f, current: $%.2f)",
                             price_change_pct, last_trade.price, price
                         )
             
@@ -659,10 +773,12 @@ class Executor:
         pnl = pnl_before_fee - fee
         
         # Position ID
-        current_position_id = generate_position_id() if pre_position == 0 else self.get_current_position_id(session, self._symbol)
+        current_position_id = generate_position_id(self._symbol) if pre_position == 0 else self.get_current_position_id(session, self._symbol)
         
-        # Exit Plan Logic
-        exit_plan = decision.exit_plan
+        # Exit Plan Logic - reasoning'i de ekle (tooltip için)
+        exit_plan = decision.exit_plan.copy() if decision.exit_plan else {}
+        if decision.reasoning:
+            exit_plan["reasoning"] = decision.reasoning
         if decision.action in ["BUY", "SELL"]:
             inv_text = exit_plan.get("invalidation_condition", "") if exit_plan else ""
             def _is_number(val):
@@ -735,10 +851,23 @@ class Executor:
         trade = record_trade(
             session, symbol=self._symbol, side=decision.action, amount=btc_amount,
             price=price, pnl=pnl, leverage=leverage, fees=fee, position_side=position_side,
-            position_id=current_position_id, exit_plan=exit_plan
+            position_id=current_position_id, exit_plan=exit_plan,
+            entry_reasoning=decision.reasoning,
         )
         session.flush()
-        
+
+        # Açılış trade'ini log dosyasına yaz
+        log_trade_to_file(
+            symbol=self._symbol,
+            action=decision.action,
+            entry_price=price,
+            amount=btc_amount,
+            leverage=leverage,
+            reasoning=decision.reasoning,
+            stop_loss=exit_plan.get("stop_loss") if exit_plan else None,
+            take_profit=exit_plan.get("profit_target") if exit_plan else None,
+        )
+
         if not self._stop_loss_monitoring_active:
             try:
                 self.start_stop_loss_monitoring()
@@ -1625,6 +1754,11 @@ class Executor:
             taker_fee_rate=self._taker_fee_rate,
         )
         
+        # Duplicate close prevention - if no trades were updated, position already closed
+        if updated_count == 0:
+            logger.warning("No trades updated - position may already be closed by another process")
+            return ExecutionResult(status="SKIP", details="Position already closed")
+
         logger.info(
             "Closed %s position: Updated %d trade(s) | PnL: $%.2f | Fee: $%.2f",
             position_side,
@@ -1632,7 +1766,48 @@ class Executor:
             realized_delta,
             closing_fee_total,
         )
-        
+
+        # Kapanış trade'ini log dosyasına yaz
+        # Açılış bilgilerini bul (son kapatılan trade'den)
+        entry_reasoning_for_log = None
+        entry_amount_for_log = None
+        entry_leverage_for_log = None
+        entry_sl_for_log = None
+        entry_tp_for_log = None
+        try:
+            from app.executor.ledger import Trade
+            closed_trade = (
+                session.query(Trade)
+                .filter_by(symbol=self._symbol)
+                .filter(Trade.close_price.isnot(None))
+                .order_by(Trade.close_time.desc())
+                .first()
+            )
+            if closed_trade:
+                entry_reasoning_for_log = closed_trade.entry_reasoning
+                entry_amount_for_log = closed_trade.amount
+                entry_leverage_for_log = closed_trade.leverage
+                if closed_trade.exit_plan:
+                    entry_sl_for_log = closed_trade.exit_plan.get("stop_loss")
+                    entry_tp_for_log = closed_trade.exit_plan.get("profit_target")
+        except Exception as e:
+            logger.debug("Could not fetch entry details: %s", e)
+
+        entry_price_for_log = portfolio.long_avg_price if position_side == "LONG" else portfolio.short_avg_price
+        log_trade_to_file(
+            symbol=self._symbol,
+            action=f"CLOSE_{position_side}",
+            entry_price=entry_price_for_log,
+            close_price=eff_price,
+            pnl=realized_delta,
+            reasoning=decision.reasoning,
+            entry_reasoning=entry_reasoning_for_log,
+            amount=entry_amount_for_log,
+            leverage=entry_leverage_for_log,
+            stop_loss=entry_sl_for_log,
+            take_profit=entry_tp_for_log,
+        )
+
         # Portfolio ve PnL güncelle
         self._update_portfolio(portfolio, decision.action, btc_amount, eff_price)
         self._update_daily_pnl(daily_pnl, realized_delta, portfolio, eff_price, closing_fee_total)
@@ -1705,105 +1880,346 @@ class Executor:
             reason,
             exit_price
         )
-        
-        with Session(engine) as session:
-            # Portfolio'yu kontrol et
-            portfolio = get_synced_portfolio(session, self._symbol)
-            
-            if abs(portfolio.position) < 0.0001:
-                logger.warning("No open position to close")
-                return ExecutionResult(status="SKIP", details="Kapatılacak pozisyon yok")
-            
-            daily_pnl = get_daily_pnl(session)
-            
-            # Öncelikle position monitor'dan gelen exit_price'ı kullan
-            if exit_price and exit_price > 0:
-                price = exit_price
-                logger.info("Using exit_price from position monitor: %.2f", price)
-            else:
-                price = self._resolve_price()
-                logger.warning("No exit_price provided, using resolved price: %.2f", price)
-            
-            if price <= 0:
-                logger.error("Invalid price: %.2f, cannot close position", price)
-                return ExecutionResult(status="ERROR", details="Invalid price")
-            
-            pre_position = portfolio.position
-            
-            # CLOSE zamanını kaydet (cooldown başlat)
-            self._last_close_time = datetime.utcnow()
-            
-            # === POSITION CLOSING LOGIC ===
-            max_closeable = abs(portfolio.position)
-            btc_amount = max_closeable  # Always close 100%
-            
-            # Efektif kapanış fiyatı = position monitor'dan gelen fiyat veya mevcut fiyat
-            eff_price = price
-            position_size_usd = btc_amount * eff_price
-            
-            # Pozisyon yönü
-            is_long = portfolio.position > 0
-            position_side = "LONG" if is_long else "SHORT"
-            
-            logger.info(
-                "CLOSE %s position (exit plan): current=%.6f btc_to_close=%.6f notional=%.2f trigger=%s",
-                position_side,
-                portfolio.position,
-                btc_amount,
-                position_size_usd,
-                trigger_type
-            )
-            
-            # Pozisyon ID'sini al
-            current_position_id = self.get_current_position_id(session, self._symbol)
-            
-            # Mevcut açık trade'lerin close_price'larını güncelle
-            trade_side = "SELL" if is_long else "BUY"
-            updated_count, realized_delta, closing_fee_total = close_open_trades(
-                session=session,
-                symbol=self._symbol,
-                close_side=trade_side,
-                close_amount=btc_amount,
-                close_price=eff_price,
-                taker_fee_rate=self._taker_fee_rate,
-            )
-            
-            logger.info(
-                "Closed %s position: %d trade(s) updated with close_price=%.2f",
-                position_side,
-                updated_count,
-                eff_price,
-            )
-            
-            # Portfolio güncelle (tam kapatma)
-            portfolio.position = 0.0
-            portfolio.average_price = 0.0
-            portfolio.updated_at = datetime.utcnow()
-            
-            # Daily PnL güncelle
-            self._update_daily_pnl(daily_pnl, realized_delta, portfolio, eff_price, closing_fee_total)
-            
-            session.flush()
-            session.commit()
-            
-            logger.info("✅ Position closed by exit plan | pnl=%.2f fee=%.2f", realized_delta, closing_fee_total)
-            
-            telemetry = {
-                "last_action": "CLOSE",
-                "amount": btc_amount,
-                "price": eff_price,
-                "position_side": position_side,
-                "position_id": current_position_id,
-                "fee": closing_fee_total,
-                "pnl": realized_delta,
-                "trigger_type": trigger_type,
-            }
-            
-            return ExecutionResult(
-                status="PAPER",
-                details=f"{position_side} position closed by {trigger_type}",
-                telemetry=telemetry
-            )
+
+        # Race condition prevention - check if close already in progress
+        with self._close_lock:
+            current_time = datetime.utcnow()
+
+            # Cooldown kontrolü - aynı symbol için 60 saniye içinde duplicate close engelle
+            last_close = self._symbol_close_timestamps.get(self._symbol)
+            if last_close:
+                elapsed = (current_time - last_close).total_seconds()
+                if elapsed < self._close_cooldown_seconds:
+                    logger.warning(
+                        "⏳ Close cooldown active for %s: %.1f/%.0f seconds remaining",
+                        self._symbol, elapsed, self._close_cooldown_seconds
+                    )
+                    return ExecutionResult(status="SKIP", details=f"Cooldown: {self._close_cooldown_seconds - elapsed:.1f}s remaining")
+
+            if self._closing_in_progress.get(self._symbol):
+                logger.warning("Close already in progress for %s, skipping duplicate", self._symbol)
+                return ExecutionResult(status="SKIP", details="Close already in progress")
+
+            self._closing_in_progress[self._symbol] = True
+            self._symbol_close_timestamps[self._symbol] = current_time
+
+        try:
+            with Session(engine) as session:
+                # Portfolio'yu kontrol et
+                portfolio = get_synced_portfolio(session, self._symbol)
+
+                if abs(portfolio.position) < 0.0001:
+                    logger.warning("No open position to close")
+                    return ExecutionResult(status="SKIP", details="Kapatılacak pozisyon yok")
+
+                daily_pnl = get_daily_pnl(session)
+
+                # Öncelikle position monitor'dan gelen exit_price'ı kullan
+                if exit_price and exit_price > 0:
+                    price = exit_price
+                    logger.info("Using exit_price from position monitor: %.2f", price)
+                else:
+                    price = self._resolve_price()
+                    logger.warning("No exit_price provided, using resolved price: %.2f", price)
+
+                if price <= 0:
+                    logger.error("Invalid price: %.2f, cannot close position", price)
+                    return ExecutionResult(status="ERROR", details="Invalid price")
+
+                pre_position = portfolio.position
+
+                # CLOSE zamanını kaydet (cooldown başlat)
+                self._last_close_time = datetime.utcnow()
+
+                # === POSITION CLOSING LOGIC ===
+                max_closeable = abs(portfolio.position)
+                btc_amount = max_closeable  # Always close 100%
+
+                # Efektif kapanış fiyatı = position monitor'dan gelen fiyat veya mevcut fiyat
+                eff_price = price
+                position_size_usd = btc_amount * eff_price
+
+                # Pozisyon yönü
+                is_long = portfolio.position > 0
+                position_side = "LONG" if is_long else "SHORT"
+
+                logger.info(
+                    "CLOSE %s position (exit plan): current=%.6f btc_to_close=%.6f notional=%.2f trigger=%s",
+                    position_side,
+                    portfolio.position,
+                    btc_amount,
+                    position_size_usd,
+                    trigger_type
+                )
+
+                # Pozisyon ID'sini al
+                current_position_id = self.get_current_position_id(session, self._symbol)
+
+                # Mevcut açık trade'lerin close_price'larını güncelle
+                trade_side = "SELL" if is_long else "BUY"
+                updated_count, realized_delta, closing_fee_total = close_open_trades(
+                    session=session,
+                    symbol=self._symbol,
+                    close_side=trade_side,
+                    close_amount=btc_amount,
+                    close_price=eff_price,
+                    taker_fee_rate=self._taker_fee_rate,
+                )
+
+                # Duplicate close prevention - if no trades were updated, position already closed
+                if updated_count == 0:
+                    logger.warning("No trades updated - position may already be closed by another process")
+                    return ExecutionResult(status="SKIP", details="Position already closed")
+
+                logger.info(
+                    "Closed %s position: %d trade(s) updated with close_price=%.2f",
+                    position_side,
+                    updated_count,
+                    eff_price,
+                )
+
+                # Portfolio güncelle (tam kapatma)
+                portfolio.position = 0.0
+                portfolio.average_price = 0.0
+                portfolio.updated_at = datetime.utcnow()
+
+                # Daily PnL güncelle
+                self._update_daily_pnl(daily_pnl, realized_delta, portfolio, eff_price, closing_fee_total)
+
+                session.flush()
+                session.commit()
+
+                logger.info("✅ Position closed by exit plan | pnl=%.2f fee=%.2f", realized_delta, closing_fee_total)
+
+                telemetry = {
+                    "last_action": "CLOSE",
+                    "amount": btc_amount,
+                    "price": eff_price,
+                    "position_side": position_side,
+                    "position_id": current_position_id,
+                    "fee": closing_fee_total,
+                    "pnl": realized_delta,
+                    "trigger_type": trigger_type,
+                }
+
+                return ExecutionResult(
+                    status="PAPER",
+                    details=f"{position_side} position closed by {trigger_type}",
+                    telemetry=telemetry
+                )
+        finally:
+            # Release the close lock
+            with self._close_lock:
+                self._closing_in_progress[self._symbol] = False
+
+    def execute_partial_close(
+        self,
+        position_side: str,
+        close_quantity: float,
+        close_price: float,
+        tp_level: int,
+        reason: str,
+        remaining_quantity: float = 0.0,
+        is_breakeven: bool = False,
+        trailing_activated: bool = False,
+    ) -> ExecutionResult:
+        """
+        TP tetiklendiğinde kısmi pozisyon kapatma.
+        PartialTakeProfitManager tarafından çağrılır.
+
+        Args:
+            position_side: Kapatılacak pozisyonun yönü ("LONG" veya "SHORT")
+            close_quantity: Kapatılacak miktar (BTC/coin cinsinden)
+            close_price: Kapanış fiyatı
+            tp_level: TP seviyesi (1, 2, 3, 4)
+            reason: Kapanış nedeni
+            remaining_quantity: Kalan pozisyon miktarı
+            is_breakeven: TP1 sonrası breakeven aktif mi
+            trailing_activated: TP2 sonrası trailing aktif mi
+
+        Returns:
+            ExecutionResult
+        """
+        logger.info(
+            "🎯 Partial close triggered | TP%d | %s | qty=%.6f @ $%.2f",
+            tp_level,
+            position_side,
+            close_quantity,
+            close_price
+        )
+
+        # Kısa cooldown kontrolü (partial close için 5 saniye)
+        current_time = datetime.utcnow()
+        partial_cooldown_key = f"{self._symbol}_partial_tp{tp_level}"
+        last_partial = getattr(self, '_partial_close_timestamps', {}).get(partial_cooldown_key)
+
+        if last_partial:
+            elapsed = (current_time - last_partial).total_seconds()
+            if elapsed < 5:
+                logger.warning("Partial close cooldown active: %.1fs remaining", 5 - elapsed)
+                return ExecutionResult(status="SKIP", details=f"Partial cooldown: {5 - elapsed:.1f}s")
+
+        # Cooldown timestamp'i kaydet
+        if not hasattr(self, '_partial_close_timestamps'):
+            self._partial_close_timestamps = {}
+        self._partial_close_timestamps[partial_cooldown_key] = current_time
+
+        try:
+            with Session(engine) as session:
+                portfolio = get_synced_portfolio(session, self._symbol)
+
+                # Pozisyon kontrolü
+                if position_side == "LONG":
+                    current_qty = portfolio.long_position
+                else:
+                    current_qty = abs(portfolio.short_position)
+
+                if current_qty < 0.0001:
+                    logger.warning("No %s position to partially close", position_side)
+                    return ExecutionResult(status="SKIP", details=f"No {position_side} position")
+
+                # Kapatılacak miktar kontrolü
+                actual_close_qty = min(close_quantity, current_qty)
+                if actual_close_qty < 0.0001:
+                    logger.warning("Close quantity too small: %.8f", actual_close_qty)
+                    return ExecutionResult(status="SKIP", details="Close quantity too small")
+
+                daily_pnl = get_daily_pnl(session)
+                pre_position = portfolio.position
+
+                # Position ID al
+                current_position_id = self.get_position_id_by_side(session, self._symbol, position_side)
+
+                # Trade side belirle (LONG kapatmak için SELL, SHORT kapatmak için BUY)
+                trade_side = "SELL" if position_side == "LONG" else "BUY"
+
+                # close_open_trades çağır - FIFO ile kısmi kapanış
+                updated_count, realized_delta, closing_fee_total = close_open_trades(
+                    session=session,
+                    symbol=self._symbol,
+                    close_side=trade_side,
+                    close_amount=actual_close_qty,
+                    close_price=close_price,
+                    taker_fee_rate=self._taker_fee_rate,
+                )
+
+                if updated_count == 0:
+                    logger.warning("No trades updated for partial close")
+                    return ExecutionResult(status="SKIP", details="No trades to close")
+
+                logger.info(
+                    "✅ Partial close TP%d: %d trade(s) | qty=%.6f | pnl=$%.2f | fee=$%.2f",
+                    tp_level,
+                    updated_count,
+                    actual_close_qty,
+                    realized_delta,
+                    closing_fee_total
+                )
+
+                # Portfolio güncelle
+                self._update_portfolio(portfolio, trade_side, actual_close_qty, close_price)
+
+                # Daily PnL güncelle
+                self._update_daily_pnl(daily_pnl, realized_delta, portfolio, close_price, closing_fee_total)
+
+                # Log dosyasına yaz
+                entry_price = portfolio.long_avg_price if position_side == "LONG" else portfolio.short_avg_price
+                log_trade_to_file(
+                    symbol=self._symbol,
+                    action=f"PARTIAL_CLOSE_TP{tp_level}_{position_side}",
+                    entry_price=entry_price,
+                    close_price=close_price,
+                    pnl=realized_delta,
+                    reasoning=reason,
+                    amount=actual_close_qty,
+                )
+
+                session.flush()
+                session.commit()
+
+                post_position = portfolio.net_position
+
+                # Telegram bildirimi
+                self._send_partial_close_notification(
+                    tp_level=tp_level,
+                    position_side=position_side,
+                    close_qty=actual_close_qty,
+                    close_price=close_price,
+                    pnl=realized_delta,
+                    remaining_qty=remaining_quantity,
+                    is_breakeven=is_breakeven,
+                    trailing_activated=trailing_activated,
+                )
+
+                telemetry = {
+                    "last_action": f"PARTIAL_CLOSE_TP{tp_level}",
+                    "amount": actual_close_qty,
+                    "price": close_price,
+                    "position_side": position_side,
+                    "position_id": current_position_id,
+                    "fee": closing_fee_total,
+                    "pnl": realized_delta,
+                    "tp_level": tp_level,
+                    "remaining_quantity": remaining_quantity,
+                    "is_breakeven": is_breakeven,
+                    "trailing_activated": trailing_activated,
+                }
+
+                return ExecutionResult(
+                    status="PAPER",
+                    details=f"TP{tp_level} partial close: {actual_close_qty:.6f} @ ${close_price:.2f}",
+                    telemetry=telemetry
+                )
+
+        except Exception as e:
+            logger.error("Partial close error: %s", e, exc_info=True)
+            return ExecutionResult(status="ERROR", details=str(e))
+
+    def _send_partial_close_notification(
+        self,
+        tp_level: int,
+        position_side: str,
+        close_qty: float,
+        close_price: float,
+        pnl: float,
+        remaining_qty: float,
+        is_breakeven: bool,
+        trailing_activated: bool,
+    ) -> None:
+        """Partial close için Telegram bildirimi gönder"""
+        try:
+            from app.utils.telegram import telegram_client
+
+            emoji = "🟢" if pnl >= 0 else "🔴"
+            pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+
+            # Status bilgisi
+            status_parts = []
+            if is_breakeven:
+                status_parts.append("🛡️ BE aktif")
+            if trailing_activated:
+                status_parts.append("📈 Trailing aktif")
+            status_str = " | ".join(status_parts) if status_parts else ""
+
+            message = f"""
+🎯 *TP{tp_level} Tetiklendi* | {self._symbol}
+
+{emoji} *{position_side}* pozisyonun %{int((close_qty / (close_qty + remaining_qty)) * 100) if remaining_qty > 0 else 100}'i kapatıldı
+
+📊 *Detaylar:*
+• Kapatılan: {close_qty:.6f} @ ${close_price:,.2f}
+• PnL: {pnl_str}
+• Kalan: {remaining_qty:.6f}
+
+{status_str}
+
+⏰ *{datetime.utcnow().strftime('%H:%M:%S')} UTC*
+"""
+            telegram_client.send_message(message.strip())
+            logger.info("Partial close notification sent for TP%d", tp_level)
+
+        except Exception as e:
+            logger.error("Failed to send partial close notification: %s", e)
 
     def format_reason(self, text: str) -> str:
         cleaned = text.replace("```", "")
@@ -1988,12 +2404,34 @@ class Executor:
     
     def _close_position_on_trigger(self, session: Session, trigger_type: str, current_price: float, trigger_price: float) -> None:
         """Stop-loss tetiklendiğinde pozisyonu kapat"""
+        # Race condition prevention - check if close already in progress
+        with self._close_lock:
+            current_time = datetime.utcnow()
+
+            # Cooldown kontrolü - aynı symbol için 60 saniye içinde duplicate close engelle
+            last_close = self._symbol_close_timestamps.get(self._symbol)
+            if last_close:
+                elapsed = (current_time - last_close).total_seconds()
+                if elapsed < self._close_cooldown_seconds:
+                    logger.warning(
+                        "⏳ Close cooldown active for %s (WebSocket): %.1f/%.0f seconds remaining",
+                        self._symbol, elapsed, self._close_cooldown_seconds
+                    )
+                    return
+
+            if self._closing_in_progress.get(self._symbol):
+                logger.warning("Close already in progress for %s (WebSocket), skipping duplicate", self._symbol)
+                return
+
+            self._closing_in_progress[self._symbol] = True
+            self._symbol_close_timestamps[self._symbol] = current_time
+
         try:
             from app.executor.ledger import get_daily_pnl, Trade
             from app.risk_manager.manager import RiskDecision
-            
+
             portfolio = get_synced_portfolio(session, self._symbol)
-            
+
             if abs(portfolio.position) < 0.0001:
                 logger.warning("Position already closed or no position")
                 return
@@ -2052,7 +2490,10 @@ class Executor:
             
             if result.status == "EXECUTED":
                 logger.info("✅ Position closed successfully due to %s", trigger_type)
-                
+
+                # Set cooldown time (was missing - caused rapid re-entry after WebSocket close)
+                self._last_close_time = datetime.utcnow()
+
                 # Bildirim gönder
                 self._send_sl_tp_notification(
                     trigger_type=trigger_type,
@@ -2064,9 +2505,13 @@ class Executor:
                 )
             else:
                 logger.error("❌ Failed to close position: %s", result.status)
-                
+
         except Exception as e:
             logger.error("Error closing position on trigger: %s", e, exc_info=True)
+        finally:
+            # Release the close lock
+            with self._close_lock:
+                self._closing_in_progress[self._symbol] = False
 
     def _send_sl_tp_notification(self, trigger_type: str, position_type: str, 
                                  amount: float, entry_price: float, current_price: float, 

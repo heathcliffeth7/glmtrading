@@ -23,6 +23,7 @@ class TrailingStopType(Enum):
     ATR_BASED = "atr"
     CHANDELIER = "chandelier"
     STEP = "step"
+    SWING_BASED = "swing"  # v2.0: Swing low/high takibi
 
 
 class AdvancedTrailingStop:
@@ -46,14 +47,16 @@ class AdvancedTrailingStop:
             "fixed_pct": 1.0,
             "activation_profit_pct": 0.5,
             "step_size_pct": 0.3,
+            "min_step_pct": 0.3,  # v2.0: Min hareket için güncelle
         },
         "swing": {
             # GLM Elite Swing Trader config update
-            "default_type": TrailingStopType.ATR_BASED,  # Changed from CHANDELIER
-            "atr_multiplier": 1.0,  # Changed from 2.5 (more aggressive trailing)
+            "default_type": TrailingStopType.SWING_BASED,  # v2.0: SWING_BASED default
+            "atr_multiplier": 2.5,  # v2.0: ATR fallback için
             "fixed_pct": 2.0,
-            "activation_profit_pct": 1.5,  # Changed from 1.0 (activate at 1.5R)
+            "activation_profit_pct": 1.5,  # 1.5R kârda aktif
             "step_size_pct": 0.5,
+            "min_step_pct": 0.5,  # v2.0: Min hareket için güncelle
         }
     }
 
@@ -136,8 +139,11 @@ class AdvancedTrailingStop:
             "activation_price": activation_price,
             "activation_profit_pct": activation_profit_pct,
             "step_size_pct": step_size_pct,
+            "min_step_pct": self.config.get("min_step_pct", 0.5),  # v2.0
             "is_activated": False,
             "last_step_price": None,  # For STEP type
+            "last_swing_low": None,   # v2.0: For SWING_BASED
+            "last_swing_high": None,  # v2.0: For SWING_BASED
             "updates_count": 0,
             "created_at": datetime.utcnow(),
             "last_updated_at": datetime.utcnow(),
@@ -161,7 +167,9 @@ class AdvancedTrailingStop:
         current_price: float,
         current_high: float,
         current_low: float,
-        current_atr: Optional[float] = None
+        current_atr: Optional[float] = None,
+        swing_low: Optional[float] = None,   # v2.0: For SWING_BASED
+        swing_high: Optional[float] = None,  # v2.0: For SWING_BASED
     ) -> Optional[Dict]:
         """
         Update trailing stop based on current price.
@@ -172,6 +180,8 @@ class AdvancedTrailingStop:
             current_high: Current candle high
             current_low: Current candle low
             current_atr: Current ATR value (optional, updates if provided)
+            swing_low: Recent swing low (optional, for SWING_BASED)
+            swing_high: Recent swing high (optional, for SWING_BASED)
 
         Returns:
             Dict with:
@@ -198,6 +208,12 @@ class AdvancedTrailingStop:
         if current_atr is not None:
             config["atr_value"] = current_atr
 
+        # v2.0: Update swing levels if provided
+        if swing_low is not None:
+            config["last_swing_low"] = swing_low
+        if swing_high is not None:
+            config["last_swing_high"] = swing_high
+
         # Check if trailing should be activated
         if not config["is_activated"]:
             if self._check_activation(config, current_price):
@@ -222,11 +238,16 @@ class AdvancedTrailingStop:
 
             # Only move stop in favorable direction
             should_update = False
+
+            # v2.0: Min step check to avoid micro-updates
+            min_step_pct = config.get("min_step_pct", 0.5)
+            step_threshold = config["current_stop"] * (min_step_pct / 100)
+
             if config["position_side"] == "LONG":
-                if new_stop > config["current_stop"]:
+                if new_stop > config["current_stop"] + step_threshold:
                     should_update = True
             else:  # SHORT
-                if new_stop < config["current_stop"]:
+                if new_stop < config["current_stop"] - step_threshold:
                     should_update = True
 
             if should_update:
@@ -278,6 +299,9 @@ class AdvancedTrailingStop:
 
         elif trail_type == TrailingStopType.ATR_BASED:
             return self._calc_atr_based(config, current_price)
+
+        elif trail_type == TrailingStopType.SWING_BASED:
+            return self._calc_swing_based(config, current_price)
 
         elif trail_type == TrailingStopType.CHANDELIER:
             return self._calc_chandelier(config)
@@ -370,6 +394,40 @@ class AdvancedTrailingStop:
                     return new_step_price
 
             return config["current_stop"]
+
+    def _calc_swing_based(self, config: Dict, current_price: float) -> float:
+        """
+        v2.0: Swing-based trailing stop.
+        Uses recent swing low (LONG) or swing high (SHORT) as trailing reference.
+        Falls back to ATR-based if no swing levels available.
+        """
+        position_side = config["position_side"]
+        swing_low = config.get("last_swing_low")
+        swing_high = config.get("last_swing_high")
+
+        if position_side == "LONG":
+            if swing_low and swing_low > 0:
+                # Trail just below the swing low (0.2% buffer)
+                new_stop = swing_low * 0.998
+                # Ensure we don't move stop backwards
+                if new_stop > config["current_stop"]:
+                    return new_stop
+                return config["current_stop"]
+            else:
+                # Fallback to ATR-based if no swing low
+                return self._calc_atr_based(config, current_price)
+
+        else:  # SHORT
+            if swing_high and swing_high > 0:
+                # Trail just above the swing high (0.2% buffer)
+                new_stop = swing_high * 1.002
+                # Ensure we don't move stop backwards
+                if new_stop < config["current_stop"]:
+                    return new_stop
+                return config["current_stop"]
+            else:
+                # Fallback to ATR-based if no swing high
+                return self._calc_atr_based(config, current_price)
 
     def _check_triggered(
         self,

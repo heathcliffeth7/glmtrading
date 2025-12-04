@@ -10,6 +10,8 @@ from datetime import datetime
 from typing import Dict, Optional, Set
 
 from sqlalchemy.orm import Session
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 from app.executor.ledger import Portfolio, Trade
 try:
@@ -137,12 +139,13 @@ def _normalize_trade(trade: Trade, price_hint: Optional[float]) -> tuple[bool, f
         logger.info("SOLANA trade debug - ID:%s, Amount:%.6f, Price:%.2f, Dynamic_Limit:%.6f, Price_Hint:%.2f",
                    getattr(trade, 'id', 'N/A'), amount, price, dynamic_limit, price_hint or 0.0)
 
-    if abs(amount) > dynamic_limit:
+    amount_over_limit = amount > dynamic_limit
+    if amount_over_limit:
         warnings.append(f"amount>{dynamic_limit:.1f}")
 
     # Debug log for abnormal amounts to understand why it was rejected
-    if abs(amount) > dynamic_limit:
-         logger.info(
+    if amount_over_limit:
+        logger.info(
             "Abnormal amount detected for %s: amount=%.6f > limit=%.6f (price=$%.2f, max_usd=$%.0f)",
             trade.symbol, amount, dynamic_limit, price, MAX_POSITION_USD
         )
@@ -158,7 +161,7 @@ def _normalize_trade(trade: Trade, price_hint: Optional[float]) -> tuple[bool, f
             warnings.append(f"price_deviation:{diff_pct*100:.1f}% (hint={price_hint:.2f})")
             price = price_hint  # kullanılır bir fiyatla onar
 
-    usable = amount > 0 and price > 0
+    usable = amount > 0 and price > 0 and not amount_over_limit
     return usable, amount, price, warnings
 
 
@@ -223,9 +226,15 @@ def calculate_actual_position_from_trades(session: Session, symbol: str) -> Dict
             "last_trade_timestamp": None,
         }
 
-    # Long ve short trade'leri ayır
-    long_trades = [t for t in open_trades if t.position_side == "LONG"]
-    short_trades = [t for t in open_trades if t.position_side == "SHORT"]
+    # Long ve short trade'leri ayır (position_side boşsa side'dan türet)
+    long_trades = [
+        t for t in open_trades
+        if t.position_side == "LONG" or (not t.position_side and t.side == "BUY")
+    ]
+    short_trades = [
+        t for t in open_trades
+        if t.position_side == "SHORT" or (not t.position_side and t.side == "SELL")
+    ]
 
     # Long pozisyon hesaplama
     long_position = 0.0
@@ -297,10 +306,11 @@ def sync_portfolio_with_trades(session: Session, symbol: str) -> Portfolio:
     Synchronize portfolio table with actual trades and return the correct portfolio state.
     YENİ: Long/short pozisyonları ve last_trade bilgilerini günceller.
     """
-
-    portfolio = session.query(Portfolio).filter(Portfolio.symbol == symbol).first()
-    if not portfolio:
-        portfolio = Portfolio(
+    def _fallback_portfolio() -> Portfolio:
+        existing = session.query(Portfolio).filter(Portfolio.symbol == symbol).first()
+        if existing:
+            return existing
+        return Portfolio(
             symbol=symbol,
             position=0.0,
             average_price=0.0,
@@ -312,58 +322,107 @@ def sync_portfolio_with_trades(session: Session, symbol: str) -> Portfolio:
             last_trade_price=None,
             last_trade_timestamp=None,
         )
-        session.add(portfolio)
 
-    actual_state = calculate_actual_position_from_trades(session, symbol)
+    # Keep lock waits bounded and give heavier work enough headroom.
+    try:
+        session.execute(text("SET LOCAL lock_timeout = '1s'"))
+        session.execute(text("SET LOCAL statement_timeout = '60s'"))
+    except Exception:
+        logger.debug("Could not set local DB timeouts for portfolio sync")
 
-    position_diff = abs(portfolio.position - actual_state["position"])
-    long_diff = abs((portfolio.long_position or 0.0) - actual_state["long_position"])
-    short_diff = abs((portfolio.short_position or 0.0) - actual_state["short_position"])
+    # Serialize per-symbol syncs across workers/processes to avoid deadlocks and timeouts.
+    try:
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:symbol))"),
+            {"symbol": symbol},
+        )
+    except OperationalError as e:
+        session.rollback()
+        logger.warning("Advisory lock busy, skipping sync for %s: %s", symbol, e)
+        return _fallback_portfolio()
+    except Exception as e:
+        session.rollback()
+        logger.warning("Advisory lock failed for %s: %s", symbol, e)
+        return _fallback_portfolio()
 
-    sync_needed = (
-        position_diff > 0.0001
-        or long_diff > 0.0001
-        or short_diff > 0.0001
-    )
+    try:
+        query = session.query(Portfolio).filter(Portfolio.symbol == symbol)
+        try:
+            portfolio = query.with_for_update(nowait=True).first()
+        except OperationalError as e:
+            session.rollback()
+            logger.warning("Portfolio sync skipped (lock contention) for %s: %s", symbol, e)
+            return _fallback_portfolio()
 
-    if sync_needed:
-        logger.info(
-            "Portfolio sync needed for %s: "
-            "position=%.6f→%.6f, long=%.6f→%.6f, short=%.6f→%.6f",
-            symbol,
-            portfolio.position,
-            actual_state["position"],
-            portfolio.long_position or 0.0,
-            actual_state["long_position"],
-            portfolio.short_position or 0.0,
-            actual_state["short_position"],
+        if not portfolio:
+            portfolio = Portfolio(
+                symbol=symbol,
+                position=0.0,
+                average_price=0.0,
+                long_position=0.0,
+                long_avg_price=None,
+                short_position=0.0,
+                short_avg_price=None,
+                net_position=0.0,
+                last_trade_price=None,
+                last_trade_timestamp=None,
+            )
+            session.add(portfolio)
+
+        actual_state = calculate_actual_position_from_trades(session, symbol)
+
+        position_diff = abs(portfolio.position - actual_state["position"])
+        long_diff = abs((portfolio.long_position or 0.0) - actual_state["long_position"])
+        short_diff = abs((portfolio.short_position or 0.0) - actual_state["short_position"])
+
+        sync_needed = (
+            position_diff > 0.0001
+            or long_diff > 0.0001
+            or short_diff > 0.0001
         )
 
-        portfolio.position = actual_state["position"]
-        portfolio.average_price = actual_state["average_price"]
-        portfolio.long_position = actual_state["long_position"]
-        portfolio.long_avg_price = actual_state["long_avg_price"]
-        portfolio.short_position = actual_state["short_position"]
-        portfolio.short_avg_price = actual_state["short_avg_price"]
-        portfolio.net_position = actual_state["net_position"]
-        portfolio.last_trade_price = actual_state["last_trade_price"]
-        portfolio.last_trade_timestamp = actual_state["last_trade_timestamp"]
-        portfolio.updated_at = datetime.utcnow()
+        if sync_needed:
+            logger.info(
+                "Portfolio sync needed for %s: "
+                "position=%.6f→%.6f, long=%.6f→%.6f, short=%.6f→%.6f",
+                symbol,
+                portfolio.position,
+                actual_state["position"],
+                portfolio.long_position or 0.0,
+                actual_state["long_position"],
+                portfolio.short_position or 0.0,
+                actual_state["short_position"],
+            )
 
-        session.flush()
+            portfolio.position = actual_state["position"]
+            portfolio.average_price = actual_state["average_price"]
+            portfolio.long_position = actual_state["long_position"]
+            portfolio.long_avg_price = actual_state["long_avg_price"]
+            portfolio.short_position = actual_state["short_position"]
+            portfolio.short_avg_price = actual_state["short_avg_price"]
+            portfolio.net_position = actual_state["net_position"]
+            portfolio.last_trade_price = actual_state["last_trade_price"]
+            portfolio.last_trade_timestamp = actual_state["last_trade_timestamp"]
+            portfolio.updated_at = datetime.utcnow()
 
-        logger.info(
-            "Portfolio synchronized for %s: "
-            "long=%.6f@%.2f, short=%.6f@%.2f, net=%.6f",
-            symbol,
-            portfolio.long_position,
-            portfolio.long_avg_price or 0.0,
-            portfolio.short_position,
-            portfolio.short_avg_price or 0.0,
-            portfolio.net_position,
-        )
+            session.flush()
 
-    return portfolio
+            logger.info(
+                "Portfolio synchronized for %s: "
+                "long=%.6f@%.2f, short=%.6f@%.2f, net=%.6f",
+                symbol,
+                portfolio.long_position,
+                portfolio.long_avg_price or 0.0,
+                portfolio.short_position,
+                portfolio.short_avg_price or 0.0,
+                portfolio.net_position,
+            )
+
+        return portfolio
+    except Exception as e:
+        session.rollback()
+        logger.warning("Portfolio sync error for %s, returning fallback: %s", symbol, e)
+        return _fallback_portfolio()
 
 def get_synced_portfolio(session: Session, symbol: str) -> Portfolio:
     """
