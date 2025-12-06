@@ -26,7 +26,7 @@ class ResponseParser:
     Handles JSON extraction, repair, and conversion to RiskDecision objects.
     """
 
-    def __init__(self, settings=None, glm_client=None, nof1_prompt_builder=None):
+    def __init__(self, settings=None, glm_client=None, nof1_prompt_builder=None, metrics_calculator=None):
         """
         Initialize the response parser.
 
@@ -34,34 +34,25 @@ class ResponseParser:
             settings: Application settings object
             glm_client: GLM client for translation (optional)
             nof1_prompt_builder: Prompt builder for exit plan calculation (optional)
+            metrics_calculator: MetricsCalculator instance for metrics tracking (optional)
         """
         self._settings = settings
         self._glm = glm_client
         self._nof1_prompt_builder = nof1_prompt_builder
-
-        # Parsing metrics
-        self._parsing_metrics = {
-            "total_json_requests": 0,
-            "successful_json_parsing": 0,
-            "json_parsing_errors": 0,
-            "fallback_parsing_successes": 0,
-            "fallback_parsing_failures": 0,
-            "signal_recoveries": 0,
-            "complete_failures": 0,
-            "thought_process_present": 0,
-            "thought_process_missing": 0,
-            "thought_process_parse_errors": 0,
-        }
+        self._metrics_calculator = metrics_calculator
 
     @property
     def parsing_metrics(self) -> Dict[str, int]:
         """Get current parsing metrics."""
-        return self._parsing_metrics.copy()
+        if self._metrics_calculator:
+            return self._metrics_calculator._parsing_metrics.copy()
+        return {}
 
     def reset_metrics(self) -> None:
         """Reset all parsing metrics to zero."""
-        for key in self._parsing_metrics:
-            self._parsing_metrics[key] = 0
+        if self._metrics_calculator:
+            for key in self._metrics_calculator._parsing_metrics:
+                self._metrics_calculator._parsing_metrics[key] = 0
 
     # =========================================================================
     # DATA STRUCTURE PARSING
@@ -113,7 +104,8 @@ class ResponseParser:
             )
         except Exception as e:
             logger.warning("thought_process parse error: %s", e)
-            self._parsing_metrics["thought_process_parse_errors"] += 1
+            if self._metrics_calculator:
+                self._metrics_calculator._parsing_metrics["thought_process_parse_errors"] += 1
             return ThoughtProcess()
 
     # =========================================================================
@@ -535,9 +527,11 @@ class ResponseParser:
                         raw_tp = payload[first_key].get("thought_process", {})
                         if raw_tp:
                             thought_process = self.parse_thought_process(raw_tp)
-                            self._parsing_metrics["thought_process_present"] += 1
+                            if self._metrics_calculator:
+                                self._metrics_calculator._parsing_metrics["thought_process_present"] += 1
                         else:
-                            self._parsing_metrics["thought_process_missing"] += 1
+                            if self._metrics_calculator:
+                                self._metrics_calculator._parsing_metrics["thought_process_missing"] += 1
 
                     # Extract data_analysis
                     raw_da = payload[first_key].get("data_analysis", {})
@@ -566,9 +560,11 @@ class ResponseParser:
                         raw_tp = symbol_data.get("thought_process", {})
                         if raw_tp:
                             thought_process = self.parse_thought_process(raw_tp)
-                            self._parsing_metrics["thought_process_present"] += 1
+                            if self._metrics_calculator:
+                                self._metrics_calculator._parsing_metrics["thought_process_present"] += 1
                         else:
-                            self._parsing_metrics["thought_process_missing"] += 1
+                            if self._metrics_calculator:
+                                self._metrics_calculator._parsing_metrics["thought_process_missing"] += 1
 
                     raw_da = symbol_data.get("data_analysis", {})
                     if raw_da:
@@ -595,9 +591,11 @@ class ResponseParser:
                     raw_tp = payload.get("thought_process", {})
                     if raw_tp:
                         thought_process = self.parse_thought_process(raw_tp)
-                        self._parsing_metrics["thought_process_present"] += 1
+                        if self._metrics_calculator:
+                            self._metrics_calculator._parsing_metrics["thought_process_present"] += 1
                     else:
-                        self._parsing_metrics["thought_process_missing"] += 1
+                        if self._metrics_calculator:
+                            self._metrics_calculator._parsing_metrics["thought_process_missing"] += 1
 
                 raw_da = payload.get("data_analysis", {})
                 if raw_da:

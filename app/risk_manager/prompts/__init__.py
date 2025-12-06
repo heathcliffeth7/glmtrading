@@ -51,6 +51,15 @@ from .feature_analyzers import (
     LogicGatesBuilder,
 )
 
+# Builder modules
+from .builders import (
+    NotificationHandler,
+    ExitPlanCalculator,
+    MarketStateBuilder,
+    AccountInfoBuilder,
+    EnhancedFeaturesBuilder,
+)
+
 __all__ = [
     # Models
     "PositionCloseNotification",
@@ -93,4 +102,10 @@ __all__ = [
     "micro_divergence_check",
     "liquidity_sweep_check",
     "LogicGatesBuilder",
+    # Builder modules
+    "NotificationHandler",
+    "ExitPlanCalculator",
+    "MarketStateBuilder",
+    "AccountInfoBuilder",
+    "EnhancedFeaturesBuilder",
 ]
