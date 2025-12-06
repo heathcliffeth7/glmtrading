@@ -19,7 +19,7 @@ class Trade(Base):
     __tablename__ = "trades"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    position_id = Column(String(20), nullable=True)  # Her pozisyona unique ID (örn: POS-20251024-001)
+    position_id = Column(String(50), nullable=True)  # Her pozisyona unique ID (örn: POS-BTCUSDT-20251204-001)
     symbol = Column(String(20), nullable=False)
     side = Column(String(4), nullable=False)  # BUY/SELL (trade direction)
     position_side = Column(String(5), nullable=True)  # LONG/SHORT (position type)
@@ -33,7 +33,8 @@ class Trade(Base):
     pnl = Column(Float, default=0.0)  # Realized PnL (kapanışta hesaplanır)
     exit_plan = Column(JSON, nullable=True)  # Nof1.ai style exit plan: {stop_loss, invalidation_condition} (profit_target removed - not required)
     exit_plan_history = Column(JSON, nullable=True)  # Tüm exit plan güncellemelerin logu: {"updates": [...]}
-    entry_reasoning = Column(String(1000), nullable=True)  # Pozisyon açılış gerekçesi (kapanış logunda gösterilecek)
+    entry_reasoning = Column(String(1000), nullable=True)  # Pozisyon açılış gerekçesi
+    exit_reasoning = Column(String(1000), nullable=True)  # Pozisyon kapanış gerekçesi
     timestamp = Column(DateTime, default=datetime.utcnow)
 
 
@@ -341,21 +342,39 @@ def close_open_trades(
     close_amount: float,
     close_price: float,
     taker_fee_rate: float | None = None,
+    exit_reasoning: str | None = None,
 ) -> tuple[int, float, float]:
     """
     FIFO mantığıyla açık pozisyonları kapat ve close_price'larını güncelle.
     
     Args:
         symbol: Sembol (örn: BTCUSDT)
-        close_side: Kapanış trade'inin yönü (BUY veya SELL)
+        close_side: Kapanış trade'inin yönü (BUY, SELL veya CLOSE)
+                   CLOSE gelirse tüm açık trade'leri kapatır
         close_amount: Kapatılan miktar
         close_price: Kapanış fiyatı
     
     Returns:
         Tuple(updated_trade_count, realized_pnl_delta, total_closing_fee)
     """
-    # Karşı yönü belirle (BUY ise SELL'leri kapat, SELL ise BUY'ları kapat)
-    opposite_side = "SELL" if close_side == "BUY" else "BUY"
+    # CLOSE gelirse: önce açık trade'lerin yönünü bul, ona göre karşı yönü belirle
+    if close_side == "CLOSE":
+        # Açık trade'leri bul ve yönlerini kontrol et
+        any_open = (
+            session.query(Trade)
+            .filter_by(symbol=symbol)
+            .filter(Trade.close_price.is_(None))
+            .first()
+        )
+        if any_open:
+            # Açık trade'in yönüne göre opposite_side belirle
+            opposite_side = any_open.side  # Direkt açık trade'in side'ını al
+        else:
+            # Hiç açık trade yok
+            return 0, 0.0, 0.0
+    else:
+        # Normal akış: BUY ise SELL'leri kapat, SELL ise BUY'ları kapat
+        opposite_side = "SELL" if close_side == "BUY" else "BUY"
     
     # Açık olan karşı trade'leri bul (FIFO: en eskiden yeniye)
     open_trades = (
@@ -412,6 +431,8 @@ def close_open_trades(
             trade.notional_value = (trade.price * close_part) if trade.price and close_part else None
             trade.fees = closed_open_fee + closing_fee
             trade.pnl = new_pnl
+            if exit_reasoning:
+                trade.exit_reasoning = exit_reasoning[:1000]  # Truncate to 1000 chars
         else:
             # Kısmi kapanış: mevcut kaydı kalan miktarla açık bırak, kapanan kısmı yeni kayıt olarak ekle
             open_remainder = original_amount - close_part
@@ -440,6 +461,7 @@ def close_open_trades(
                 fees=closed_open_fee + closing_fee,
                 pnl=new_pnl,
                 timestamp=trade.timestamp,
+                exit_reasoning=exit_reasoning[:1000] if exit_reasoning else None,
             )
             session.add(closed_trade)
 

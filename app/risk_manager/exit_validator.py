@@ -127,6 +127,11 @@ class ExitValidator:
             logger.info("SL hit detected - allowing immediate CLOSE")
             return True, "Stop loss triggered - immediate close allowed", "CLOSE"
 
+        # Check 3b: THESIS_INVALID allows bypass (RED TEAM critical risk)
+        if exit_validation == "THESIS_INVALID":
+            logger.info("THESIS_INVALID detected - allowing immediate CLOSE (RED TEAM override)")
+            return True, "Thesis invalidated - immediate close allowed", "CLOSE"
+
         # Check 4: Minimum hold period
         if open_time:
             hold_hours = self._calculate_hold_hours(open_time)

@@ -71,13 +71,13 @@ class PureDataCollector(Agent):
         }
 
         historical_queries = {
-            "hist_1m": ("enriched_1m", self._symbol, "1m", 20),
-            "hist_5m": ("enriched_5m", self._symbol, "5m", 20),
-            "hist_15m": ("enriched_15min", self._symbol, "15min", 20),
-            "hist_30m": ("enriched_30min", self._symbol, "30min", 20),
-            "hist_1h": ("enriched_1h", self._symbol, "1h", 20),
-            "hist_4h": ("enriched_4h", self._symbol, "4h", 20),
-            "hist_1d": ("enriched_1d", self._symbol, "1d", 10),
+            "hist_1m": ("enriched_1m", self._symbol, "1m", 200),
+            "hist_5m": ("enriched_5m", self._symbol, "5m", 200),
+            "hist_15m": ("enriched_15min", self._symbol, "15min", 200),
+            "hist_30m": ("enriched_30min", self._symbol, "30min", 200),
+            "hist_1h": ("enriched_1h", self._symbol, "1h", 200),
+            "hist_4h": ("enriched_4h", self._symbol, "4h", 200),
+            "hist_1d": ("enriched_1d", self._symbol, "1d", 100),
         }
 
         futures_queries = {

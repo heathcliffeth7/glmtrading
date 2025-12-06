@@ -150,6 +150,40 @@ class VolumeAnalyzer:
 
         return obv, divergence
 
+    def get_obv_trend(
+        self,
+        closes: List[float],
+        volumes: List[float],
+        lookback: int = 10
+    ) -> str:
+        """
+        OBV trend yönünü döndürür: RISING, FALLING, NEUTRAL
+
+        Args:
+            closes: Close prices
+            volumes: Volume values
+            lookback: Number of bars to calculate slope
+
+        Returns:
+            str: "RISING", "FALLING", "NEUTRAL", or "N/A"
+        """
+        obv, _ = self.calculate_obv(closes, volumes)
+        if len(obv) < lookback:
+            return "N/A"
+
+        # Calculate slope of OBV over lookback period
+        slope = (obv[-1] - obv[-lookback]) / lookback
+
+        # Normalize by average volume to make threshold asset-agnostic
+        avg_vol = sum(volumes[-lookback:]) / lookback if volumes else 1
+        normalized = slope / avg_vol if avg_vol > 0 else 0
+
+        if normalized > 0.05:
+            return "RISING"
+        elif normalized < -0.05:
+            return "FALLING"
+        return "NEUTRAL"
+
     def calculate_volume_profile(
         self,
         closes: List[float],
@@ -482,6 +516,38 @@ class VolumeAnalyzer:
             "val": val,
             "feature_enabled": True,
         }
+
+    def detect_volume_spike(
+        self,
+        volumes: List[float],
+        lookback: int = 20,
+        threshold: float = 2.0
+    ) -> Tuple[bool, float]:
+        """
+        Son bar'ın volume'u ortalamaya göre spike mi kontrol eder.
+
+        Args:
+            volumes: Volume değerleri listesi
+            lookback: Ortalama hesaplamak için bakılacak bar sayısı
+            threshold: Spike kabul eşiği (örn: 2.0 = 2x ortalama)
+
+        Returns:
+            (is_spike, ratio) - True if current > threshold * avg
+        """
+        if not self.feature_enabled or len(volumes) < lookback + 1:
+            return False, 1.0
+
+        # Son bar hariç son N bar'ın ortalaması
+        avg_volume = sum(volumes[-lookback - 1:-1]) / lookback
+        current_volume = volumes[-1]
+
+        if avg_volume <= 0:
+            return False, 1.0
+
+        ratio = current_volume / avg_volume
+        is_spike = ratio >= threshold
+
+        return is_spike, round(ratio, 2)
 
     def get_prompt_section(
         self,

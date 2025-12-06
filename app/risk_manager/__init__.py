@@ -9,6 +9,15 @@ Enhanced Features (v2.0):
 - Dynamic Position Sizer (Kelly Criterion)
 - Time-Based Filter
 - Correlation Guard
+
+Modular Components (v3.0):
+- Decision Models (DataAnalysis, ThoughtProcess, RiskDecision)
+- Response Parser (JSON parsing and repair)
+- Safety Controls (Margin/leverage limits)
+- Consistency Validator (Thought process validation)
+- Risk Market Analysis (Confidence bands, market conditions)
+- Risk Monitoring (Logging, metrics)
+- Fallback Handler (Error recovery)
 """
 
 from .drawdown_manager import DrawdownManager
@@ -21,7 +30,18 @@ from .correlation_guard import CorrelationGuard
 from .manager import RiskManager
 from .nof1_prompt_builder import Nof1PromptBuilder
 
+# New modular components
+from .decision_models import DataAnalysis, ThoughtProcess, RiskDecision
+from .response_parser import ResponseParser
+from .safety_controls import SafetyControls
+from .consistency_validator import ConsistencyValidator
+from .risk_market_analysis import RiskMarketAnalyzer
+from .risk_monitoring import RiskMonitor
+from .fallback_handler import FallbackHandler
+from .utilities import clamp, json_serializer
+
 __all__ = [
+    # Original exports
     'DrawdownManager',
     'AdvancedTrailingStop',
     'TrailingStopType',
@@ -32,4 +52,16 @@ __all__ = [
     'CorrelationGuard',
     'RiskManager',
     'Nof1PromptBuilder',
+    # New modular exports
+    'DataAnalysis',
+    'ThoughtProcess',
+    'RiskDecision',
+    'ResponseParser',
+    'SafetyControls',
+    'ConsistencyValidator',
+    'RiskMarketAnalyzer',
+    'RiskMonitor',
+    'FallbackHandler',
+    'clamp',
+    'json_serializer',
 ]

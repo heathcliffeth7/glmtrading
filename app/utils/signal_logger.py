@@ -96,7 +96,18 @@ class SignalLog:
     trace_id: Optional[str] = None
     glm_model: Optional[str] = None
     signal_source: str = "derivatives_agent"
-    
+
+    # Thought Process (Thesis/Antithesis/Synthesis)
+    thought_process_thesis: Optional[str] = None
+    thought_process_antithesis: Optional[str] = None
+    thought_process_synthesis: Optional[str] = None
+    thought_process_consistent: bool = True
+    consistency_reason: Optional[str] = None
+
+    # Dynamic Threshold
+    dynamic_threshold_used: float = 80.0
+    volatility_regime_label: str = "medium"  # low, medium, high, extreme
+
     # Additional context
     metadata: Dict[str, Any] = field(default_factory=dict)
     
@@ -161,8 +172,22 @@ class SignalLog:
             # Latency
             'latency_total_ms': float(self.latency_total_ms),
             'latency_signal_generation_ms': float(self.latency_signal_generation_ms),
+
+            # Thought Process
+            'thought_process_consistent': 1.0 if self.thought_process_consistent else 0.0,
+            'dynamic_threshold_used': float(self.dynamic_threshold_used),
         }
-        
+
+        # Add thought process fields if available
+        if self.thought_process_thesis:
+            fields['thought_process_thesis_len'] = float(len(self.thought_process_thesis))
+        if self.thought_process_antithesis:
+            fields['thought_process_antithesis_len'] = float(len(self.thought_process_antithesis))
+        if self.thought_process_synthesis:
+            fields['thought_process_synthesis_len'] = float(len(self.thought_process_synthesis))
+        if self.consistency_reason:
+            fields['consistency_reason'] = str(self.consistency_reason)
+
         # Add outcome fields if available
         if self.outcome_price_1h is not None:
             fields['outcome_price_1h'] = float(self.outcome_price_1h)

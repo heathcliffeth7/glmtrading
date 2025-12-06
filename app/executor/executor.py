@@ -1,6 +1,5 @@
 import json
 import re
-from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Dict, Optional
@@ -27,121 +26,18 @@ from app.utils.telegram import format_markdown, telegram_client
 import os
 from pathlib import Path
 
+# FAZA 2: Modüler bileşenler
+from app.executor.execution_result import ExecutionResult
+from app.executor.trade_logger import log_trade_to_file, TRADE_LOG_DIR, TRADE_LOG_FILE
+from app.executor.position_manager import PositionManager
+from app.executor.guardrails import GuardrailManager
+from app.executor.price_manager import PriceManager
+from app.executor.portfolio_calculator import PortfolioCalculator
+from app.executor.trade_notifications import TradeNotifier
+from app.executor.exit_manager import ExitManager
+
 
 logger = get_logger(__name__)
-
-# Trade log dosyası
-TRADE_LOG_DIR = Path("/root/trading/logs")
-TRADE_LOG_FILE = TRADE_LOG_DIR / "trades.log"
-
-def _ensure_log_dir():
-    """Log klasörünü oluştur"""
-    TRADE_LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-def log_trade_to_file(
-    symbol: str,
-    action: str,
-    entry_price: float,
-    close_price: float = None,
-    pnl: float = None,
-    reasoning: str = None,
-    amount: float = None,
-    leverage: float = None,
-    stop_loss: float = None,
-    take_profit: float = None,
-    entry_reasoning: str = None,  # Açılış gerekçesi (kapanışta gösterilir)
-):
-    """
-    Trade bilgilerini log dosyasına yaz.
-
-    Açılış Format:
-    [2025-12-02 10:30:00] BTCUSDT | BUY (LONG) | Entry: $95000.00 | Amt: 0.05 | Lev: 7x | SL: $94000 | TP: $97000
-      Entry: Güçlü yükseliş trendi...
-    ---
-
-    Kapanış Format (birleşik - tüm bilgiler):
-    [2025-12-02 11:00:00] BTCUSDT | CLOSE_LONG
-      Entry: $95000.00 | Amt: 0.05 | Lev: 7x | SL: $94000 | TP: $97000
-      Exit:  $96000.00 | PnL: +$350.00
-      Entry: Güçlü yükseliş trendi...
-      Exit: Take profit hedefine ulaşıldı...
-    ---
-    """
-    try:
-        _ensure_log_dir()
-
-        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
-        if close_price and pnl is not None:
-            # Kapanış işlemi - birleşik format (tüm açılış bilgileri dahil)
-            pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-
-            with open(TRADE_LOG_FILE, "a", encoding="utf-8") as f:
-                # Ana başlık
-                f.write(f"[{timestamp}] {symbol} | {action}\n")
-
-                # Açılış detayları
-                entry_line = f"  Entry: ${entry_price:.2f}"
-                if amount:
-                    entry_line += f" | Amt: {amount:.4f}"
-                if leverage:
-                    entry_line += f" | Lev: {leverage:.0f}x"
-                if stop_loss:
-                    entry_line += f" | SL: ${stop_loss:.2f}"
-                if take_profit:
-                    entry_line += f" | TP: ${take_profit:.2f}"
-                f.write(entry_line + "\n")
-
-                # Kapanış detayları
-                f.write(f"  Exit:  ${close_price:.2f} | PnL: {pnl_str}\n")
-
-                # Açılış gerekçesi
-                if entry_reasoning:
-                    clean_entry = entry_reasoning.replace("\n", " ").strip()
-                    if len(clean_entry) > 400:
-                        clean_entry = clean_entry[:400] + "..."
-                    f.write(f"  Entry Reason: {clean_entry}\n")
-
-                # Kapanış gerekçesi
-                if reasoning:
-                    clean_exit = reasoning.replace("\n", " ").strip()
-                    if len(clean_exit) > 400:
-                        clean_exit = clean_exit[:400] + "..."
-                    f.write(f"  Exit Reason: {clean_exit}\n")
-                f.write("---\n")
-        else:
-            # Açılış işlemi
-            position_type = "LONG" if action == "BUY" else "SHORT"
-            log_line = f"[{timestamp}] {symbol} | {action} ({position_type}) | Entry: ${entry_price:.2f}"
-            if amount:
-                log_line += f" | Amt: {amount:.4f}"
-            if leverage:
-                log_line += f" | Lev: {leverage:.0f}x"
-            if stop_loss:
-                log_line += f" | SL: ${stop_loss:.2f}"
-            if take_profit:
-                log_line += f" | TP: ${take_profit:.2f}"
-
-            with open(TRADE_LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(log_line + "\n")
-                if reasoning:
-                    clean_reasoning = reasoning.replace("\n", " ").strip()
-                    if len(clean_reasoning) > 500:
-                        clean_reasoning = clean_reasoning[:500] + "..."
-                    f.write(f"  Entry Reason: {clean_reasoning}\n")
-                f.write("---\n")
-
-        logger.info("📝 Trade logged: %s %s @ %.2f", symbol, action, entry_price)
-
-    except Exception as e:
-        logger.error("Failed to log trade to file: %s", e)
-
-
-@dataclass
-class ExecutionResult:
-    status: str
-    details: str
-    telemetry: Optional[dict] = None
 
 
 class Executor:
@@ -225,47 +121,35 @@ class Executor:
         self._close_lock = threading.Lock()
         self._closing_in_progress: Dict[str, bool] = {}
 
-    def get_current_position_id(self, session: Session, symbol: str) -> Optional[str]:
-        """DEPRECATED: Tek pozisyon varsayar. get_position_id_by_side kullanın."""
-        from app.executor.ledger import Trade
-        open_trade = (
-            session.query(Trade)
-            .filter_by(symbol=symbol)
-            .filter(Trade.close_price.is_(None))
-            .filter(Trade.position_id.isnot(None))
-            .order_by(Trade.timestamp.desc())
-            .first()
+        # FAZA 2: Modüler helper sınıflar
+        self._position_manager = PositionManager(symbol=self._symbol)
+        self._guardrail_manager = GuardrailManager(
+            symbol=self._symbol,
+            max_position=self._max_position_per_side,
+            max_btc_per_trade=self._max_btc_per_trade,
+            starting_cash=self._starting_cash,
+            min_leverage=self._min_leverage,
+            max_leverage=self._max_leverage,
         )
-        return open_trade.position_id if open_trade else None
+        self._price_manager = PriceManager(symbol=self._symbol)
+        self._portfolio_calculator = PortfolioCalculator(
+            symbol=self._symbol,
+            starting_cash=self._starting_cash,
+            taker_fee_rate=self._taker_fee_rate,
+        )
+        self._trade_notifier = TradeNotifier(symbol=self._symbol)
+
+    def get_current_position_id(self, session: Session, symbol: str) -> Optional[str]:
+        """DEPRECATED: Delegate to PositionManager."""
+        return self._position_manager.get_current_position_id(session, symbol)
 
     def get_position_id_by_side(self, session: Session, symbol: str, position_side: str) -> Optional[str]:
-        """Belirtilen yön (LONG/SHORT) için açık pozisyon ID'sini bul"""
-        from app.executor.ledger import Trade
-        open_trade = (
-            session.query(Trade)
-            .filter_by(symbol=symbol, position_side=position_side)
-            .filter(Trade.close_price.is_(None))
-            .filter(Trade.position_id.isnot(None))
-            .order_by(Trade.timestamp.desc())
-            .first()
-        )
-        return open_trade.position_id if open_trade else None
+        """Delegate to PositionManager."""
+        return self._position_manager.get_position_id_by_side(session, symbol, position_side)
 
     def get_all_open_position_ids(self, session: Session, symbol: str) -> Dict[str, str]:
-        """Tüm açık pozisyon ID'lerini döndür {position_side: position_id}"""
-        from app.executor.ledger import Trade
-        open_trades = (
-            session.query(Trade)
-            .filter_by(symbol=symbol)
-            .filter(Trade.close_price.is_(None))
-            .filter(Trade.position_id.isnot(None))
-            .all()
-        )
-        result = {}
-        for trade in open_trades:
-            if trade.position_side and trade.position_id:
-                result[trade.position_side] = trade.position_id
-        return result
+        """Delegate to PositionManager."""
+        return self._position_manager.get_all_open_position_ids(session, symbol)
 
 
 
@@ -866,6 +750,7 @@ class Executor:
             reasoning=decision.reasoning,
             stop_loss=exit_plan.get("stop_loss") if exit_plan else None,
             take_profit=exit_plan.get("profit_target") if exit_plan else None,
+            invalidation_condition=exit_plan.get("invalidation_condition") if exit_plan else None,
         )
 
         if not self._stop_loss_monitoring_active:
@@ -890,293 +775,28 @@ class Executor:
         return ExecutionResult(status="PAPER", details="Paper trading kaydedildi", telemetry=telemetry)
 
     def _check_guardrails(self, portfolio: Portfolio, btc_amount: float, equity: float) -> bool:
-        """
-        Guardrail kontrolleri:
-        1. Tek işlemde max BTC limiti
-        2. Total pozisyon limiti
-        3. Equity sanity check
-        """
-        # 1. Per-trade unit cap (disabled when None)
-        if self._max_btc_per_trade and btc_amount > self._max_btc_per_trade:
-            logger.warning(
-                "Single trade unit limit exceeded: requested=%.6f limit=%.6f",
-                btc_amount,
-                self._max_btc_per_trade,
-                extra={"skip_telegram": True},
-            )
-            return False
-        
-        # 2. Total pozisyon kontrolü (BTC cinsinden)
-        new_total_position = abs(portfolio.position) + btc_amount
-        if new_total_position > self._max_position:
-            logger.warning(
-                "Total position limit exceeded: current=%.6f + new=%.6f = %.6f > limit=%.6f",
-                abs(portfolio.position),
-                btc_amount,
-                new_total_position,
-                self._max_position,
-                extra={"skip_telegram": True},
-            )
-            return False
-        
-        # 3. Equity sanity check - astronomik değerleri engelle
-        if equity > self._starting_cash * 10:
-            logger.warning(
-                "Equity too high (%.2f), possible calculation error. Max allowed: %.2f",
-                equity,
-                self._starting_cash * 10,
-                extra={"skip_telegram": True},
-            )
-            return False
-        
-        return True
+        """Delegate to GuardrailManager."""
+        return self._guardrail_manager.check_guardrails(portfolio, btc_amount, equity)
 
     def _get_current_price_validated(self, symbol: str, max_age_seconds: int = 10) -> Optional[float]:
-        """
-        Get current price with comprehensive fallback chain.
-        
-        Fallback chain:
-        1. WebSocket cache (fresh: < 10s)
-        2. REST API (Binance with retry)
-        3. InfluxDB (may be delayed)
-        4. Stale cache (emergency: < 60s)
-        
-        Args:
-            symbol: Trading symbol (e.g., BTCUSDT)
-            max_age_seconds: Maximum acceptable age for fresh data (default 10s)
-        
-        Returns:
-            Price if available, None if all sources fail
-        """
-        logger.info("🔍 Fetching price for %s (max_age=%ds)...", symbol, max_age_seconds)
-        
-        # SOURCE 1: Try fresh cache first (WebSocket data)
-        cached_price = price_cache.get(symbol, max_age_seconds=max_age_seconds)
-        if cached_price is not None:
-            logger.info("✅ Price from WebSocket cache: %.2f (fresh)", cached_price)
-            return cached_price
-        
-        # Get cache age for diagnostics
-        cache_age = price_cache.get_age_seconds(symbol)
-        logger.warning(
-            "⚠️ WebSocket cache miss for %s (age: %.1fs)",
-            symbol, cache_age
-        )
-        
-        # SOURCE 2: REST API as fallback (with built-in retry)
-        logger.info("🔄 Trying REST API fallback...")
-        rest_price = self._resolve_price()
-
-        if rest_price > 0:
-            # 🔄 ENHANCED CACHE UPDATE with reset logic
-            logger.info("✅ Binance API price: %.2f (attempt %d, %.2fs)", rest_price, attempt + 1, elapsed)
-
-            # Check for significant price difference that needs cache reset
-            cached_price_stale = price_cache.get(symbol)  # Get any cached price regardless of age
-            if cached_price_stale and cached_price_stale != rest_price:
-                diff_pct = abs(rest_price - cached_price_stale) / cached_price_stale
-                if diff_pct > 0.10:  # 10% difference triggers reset
-                    logger.warning(
-                        "🔄 SIGNIFICANT PRICE DIFFERENCE %s: REST=%.2f vs Cache=%.2f (%.1f%%) - TRIGGERING CACHE RESET",
-                        symbol, rest_price, cached_price_stale, diff_pct * 100
-                    )
-                    # Use enhanced cache update with reset logic
-                    price_cache.update_rest_price(symbol, rest_price)
-                else:
-                    # Normal cache update
-                    price_cache.set(symbol, rest_price, source="rest_fallback")
-            else:
-                # First time setting or same price
-                price_cache.set(symbol, rest_price, source="rest_fallback")
-            logger.info("✅ Price from REST API: %.2f", rest_price)
-            return rest_price
-        
-        logger.error("❌ REST API fallback failed")
-        
-        # SOURCE 3: Try InfluxDB directly (in case _resolve_price's InfluxDB also failed)
-        logger.info("🔄 Trying InfluxDB direct fallback...")
-        try:
-            from app.utils.influx import query_latest_snapshot
-            snapshot = query_latest_snapshot("features_1m", symbol, "1m")
-            if snapshot and "close" in snapshot:
-                influx_price = float(snapshot.get("close", 0.0))
-                if influx_price > 0:
-                    price_cache.set(symbol, influx_price, source="influx_fallback")
-                    logger.warning("⚠️ Price from InfluxDB: %.2f", influx_price)
-                    return influx_price
-        except Exception as exc:
-            logger.error("❌ InfluxDB direct fallback failed: %s", exc)
-        
-        # SOURCE 4: Emergency - use stale cache (up to 60 seconds old)
-        logger.warning("🚨 EMERGENCY: All fresh sources failed, checking stale cache...")
-        stale_price = price_cache.get(symbol, max_age_seconds=60)
-        if stale_price is not None:
-            logger.warning(
-                "⚠️ Using STALE cache price: %.2f (age: %.1fs) - EMERGENCY FALLBACK",
-                stale_price, cache_age
-            )
-            return stale_price
-        
-        # All sources exhausted
-        logger.critical(
-            "❌ CRITICAL: NO PRICE AVAILABLE from any source (cache age: %.1fs)",
-            cache_age
-        )
-        return None
+        """Delegate to PriceManager."""
+        return self._price_manager.get_current_price_validated(max_age_seconds)
     
     def _resolve_price(self) -> float:
-        """
-        Resolve current price with retry mechanism and multiple fallbacks.
-        
-        Strategy:
-        1. Try Binance REST API (3 attempts with exponential backoff)
-        2. Fallback to InfluxDB if Binance fails
-        3. Return 0.0 if all sources fail
-        """
-        import httpx
-        import time
-        
-        # Primary: Binance real-time price with retry
-        max_attempts = 3
-        base_timeout = 5.0
-        
-        for attempt in range(1, max_attempts + 1):
-            timeout = base_timeout * attempt  # 5s, 10s, 15s
-            try:
-                start_time = time.time()
-                response = httpx.get(
-                    "https://api.binance.com/api/v3/ticker/price",
-                    params={"symbol": self._symbol},
-                    timeout=timeout
-                )
-                response.raise_for_status()
-                data = response.json()
-                price = float(data["price"])
-                elapsed = time.time() - start_time
-                
-                if price > 0:
-                    logger.info(
-                        "✅ Binance API price: %.2f (attempt %d/%d, %.2fs)",
-                        price, attempt, max_attempts, elapsed
-                    )
-                    return price
-                    
-            except httpx.ConnectTimeout as exc:
-                logger.warning(
-                    "⚠️ Binance API connection timeout (attempt %d/%d, timeout=%.1fs): %s",
-                    attempt, max_attempts, timeout, exc
-                )
-            except httpx.ReadTimeout as exc:
-                logger.warning(
-                    "⚠️ Binance API read timeout (attempt %d/%d, timeout=%.1fs): %s",
-                    attempt, max_attempts, timeout, exc
-                )
-            except httpx.RequestError as exc:
-                logger.warning(
-                    "⚠️ Binance API request error (attempt %d/%d): %s",
-                    attempt, max_attempts, exc
-                )
-            except Exception as exc:
-                logger.warning(
-                    "⚠️ Binance API unexpected error (attempt %d/%d): %s",
-                    attempt, max_attempts, exc
-                )
-            
-            # Exponential backoff between retries (except on last attempt)
-            if attempt < max_attempts:
-                backoff = 2 ** (attempt - 1)  # 1s, 2s
-                logger.debug("Retrying in %.1fs...", backoff)
-                time.sleep(backoff)
-        
-        logger.error("❌ Binance API failed after %d attempts", max_attempts)
-        
-        # Fallback: InfluxDB (may be delayed)
-        try:
-            from app.utils.influx import query_latest_snapshot
-            snapshot = query_latest_snapshot("features_1m", self._symbol, "1m")
-            if snapshot and "close" in snapshot:
-                price = float(snapshot.get("close", 0.0))
-                if price > 0:
-                    logger.warning("⚠️ Using FALLBACK price from InfluxDB: %.2f", price)
-                    return price
-        except Exception as exc:
-            logger.error("❌ InfluxDB fallback also failed: %s", exc)
-        
-        logger.error("❌ Could not resolve valid price from ANY source")
-        return 0.0
+        """Delegate to PriceManager."""
+        return self._price_manager.resolve_price()
 
     def _calculate_pnl(self, portfolio: Portfolio, action: str, amount: float, price: float) -> float:
-        """
-        Realized PnL hesaplama:
-        - Yeni pozisyon açılıyorsa veya artırılıyorsa: PnL = 0
-        - Mevcut pozisyon kapatılıyor/azaltılıyorsa: PnL hesaplanır
-        
-        LONG pozisyon (position > 0):
-          - BUY: pozisyon artırma → PnL = 0
-          - SELL: pozisyon kapatma → PnL = (sell_price - avg_price) * amount
-        
-        SHORT pozisyon (position < 0):
-          - SELL: pozisyon artırma → PnL = 0  
-          - BUY: pozisyon kapatma → PnL = (avg_price - buy_price) * amount
-        """
-        if portfolio.position == 0:
-            # Yeni pozisyon açılıyor, henüz realize olmadı
-            return 0.0
-        
-        # Pozisyonun yönünü belirle
-        is_long = portfolio.position > 0
-        is_closing = (is_long and action == "SELL") or (not is_long and action == "BUY")
-        
-        if not is_closing:
-            # Pozisyon artırılıyor, henüz realize PnL yok
-            return 0.0
-        
-        # Pozisyon kapatılıyor/azaltılıyor - Realized PnL hesapla
-        if is_long:
-            # LONG pozisyon kapatılıyor: kar = sell price - avg price
-            return (price - portfolio.average_price) * amount
-        else:
-            # SHORT pozisyon kapatılıyor: kar = avg price - buy price
-            return (portfolio.average_price - price) * amount
+        """Delegate to PortfolioCalculator."""
+        return self._portfolio_calculator.calculate_pnl(portfolio, action, amount, price)
 
     def _update_portfolio(self, portfolio: Portfolio, action: str, amount: float, price: float) -> None:
-        """
-        Portföy güncelleme:
-        - Pozisyon artırılıyorsa: weighted average price hesapla
-        - Pozisyon azaltılıyorsa: average price değişmez (kısmi kapatma) veya sıfırlanır (tam kapatma)
-        - Pozisyon yön değiştiriyorsa: yeni pozisyon price'ı average price olur
-        """
-        old_position = portfolio.position
-        
-        # Pozisyon değişimi
-        if action == "BUY":
-            portfolio.position += amount
-        else:  # SELL
-            portfolio.position -= amount
-        
-        # Average price güncelleme mantığı
-        if old_position == 0:
-            # Yeni pozisyon açılıyor (LONG veya SHORT)
-            portfolio.average_price = price
-        elif (old_position > 0 and action == "BUY") or (old_position < 0 and action == "SELL"):
-            # Pozisyon artırılıyor (LONG artırma veya SHORT artırma) - weighted average
-            total_cost = abs(old_position) * portfolio.average_price + amount * price
-            portfolio.average_price = total_cost / abs(portfolio.position)
-        elif portfolio.position == 0:
-            # Pozisyon tamamen kapandı
-            portfolio.average_price = 0.0
-        elif (old_position > 0 and portfolio.position < 0) or (old_position < 0 and portfolio.position > 0):
-            # Pozisyon yön değiştirdi (LONG'dan SHORT'a veya SHORT'dan LONG'a)
-            portfolio.average_price = price
-        # else: Pozisyon azaltılıyor (kısmi kapatma), average price değişmez
-        
-        portfolio.updated_at = datetime.utcnow()
+        """Delegate to PortfolioCalculator."""
+        self._portfolio_calculator.update_portfolio(portfolio, action, amount, price)
 
     def _update_daily_pnl(self, daily_pnl: DailyPnL, pnl: float, portfolio: Portfolio, price: float, fee: float = 0.0) -> None:
-        daily_pnl.realized_pnl += pnl
-        daily_pnl.unrealized_pnl = (price - portfolio.average_price) * portfolio.position
-        if fee > 0:
-            daily_pnl.total_fees += fee
+        """Delegate to PortfolioCalculator."""
+        self._portfolio_calculator.update_daily_pnl(daily_pnl, pnl, portfolio, price, fee)
 
     def _notify_guardrail_block(
         self,
@@ -1186,33 +806,10 @@ class Executor:
         requested_amount: float,
         leverage: float,
     ) -> None:
-        if not telegram_client.enabled():
-            raise RuntimeError("Telegram bildirimi devre dışı bırakılamaz")
-
-        base_asset = self._symbol.replace("USDT", "")
-        new_position = abs(current_position + requested_amount)
-        message = "\n".join(
-            [
-                "*🚫 İşlem Engellendi (Guardrail)*",
-                f"📊 Sembol: {format_markdown(self._symbol)}",
-                f"{'📈' if decision.action == 'BUY' else '📉'} Talep Yön: {format_markdown(decision.action)}",
-                f"📊 Risk Oranı: {decision.amount * 100:.1f}% equity",
-                f"⚡ Kaldıraç: {leverage:.1f}x",
-                f"📦 Kaldıraçlı Miktar: {requested_amount:.4f} {base_asset}",
-                "",
-                "*⚠️ Pozisyon Durumu*",
-                f"📍 Mevcut Pozisyon: {current_position:+.4f} {base_asset}",
-                f"🎯 İstenen Yeni Pozisyon: {new_position:.4f} {base_asset}",
-                f"🔴 Limit: {self._max_position:.4f} {base_asset}",
-                f"❌ Limit Aşımı: {(new_position - self._max_position):.4f} {base_asset}",
-                "",
-                f"💬 Gerekçe: {format_markdown(reason)}",
-            ]
+        """Delegate to GuardrailManager."""
+        self._guardrail_manager.notify_guardrail_block(
+            decision, reason, current_position, requested_amount, leverage
         )
-        try:
-            telegram_client.send_message(message)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Telegram guardrail notify failed: %s", exc)
 
     def _notify_telegram(
         self,
@@ -1223,163 +820,19 @@ class Executor:
         reason: str,
         position_status: str,
     ) -> None:
-        if not telegram_client.enabled():
-            raise RuntimeError("Telegram bildirimi devre dışı bırakılamaz")
-        # Use sanitized portfolio metrics to avoid astronomical display values
+        """Delegate to TradeNotifier."""
         metrics = self.portfolio_metrics()
-        equity = metrics.get("equity", self._starting_cash)
-        equity_pct = ((equity - self._starting_cash) / self._starting_cash) * 100
-        position_value = abs(metrics.get("position", 0.0) * metrics.get("price", trade.price))
-        margin_used = metrics.get("margin_used", 0.0)
-        free_cash = metrics.get("free_cash", max(0.0, equity - margin_used))
-        free_cash_pct = (free_cash / equity * 100) if equity > 0 else 0.0
-
-        # Get fee and notional from trade summary
-        fee = getattr(trade, 'fee', 0)
-        notional = getattr(trade, 'notional', trade.amount * trade.price)
-        
-        close_price = getattr(trade, 'close_price', None)
-        is_close_trade = close_price is not None
-        position_side = getattr(trade, 'position_side', '') or ''
-
-        # Emoji seçimi ve action text
-        if is_close_trade:
-            direction_emoji = '🔒'
-            side_label = position_side if position_side else ('LONG' if trade.side == 'SELL' else 'SHORT')
-            action_text = f"{side_label} POZİSYON KAPATILDI"
-        elif trade.side == 'BUY':
-            direction_emoji = '📈'
-            action_text = "LONG AÇILDI"
-        else:  # SELL
-            direction_emoji = '📉'
-            action_text = "SHORT AÇILDI"
-        
-        # Generate timestamp header like BTC_ANALYZER
-        base_asset = self._symbol.replace("USDT", "")
-        timestamp_header = f"{base_asset}_ANALYZER, [{trade.timestamp.strftime('%d.%m.%Y %H:%M')}]"
-        
-        message_lines = [
-            f"{timestamp_header}",
-            f"*🚨 İşlem Gerçekleşti - {action_text}*",
-            f"📊 Sembol: {format_markdown(self._symbol)}",
-            f"{direction_emoji} Yön: {format_markdown(trade.side)}",
-            f"📦 Miktar: {trade.amount:.4f} {base_asset}",
-            f"💵 {'Kapanış' if is_close_trade else 'Fiyat'}: ${trade.price:.2f}",
-            f"⚡ Kaldıraç: {leverage:.1f}x",
-            f"💰 Notional: ${notional:.2f}",
-            f"💸 İşlem Ücreti: ${fee:.2f} ({self._taker_fee_rate*100:.2f}%)",
-            f"{'🟢' if trade.pnl >= 0 else '🔴'} Net PnL: ${trade.pnl:.2f} (ücret sonrası)",
-            "",
-        ]
-
-        if is_close_trade:
-            # CLOSE özel bilgileri: yeni pozisyon açılmadı + kalan pozisyon özetleri
-            message_lines.extend([
-                "⛔ Yeni pozisyon açılmadı (CLOSE)",
-                f"🔒 Kapatılan: {trade.amount:.4f} {base_asset} | Kalan: {portfolio.position:.4f} {base_asset}",
-                f"⏳ Kalan pozisyon unrealized: ${daily_pnl.unrealized_pnl:.2f}",
-                "",
-            ])
-
-        # Get enhanced position details if available
-        position_details = metrics.get('position_details', [])
-        starting_cash = metrics.get('starting_cash', self._starting_cash)
-
-        message_lines.extend([
-            f"📍 Pozisyon Durumu: {format_markdown(position_status)}",
-            f"📊 Portföy Pozisyonu: {portfolio.position:.4f} {base_asset} @ ${portfolio.average_price:.2f}",
-            f"💸 Pozisyon Değeri: ${position_value:.2f}",
-            "",
-            "*💰 Portföy Özeti*",
-            f"💎 Serbest Sermaye: ${free_cash:.2f} ({free_cash_pct:.1f}%)",
-            f"📊 Kullanılan Margin: ${margin_used:.2f}",
-        ])
-
-        # Add position-specific details if available
-        if position_details:
-            for i, pos in enumerate(position_details, 1):
-                side = pos.get('position_side', '')
-                leverage = pos.get('leverage', 1.0)
-                margin = pos.get('margin', 0.0)
-                notional = pos.get('notional', 0.0)
-                amount = pos.get('amount', 0.0)
-                message_lines.append(
-                    f"  ├─ {side}: {amount:.4f} {base_asset} @ {leverage:.1f}x → ${notional:,.2f} (Margin: ${margin:,.2f})"
-                )
-
-        message_lines.extend([
-            f"🏦 Toplam Equity: ${equity:.2f}",
-            f"💰 Başlangıç Sermayesi: ${starting_cash:.2f}",
-            f"{'🟢' if equity_pct >= 0 else '🔴'} Toplam Değişim: {equity_pct:+.2f}%",
-            f"✅ Gerçekleşen PnL: ${daily_pnl.realized_pnl:.2f}",
-            f"⏳ Gerçekleşmemiş PnL: ${daily_pnl.unrealized_pnl:.2f}",
-            "",
-            f"🕒 Zaman: {trade.timestamp.isoformat()}",
-        ])
-
-        # Take Profit display for open positions (from latest trade)
-        if not is_close_trade and metrics.get("tp_oid") != -1:
-             # Fetch from metrics (which gets from ledger)
-             latest_tp = metrics.get("exit_plan", {}).get("take_profit")
-             if latest_tp:
-                 message_lines.append(f"🎯 Take Profit: ${latest_tp:.2f}")
-
-        message = "\n".join(message_lines)
-        
-        # Gerekçeyi ayrı mesaj olarak gönder (çok uzun olabilir)
-        reason_escaped = reason.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`').replace('(', '\\(').replace(')', '\\)')
-        
-        # Gerekçe çok uzunsa kısalt (Telegram 4096 karakter limiti)
-        max_reason_length = 3000  # Ana mesaj + gerekçe için yer bırak
-        if len(reason_escaped) > max_reason_length:
-            reason_escaped = reason_escaped[:max_reason_length] + "... (kısaltıldı)"
-        
-        message_with_reason = message + f"\n\n💬 *Gerekçe:*\n{reason_escaped}"
-        logger.info(
-            "Telegram trade notify: side=%s amount=%.4f price=%.2f position=%.4f avg_price=%.2f realized=%.2f unrealized=%.2f equity=%.2f message_len=%d (with reason: %d)",
-            trade.side,
-            trade.amount,
-            trade.price,
-            portfolio.position,
-            portfolio.average_price,
-            daily_pnl.realized_pnl,
-            daily_pnl.unrealized_pnl,
-            equity,
-            len(message),
-            len(message_with_reason),
+        self._trade_notifier.notify_telegram(
+            trade, portfolio, daily_pnl, leverage, reason, position_status, metrics
         )
-        try:
-            # Mesajı gönder
-            telegram_client.send_message(message_with_reason)
-            logger.info("Telegram trade notification sent successfully")
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Telegram trade notify failed: %s", exc, exc_info=True)
-            # Gerekçe olmadan tekrar dene
-            try:
-                telegram_client.send_message(message + "\n\n💬 Gerekçe: (çok uzun, log'lara bakın)")
-                logger.warning("Sent telegram notification without detailed reasoning")
-            except Exception as exc2:  # noqa: BLE001
-                logger.error("Failed to send simplified telegram notification: %s", exc2)
 
     def _describe_position_change(self, before: float, after: float) -> str:
-        if before == 0 and after == 0:
-            return "Pozisyon yok"
-        if after == 0:
-            return f"Pozisyon kapandı ({before:+.4f} -> {after:+.4f})"
-        if before == 0:
-            return f"Yeni pozisyon açıldı ({after:+.4f})"
-        if before * after < 0:
-            return f"Pozisyon yön değiştirdi ({before:+.4f} -> {after:+.4f})"
-        if abs(after) > abs(before):
-            return f"Pozisyon artırıldı ({before:+.4f} -> {after:+.4f})"
-        if abs(after) < abs(before):
-            return f"Pozisyon azaltıldı ({before:+.4f} -> {after:+.4f})"
-        return "Pozisyon değişmedi"
+        """Delegate to TradeNotifier."""
+        return self._trade_notifier.describe_position_change(before, after)
 
     def _normalize_leverage(self, value: float) -> float:
-        if value <= 0:
-            return self._min_leverage
-        return max(self._min_leverage, min(value, self._max_leverage))
+        """Delegate to GuardrailManager."""
+        return self._guardrail_manager.normalize_leverage(value)
 
     def portfolio_metrics(self) -> Dict[str, float]:
         price = self._resolve_price()
@@ -1745,6 +1198,7 @@ class Executor:
         )
         
         # Sadece mevcut trade'leri güncelle (YENİ TRADE YOK!)
+        # close_open_trades artık "CLOSE" action'ını da destekliyor
         updated_count, realized_delta, closing_fee_total = close_open_trades(
             session=session,
             symbol=self._symbol,
@@ -1752,6 +1206,7 @@ class Executor:
             close_amount=btc_amount,
             close_price=eff_price,
             taker_fee_rate=self._taker_fee_rate,
+            exit_reasoning=decision.reasoning,
         )
         
         # Duplicate close prevention - if no trades were updated, position already closed
@@ -1774,6 +1229,7 @@ class Executor:
         entry_leverage_for_log = None
         entry_sl_for_log = None
         entry_tp_for_log = None
+        entry_inv_for_log = None
         try:
             from app.executor.ledger import Trade
             closed_trade = (
@@ -1790,6 +1246,7 @@ class Executor:
                 if closed_trade.exit_plan:
                     entry_sl_for_log = closed_trade.exit_plan.get("stop_loss")
                     entry_tp_for_log = closed_trade.exit_plan.get("profit_target")
+                    entry_inv_for_log = closed_trade.exit_plan.get("invalidation_condition")
         except Exception as e:
             logger.debug("Could not fetch entry details: %s", e)
 
@@ -1806,6 +1263,7 @@ class Executor:
             leverage=entry_leverage_for_log,
             stop_loss=entry_sl_for_log,
             take_profit=entry_tp_for_log,
+            invalidation_condition=entry_inv_for_log,
         )
 
         # Portfolio ve PnL güncelle
@@ -2186,72 +1644,15 @@ class Executor:
         is_breakeven: bool,
         trailing_activated: bool,
     ) -> None:
-        """Partial close için Telegram bildirimi gönder"""
-        try:
-            from app.utils.telegram import telegram_client
-
-            emoji = "🟢" if pnl >= 0 else "🔴"
-            pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-
-            # Status bilgisi
-            status_parts = []
-            if is_breakeven:
-                status_parts.append("🛡️ BE aktif")
-            if trailing_activated:
-                status_parts.append("📈 Trailing aktif")
-            status_str = " | ".join(status_parts) if status_parts else ""
-
-            message = f"""
-🎯 *TP{tp_level} Tetiklendi* | {self._symbol}
-
-{emoji} *{position_side}* pozisyonun %{int((close_qty / (close_qty + remaining_qty)) * 100) if remaining_qty > 0 else 100}'i kapatıldı
-
-📊 *Detaylar:*
-• Kapatılan: {close_qty:.6f} @ ${close_price:,.2f}
-• PnL: {pnl_str}
-• Kalan: {remaining_qty:.6f}
-
-{status_str}
-
-⏰ *{datetime.utcnow().strftime('%H:%M:%S')} UTC*
-"""
-            telegram_client.send_message(message.strip())
-            logger.info("Partial close notification sent for TP%d", tp_level)
-
-        except Exception as e:
-            logger.error("Failed to send partial close notification: %s", e)
+        """Delegate to TradeNotifier."""
+        self._trade_notifier.send_partial_close_notification(
+            tp_level, position_side, close_qty, close_price,
+            pnl, remaining_qty, is_breakeven, trailing_activated
+        )
 
     def format_reason(self, text: str) -> str:
-        cleaned = text.replace("```", "")
-        cleaned = cleaned.replace("\\n", "\n")
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        summary = cleaned.strip()
-        if match:
-            json_text = match.group(0)
-            prefix = cleaned[: match.start()].strip(" ()\n")
-            try:
-                payload = json.loads(json_text)
-                parts: list[str] = []
-                if prefix:
-                    parts.append(prefix)
-                karar = payload.get("karar")
-                miktar = payload.get("miktar")
-                kaldirac = payload.get("kaldıraç") or payload.get("kaldirac")
-                gerekce = payload.get("gerekçe") or payload.get("gerekce")
-                if karar is not None:
-                    parts.append(f"karar={karar}")
-                if miktar is not None:
-                    parts.append(f"miktar={miktar}")
-                if kaldirac is not None:
-                    parts.append(f"kaldıraç={kaldirac}")
-                if gerekce:
-                    parts.append(f"açıklama={gerekce}")
-                summary = " | ".join(parts) if parts else prefix
-            except json.JSONDecodeError:
-                summary = cleaned
-        summary = re.sub(r"`+", "", summary)
-        summary = re.sub(r"\s+", " ", summary).strip()
-        return summary
+        """Delegate to TradeNotifier."""
+        return self._trade_notifier.format_reason(text)
 
     def start_stop_loss_monitoring(self) -> None:
         """WebSocket ile stop-loss izlemeyi başlat"""

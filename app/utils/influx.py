@@ -1,3 +1,4 @@
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -14,11 +15,15 @@ from app.utils.logging import get_logger
 settings = get_settings()
 logger = get_logger(__name__)
 
+# Backfill state to prevent repeated backfills in same session
+_backfill_completed: set = set()  # Set of "symbol_interval" keys
+
 
 _client: InfluxDBClient | None = None
 _write_api = None
 _query_api = None
 _client_initialized_logged = False
+_client_lock = threading.Lock()  # Thread-safe client initialization
 
 
 def _influx_retry(func):
@@ -45,34 +50,46 @@ def _influx_retry(func):
 
 def _ensure_client() -> None:
     global _client, _write_api, _query_api, _client_initialized_logged
-    if _client is None:
-        # Only log once per process to avoid noise from multiple worker processes
-        if not _client_initialized_logged:
-            logger.info("InfluxDB client initializing (PID: %d)", __import__('os').getpid())
-            _client_initialized_logged = True
-        
-        _client = InfluxDBClient(
-            url=str(settings.influx.url),
-            token=settings.influx.token,
-            org=settings.influx.org,
-        )
-        # Use batched writes for better performance (non-blocking)
-        _write_api = _client.write_api(
-            write_options=WriteOptions(
-                batch_size=100,
-                flush_interval=500,  # 500ms max latency
-                jitter_interval=100,
-                retry_interval=1000,
-                max_retries=3,
-                max_retry_delay=5000,
-                exponential_base=2
-            )
-        )
-        _query_api = _client.query_api()
-    elif not _client_initialized_logged:
-        # Client exists but we haven't logged yet (shouldn't happen, but defensive)
-        logger.debug("InfluxDB client already initialized (PID: %d)", __import__('os').getpid())
-        _client_initialized_logged = True
+
+    # Quick check without lock (optimization for common case after initialization)
+    if _client is not None:
+        return
+
+    # Double-checked locking for thread safety
+    with _client_lock:
+        # Re-check after acquiring lock (another thread might have initialized)
+        if _client is None:
+            try:
+                if not _client_initialized_logged:
+                    logger.info("InfluxDB client initializing (PID: %d)", __import__('os').getpid())
+                    _client_initialized_logged = True
+
+                _client = InfluxDBClient(
+                    url=str(settings.influx.url),
+                    token=settings.influx.token,
+                    org=settings.influx.org,
+                )
+                # Use batched writes for better performance (non-blocking)
+                _write_api = _client.write_api(
+                    write_options=WriteOptions(
+                        batch_size=100,
+                        flush_interval=500,  # 500ms max latency
+                        jitter_interval=100,
+                        retry_interval=1000,
+                        max_retries=3,
+                        max_retry_delay=5000,
+                        exponential_base=2
+                    )
+                )
+                _query_api = _client.query_api()
+                logger.info("InfluxDB client initialized successfully (PID: %d)", __import__('os').getpid())
+            except Exception as e:
+                logger.error("Failed to initialize InfluxDB client: %s", e)
+                # Reset all state on failure to allow retry
+                _client = None
+                _write_api = None
+                _query_api = None
+                raise
 
 
 @_influx_retry
@@ -149,6 +166,12 @@ def write_point(point_dict: Dict[str, Any]) -> None:
 @_influx_retry
 def query_latest(measurement: str, symbol: str, interval: str) -> Dict[str, Any] | None:
     _ensure_client()
+
+    # Safety check: ensure query API is available
+    if _query_api is None:
+        logger.warning("InfluxDB query API not initialized for query_latest")
+        return None
+
     query = f"""
     from(bucket: "{settings.influx.bucket}")
       |> range(start: -1h)
@@ -174,6 +197,16 @@ def query_latest(measurement: str, symbol: str, interval: str) -> Dict[str, Any]
 def query_latest_snapshot(measurement: str, symbol: str, interval: str) -> Dict[str, Any] | None:
     try:
         _ensure_client()
+    except Exception as e:
+        logger.warning("InfluxDB client initialization failed in query_latest_snapshot: %s", e)
+        return None
+
+    # Safety check: ensure query API is available
+    if _query_api is None:
+        logger.warning("InfluxDB query API not initialized for latest snapshot - returning None")
+        return None
+
+    try:
         # Use -24h range to find latest data even if it's older (e.g., 4h interval)
         query = f"""
         from(bucket: "{settings.influx.bucket}")
@@ -214,6 +247,12 @@ def query_latest_snapshot(measurement: str, symbol: str, interval: str) -> Dict[
 
 def query_range(measurement: str, symbol: str, interval: str, minutes: int = 120) -> List[Dict[str, Any]]:
     _ensure_client()
+
+    # Safety check: ensure query API is available
+    if _query_api is None:
+        logger.warning("InfluxDB query API not initialized for query_range")
+        return []
+
     query = f"""
     from(bucket: "{settings.influx.bucket}")
       |> range(start: -{minutes}m)
@@ -244,13 +283,32 @@ def query_historical_snapshots(
 ) -> List[Dict[str, Any]]:
     """
     Get last N snapshots (e.g., last 10 data points for each indicator)
-    Returns list of dicts, oldest → newest
+    Returns list of dicts, oldest → newest.
+
+    If InfluxDB has fewer than 'limit' records, automatically backfills from Binance.
 
     Args:
         hours: How far back to look (default 24 hours, max 720 = 30 days)
     """
-    _ensure_client()
-    hours = min(hours, 720)  # Cap at 30 days
+    try:
+        _ensure_client()
+    except Exception as e:
+        logger.warning("InfluxDB client initialization failed: %s", e)
+        return []
+
+    # Safety check: ensure query API is available
+    if _query_api is None:
+        logger.warning("InfluxDB query API not initialized - returning empty result")
+        return []
+
+    # Increase hours based on interval to ensure we look far enough back
+    interval_hours_map = {
+        "1m": 24, "5m": 48, "15min": 72, "30min": 168,
+        "1h": 336, "4h": 1344, "1d": 4320
+    }
+    hours = max(hours, interval_hours_map.get(interval, hours))
+    hours = min(hours, 4320)  # Cap at 180 days
+
     query = f"""
     from(bucket: "{settings.influx.bucket}")
       |> range(start: -{hours}h)
@@ -261,21 +319,48 @@ def query_historical_snapshots(
       |> limit(n: {limit})
       |> sort(columns: ["_time"], desc: false)
     """
-    
-    try:
+
+    def _execute_query() -> List[Dict[str, Any]]:
         tables = _query_api.query(query)
         snapshots = []
-        
         for table in tables:
             for record in table.records:
                 snapshot = {"timestamp": record.get_time().isoformat()}
-                # Extract all fields
                 for key, value in record.values.items():
                     if not key.startswith("_") and key not in ("result", "table", "symbol", "interval"):
                         snapshot[key] = value
                 snapshots.append(snapshot)
-        
         return snapshots
+
+    try:
+        snapshots = _execute_query()
+
+        # Check if we have enough data, if not, backfill from Binance
+        if len(snapshots) < limit:
+            logger.info(
+                "📉 Insufficient data for %s %s: got %d, need %d - triggering backfill",
+                symbol, interval, len(snapshots), limit
+            )
+
+            # Only backfill for enriched measurements
+            if measurement.startswith("enriched_"):
+                backfill_success = _backfill_from_binance(
+                    measurement=measurement,
+                    symbol=symbol,
+                    interval=interval,
+                    limit=limit,
+                )
+
+                if backfill_success:
+                    # Re-query after backfill
+                    snapshots = _execute_query()
+                    logger.info(
+                        "✅ After backfill: %s %s now has %d records",
+                        symbol, interval, len(snapshots)
+                    )
+
+        return snapshots
+
     except Exception as exc:
         logger.warning("Failed to fetch historical snapshots: %s", exc)
         return []
@@ -290,6 +375,12 @@ def query_range_between(
     end: datetime,
 ) -> List[Dict[str, Any]]:
     _ensure_client()
+
+    # Safety check: ensure query API is available
+    if _query_api is None:
+        logger.warning("InfluxDB query API not initialized for query_range_between")
+        return []
+
     # Format timestamps for Flux (RFC3339)
     start_str = start.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_str = end.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -340,6 +431,12 @@ def check_health() -> Dict[str, Any]:
 def test_connection() -> bool:
     try:
         _ensure_client()
+
+        # Safety check: ensure query API is available
+        if _query_api is None:
+            logger.warning("InfluxDB query API not initialized for test_connection")
+            return False
+
         query = f'buckets() |> filter(fn: (r) => r.name == "{settings.influx.bucket}") |> limit(n:1)'
         tables = _query_api.query(query)
         success = len(tables) > 0
@@ -427,18 +524,27 @@ def query_price_at_time(
 ) -> float | None:
     """
     Query price at a specific time (for feedback collection)
-    
+
     Args:
         symbol: Trading symbol
         target_time: Target timestamp
         interval: Data interval
         window_minutes: Time window to search around target
-    
+
     Returns:
         Close price at that time, or None if not found
     """
-    _ensure_client()
-    
+    try:
+        _ensure_client()
+    except Exception as e:
+        logger.warning("InfluxDB client initialization failed for query_price_at_time: %s", e)
+        return _fetch_binance_historical_price(symbol, target_time)
+
+    # Safety check: ensure query API is available
+    if _query_api is None:
+        logger.warning("InfluxDB query API not initialized for query_price_at_time, trying Binance fallback")
+        return _fetch_binance_historical_price(symbol, target_time)
+
     # Search window around target time
     start = target_time - timedelta(minutes=window_minutes)
     end = target_time + timedelta(minutes=window_minutes)
@@ -496,6 +602,127 @@ def close_connections() -> None:
             _write_api = None
             _query_api = None
             _client_initialized_logged = False
+
+
+def _backfill_from_binance(
+    measurement: str,
+    symbol: str,
+    interval: str,
+    limit: int,
+) -> bool:
+    """
+    Fetch historical klines from Binance and backfill InfluxDB.
+    Calculates indicators for each bar using all prior bars.
+
+    Args:
+        measurement: InfluxDB measurement name (e.g., "enriched_4h")
+        symbol: Trading symbol (e.g., "BTCUSDT")
+        interval: Kline interval (e.g., "4h", "1h")
+        limit: Number of bars to fetch
+
+    Returns:
+        True if backfill succeeded, False otherwise
+    """
+    global _backfill_completed
+
+    backfill_key = f"{symbol}_{interval}"
+    if backfill_key in _backfill_completed:
+        logger.debug("Backfill already completed for %s, skipping", backfill_key)
+        return True
+
+    try:
+        import httpx
+        from app.data_feeds.enriched_feed import calculate_indicators_from_klines
+
+        # Map interval to Binance format
+        interval_map = {
+            "1m": "1m", "5m": "5m", "15min": "15m", "30min": "30m",
+            "1h": "1h", "4h": "4h", "1d": "1d"
+        }
+        binance_interval = interval_map.get(interval, interval)
+
+        logger.info("📥 Backfilling %s %s data from Binance (limit=%d)...", symbol, interval, limit)
+
+        # Fetch extra bars for indicator warmup (need 50+ for RSI, MACD, etc.)
+        fetch_limit = min(limit + 100, 1000)  # Binance max is 1000
+
+        params = {
+            "symbol": symbol,
+            "interval": binance_interval,
+            "limit": fetch_limit,
+        }
+
+        response = httpx.get(
+            "https://api.binance.com/api/v3/klines",
+            params=params,
+            timeout=30.0
+        )
+        response.raise_for_status()
+        raw_klines = response.json()
+
+        if not raw_klines:
+            logger.warning("Binance returned no klines for %s %s", symbol, interval)
+            return False
+
+        # Convert to dict format with timestamps
+        klines = []
+        for kline in raw_klines:
+            klines.append({
+                "timestamp": datetime.utcfromtimestamp(int(kline[0]) / 1000),
+                "open": float(kline[1]),
+                "high": float(kline[2]),
+                "low": float(kline[3]),
+                "close": float(kline[4]),
+                "volume": float(kline[5]),
+            })
+
+        logger.info("📊 Fetched %d klines from Binance for %s %s", len(klines), symbol, interval)
+
+        # Calculate indicators and write each bar to InfluxDB
+        # For proper indicator calculation, use sliding window approach
+        written_count = 0
+
+        # Start from index 50 (need warmup for RSI, MACD, etc.)
+        start_idx = min(50, len(klines) - 1)
+
+        for i in range(start_idx, len(klines)):
+            # Use all bars up to and including i for indicator calculation
+            window_klines = klines[:i + 1]
+
+            # Calculate indicators
+            indicators = calculate_indicators_from_klines(window_klines)
+
+            if not indicators:
+                continue
+
+            # Get the timestamp for this bar
+            bar_timestamp = klines[i]["timestamp"]
+
+            # Write to InfluxDB
+            write_measurement(
+                measurement=measurement,
+                tags={"symbol": symbol, "interval": interval},
+                fields=indicators,
+                timestamp=bar_timestamp,
+            )
+            written_count += 1
+
+        # Mark backfill as completed
+        _backfill_completed.add(backfill_key)
+
+        logger.info(
+            "✅ Backfill complete: Wrote %d enriched bars for %s %s",
+            written_count, symbol, interval
+        )
+
+        # Give batched writes time to flush
+        time.sleep(1)
+
+        return True
+
+    except Exception as e:
+        logger.error("Backfill failed for %s %s: %s", symbol, interval, e)
+        return False
 
 
 def detect_htf_support_resistance(symbol, htf_interval="1h", current_price=None):

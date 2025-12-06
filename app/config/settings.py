@@ -160,6 +160,12 @@ class ZAISettings(BaseSettings):
     min_confidence_close_base: float = Field(95.0, alias="GLM_MIN_CONFIDENCE_CLOSE_BASE")
     min_confidence_close_profitable: float = Field(98.0, alias="GLM_MIN_CONFIDENCE_CLOSE_PROFITABLE")
 
+    # GLM Schema Enhancement Feature Flags (Thesis/Antithesis/Synthesis)
+    enable_thought_process: bool = Field(False, alias="GLM_FF_THOUGHT_PROCESS")
+    enable_consistency_validation: bool = Field(False, alias="GLM_FF_CONSISTENCY")
+    enable_consistency_enforcement: bool = Field(False, alias="GLM_FF_ENFORCE_CONSISTENCY")
+    enable_dynamic_threshold: bool = Field(False, alias="GLM_FF_DYNAMIC_THRESHOLD")
+
 
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(

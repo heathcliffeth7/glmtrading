@@ -38,44 +38,44 @@ from app.risk_manager.dynamic_risk_manager import DynamicRiskManager
 from app.risk_manager.advanced_parser import AdvancedInvalidationParser
 from app.config.settings import get_settings
 
+# FAZA 3: Modüler prompt bileşenleri
+from app.risk_manager.prompts import (
+    PositionCloseNotification,
+    Nof1Config,
+    VolatilityState,
+    PerformanceState,
+    VOLATILITY_PARAMS,
+    LOSS_MANAGEMENT,
+    VolatilityAnalyzer,
+    IndicatorInterpreter,
+    DataValidator,
+    MarketAnalyzer,
+    RiskParameterCalculator,
+    # NEW: Token optimization modules
+    FEW_SHOT_TRAINING,
+    HARD_RULES_BLOCK,
+    GLOSSARY_TERMS,
+    RSI_CONTEXT_RULES,
+    build_position_active_instructions_template,
+    build_no_position_instructions_template,
+    build_dynamic_glossary,
+    VolatilityCache,
+    compute_realized_vol_pct,
+    rolling_median,
+    calculate_percentile,
+    calculate_slope,
+    detect_divergence,
+    summarize_series,
+    format_array,
+    LogicGatesBuilder,
+)
+
 
 # =============================================================================
-# SECURITY: Pydantic model for Redis notification validation
+# SECURITY: Models imported from prompts.models
 # =============================================================================
-class PositionCloseNotification(BaseModel):
-    """Validated position close notification from Redis"""
-    trigger_type: str
-    reason: str
-    timestamp: str
-    entry_price: float
-    exit_price: float
-    pnl: float
-    pnl_pct: float
-    position_type: str
-    quantity: float
-    signature: str = ""  # HMAC signature (optional for backward compatibility)
 
-    @field_validator('trigger_type')
-    @classmethod
-    def validate_trigger(cls, v: str) -> str:
-        allowed = {'stop_loss', 'invalidation', 'take_profit', 'manual', 'trailing_stop', 'breakeven'}
-        if v not in allowed:
-            raise ValueError(f'Invalid trigger_type: {v}. Allowed: {allowed}')
-        return v
-
-    @field_validator('position_type')
-    @classmethod
-    def validate_position(cls, v: str) -> str:
-        if v not in {'LONG', 'SHORT'}:
-            raise ValueError(f'Invalid position_type: {v}. Must be LONG or SHORT')
-        return v
-
-    @field_validator('entry_price', 'exit_price', 'quantity')
-    @classmethod
-    def validate_positive(cls, v: float) -> float:
-        if v < 0:
-            raise ValueError(f'Value must be non-negative: {v}')
-        return v
+# Models imported from prompts.models (PositionCloseNotification, Nof1Config, VolatilityState, PerformanceState)
 
 # =============================================================================
 # Enhanced Feature Imports with Error Tracking
@@ -105,104 +105,18 @@ except ImportError as e:
 
 logger = logging.getLogger(__name__)
 
-# Dynamic risk parameters - Volatility-based (no swing/scalp modes)
-# Düşük volatilite = dar SL/TP + yüksek R:R, Yüksek volatilite = geniş SL/TP + düşük R:R
-_VOLATILITY_PARAMS = {
-    "low":     {"sl_mult": 0.8, "tp_rr": 2.0, "max_lev": 10},  # Dar piyasa - daha sıkı
-    "medium":  {"sl_mult": 1.0, "tp_rr": 1.8, "max_lev": 8},   # Normal
-    "high":    {"sl_mult": 1.2, "tp_rr": 1.5, "max_lev": 6},   # Volatil
-    "extreme": {"sl_mult": 1.5, "tp_rr": 1.3, "max_lev": 4},   # Çok volatil
-}
-
-
-# =============================================================================
-# CONFIGURATION DATACLASSES (P3-002, P3-003)
-# =============================================================================
-@dataclass(frozen=True)
-class Nof1Config:
-    """
-    Centralized configuration for NOF1 prompt builder.
-    Replaces magic numbers scattered throughout the code.
-    Frozen to ensure immutability.
-    """
-    # Move thresholds
-    min_move_pct_base: float = 0.25
-    atr_multiplier: float = 0.3
-    fomo_atr_multiplier: float = 2.0
-
-    # Stop loss bounds
-    sl_floor_pct: float = 0.3
-    sl_cap_swing_pct: float = 15.0
-    sl_cap_scalp_pct: float = 8.0
-
-    # Take profit bounds
-    tp_floor_pct: float = 0.6
-
-    # Invalidation
-    invalidation_sl_ratio: float = 0.7
-
-    # Confidence calculations
-    confidence_base: float = 0.80
-    confidence_loss_boost: float = 0.10
-
-    # Performance-based leverage caps
-    consecutive_loss_lev_cap: int = 5
-    low_winrate_lev_cap: int = 6
-
-    # Caching
-    cache_ttl_seconds: int = 60
-    notification_max_age_minutes: int = 5
-
-
-@dataclass(frozen=True)
-class VolatilityState:
-    """
-    Immutable state container for volatility metrics.
-    Groups related volatility values together.
-    """
-    legacy_score: float = 0.5
-    atr: float = 0.0
-    atr_pct: float = 0.0
-    realized_vol_pct: float = 0.0
-    median_realized_vol_pct: float = 0.0
-    vol_ratio: float = 1.0
-    atr_ratio: float = 1.0
-    regime: str = "medium"
-
-
-@dataclass(frozen=True)
-class PerformanceState:
-    """
-    Immutable state container for performance tracking.
-    Groups related performance metrics together.
-    """
-    consecutive_losses: int = 0
-    last_trade_side: Optional[str] = None
-    recent_win_rate: float = 0.5
-    performance_history: Tuple[int, ...] = field(default_factory=tuple)
+# VOLATILITY_PARAMS and dataclasses imported from prompts module
 
 
 class Nof1PromptBuilder:
     """Builds NOF1.AI style prompts with full market context"""
 
     # =============================================================================
-    # FEW-SHOT TRAINING BLOCK - DEVRE DISI (GLM ozgur birakiliyor)
+    # FEW-SHOT TRAINING & HARD RULES - Imported from prompts.templates
     # =============================================================================
-    FEW_SHOT_TRAINING = ''
+    # FEW_SHOT_TRAINING and HARD_RULES_BLOCK now imported from prompts.templates
 
-    # =============================================================================
-    # HARD RULES - DEVRE DISI (GLM ozgur birakiliyor)
-    # =============================================================================
-    HARD_RULES_BLOCK = ""
-
-    # Loss management multipliers for consecutive losses
-    LOSS_MANAGEMENT = {
-        0: {"size_mult": 1.0, "extra_confluence": 0},
-        1: {"size_mult": 1.0, "extra_confluence": 0},
-        2: {"size_mult": 0.75, "extra_confluence": 5},
-        3: {"size_mult": 0.50, "extra_confluence": 10, "require_grade": "A+"},
-        4: {"size_mult": 0.25, "extra_confluence": 15, "require_grade": "A+"},
-    }
+    # LOSS_MANAGEMENT imported from prompts.models
 
     # Minimum hold period for swing trades (hours)
     MINIMUM_HOLD_HOURS = 4.0
@@ -235,13 +149,15 @@ class Nof1PromptBuilder:
         self._vol_ratio: Optional[float] = None
         self._atr_ratio: Optional[float] = None
 
-        # Volatility cache for performance optimization
-        # Key: (symbol, data_hash), Value: (timestamp, vol_samples)
-        self._vol_cache: Dict[str, Tuple[float, List[float]]] = {}
-        self._vol_cache_ttl: int = 60  # seconds
+        # Volatility cache for performance optimization (using new VolatilityCache class)
+        self._vol_cache = VolatilityCache(ttl=60, max_size=100)
 
         # How much raw series to show if needed
         self._series_tail = 6  # keep tiny to avoid token blowups
+
+        # Active glossary contexts for dynamic glossary building
+        # Populated during prompt building, reset each invocation
+        self._active_glossary_contexts: List[str] = []
 
         # Settings reference
         self._settings = get_settings()
@@ -259,6 +175,16 @@ class Nof1PromptBuilder:
             "5m": 0.0,    # ZERO - ignore
             "1m": 0.0,    # ZERO - ignore
         }
+
+        # FAZA 3: Modüler helper sınıflar
+        self._market_analyzer = MarketAnalyzer(mtf_weights=self._mtf_weights)
+        self._data_validator = DataValidator(
+            hmac_secret=self._settings.security.redis_hmac_secret
+        )
+        self._indicator_interpreter = IndicatorInterpreter()
+        
+        # Logic Gates Builder (for Red Team Mode)
+        self._logic_gates_builder = None  # Will be initialized with volume_analyzer if available
 
         # Log trading mode (volatility-based, no swing/scalp)
         logger.info("📊 Nof1PromptBuilder: VOLATILITY-BASED MODE (primary TF: %s)", self._primary_tf)
@@ -299,6 +225,11 @@ class Nof1PromptBuilder:
                 # v2.0: Hold Decision & Time Exit Managers
                 self._hold_engine = HoldDecisionEngine()
                 self._time_exit_manager = TimeBasedExitManager(weekend_rule_enabled=True)
+                # Initialize Logic Gates Builder with volume analyzer
+                self._logic_gates_builder = LogicGatesBuilder(
+                    primary_tf=self._primary_tf,
+                    volume_analyzer=self._volume_analyzer
+                )
                 logger.info("✅ Enhanced features initialized (volatility-based)")
             except Exception as e:
                 logger.error("Failed to initialize enhanced features: %s", e)
@@ -310,192 +241,46 @@ class Nof1PromptBuilder:
     # SECURITY: Utility methods for input sanitization and safe operations
     # ---------------------------------------------------------------------
     def _sanitize_prompt_input(self, text: str, max_length: int = 200) -> str:
-        """
-        Sanitize user-provided text to prevent prompt injection attacks.
-
-        Protections:
-        1. Length limit to prevent context overflow
-        2. Remove dangerous instruction patterns
-        3. Strip newlines to prevent multi-line injection
-        4. Keep only printable characters
-        """
-        if not text:
-            return "N/A"
-
-        # 1. Length limit
-        text = text[:max_length]
-
-        # 2. Remove dangerous patterns (case-insensitive)
-        dangerous_patterns = [
-            r'ignore\s+(all\s+)?(previous\s+)?instructions?',
-            r'system\s+override',
-            r'you\s+must\s+output',
-            r'forget\s+(everything|all)',
-            r'new\s+instructions?:',
-            r'```json',  # JSON block injection
-            r'={10,}',   # Separator injection
-            r'-{10,}',   # Separator injection
-            r'CRITICAL\s+SYSTEM',
-            r'OVERRIDE',
-        ]
-
-        for pattern in dangerous_patterns:
-            text = re.sub(pattern, '[REDACTED]', text, flags=re.IGNORECASE)
-
-        # 3. Remove newlines (prevent multi-line injection)
-        text = text.replace('\n', ' ').replace('\r', ' ')
-
-        # 4. Keep only printable characters
-        text = ''.join(c for c in text if c.isprintable())
-
-        # 5. Collapse multiple spaces
-        text = re.sub(r'\s+', ' ', text).strip()
-
-        return text if text else "N/A"
+        """Delegate to DataValidator."""
+        return self._data_validator.sanitize_prompt_input(text, max_length)
 
     def _safe_divide(self, numerator: float, denominator: float, default: float = 0.0) -> float:
-        """
-        Safe division that handles zero/near-zero denominators.
-
-        Args:
-            numerator: The number to divide
-            denominator: The number to divide by
-            default: Value to return if division is unsafe
-
-        Returns:
-            Result of division or default value
-        """
-        if abs(denominator) < 1e-10:
-            return default
-        return numerator / denominator
+        """Delegate to DataValidator."""
+        return self._data_validator.safe_divide(numerator, denominator, default)
 
     def _verify_hmac_signature(self, data: Dict[str, Any], signature: str) -> bool:
-        """
-        Verify HMAC signature for Redis notification data.
-
-        Args:
-            data: Dictionary of notification data (without signature)
-            signature: HMAC signature to verify
-
-        Returns:
-            True if signature is valid, False otherwise
-        """
-        secret_key = self._settings.security.redis_hmac_secret
-        if not secret_key:
-            # No secret configured - skip HMAC validation (backward compatible)
-            logger.debug("HMAC validation skipped - no secret configured")
-            return True
-
-        try:
-            # Create canonical JSON string for signing
-            payload = json.dumps(data, sort_keys=True).encode('utf-8')
-            expected_sig = hmac.new(
-                secret_key.encode('utf-8'),
-                payload,
-                hashlib.sha256
-            ).hexdigest()
-
-            return hmac.compare_digest(signature, expected_sig)
-        except Exception as e:
-            logger.error("HMAC verification error: %s", e)
-            return False
+        """Delegate to DataValidator."""
+        return self._data_validator.verify_hmac_signature(data, signature)
 
     # ---------------------------------------------------------------------
-    # Relative volatility helpers (asset-agnostic)
+    # Relative volatility helpers (asset-agnostic) - Now using modular utilities
     # ---------------------------------------------------------------------
-    def _compute_realized_vol_pct(self, closes: List[float], lookback: int = 50) -> float:
-        """
-        Realized volatility from returns over lookback bars, as percent.
-        Asset-agnostic (works across BTC/ETH/SOL).
-        """
-        # Need at least lookback+1 closes to compute lookback returns
-        if not closes or len(closes) < lookback + 1:
-            return 0.0
-        window = closes[-(lookback + 1):]
-        rets = []
-        for i in range(1, len(window)):
-            p0 = window[i - 1]
-            p1 = window[i]
-            if p0 > 0 and p1 > 0:
-                rets.append((p1 / p0) - 1.0)
-        if len(rets) < 2:
-            return 0.0
-        m = sum(rets) / len(rets)
-        var = sum((r - m) ** 2 for r in rets) / len(rets)
-        return (var ** 0.5) * 100
 
-    def _rolling_median(self, values: List[float], lookback: int = 200) -> float:
-        if not values:
-            return 0.0
-        w = values[-lookback:] if len(values) >= lookback else values[:]
-        w_sorted = sorted(w)
-        n = len(w_sorted)
-        mid = n // 2
-        if n % 2 == 1:
-            return float(w_sorted[mid])
-        return float((w_sorted[mid - 1] + w_sorted[mid]) / 2)
+    def _interpret_cvd_context(
+        self,
+        cvd_values: List[float],
+        closes: List[float],
+        lookback: int = 8,
+        current_position: str = None
+    ) -> Tuple[str, str]:
+        """Delegate to IndicatorInterpreter."""
+        return self._indicator_interpreter.interpret_cvd_context(
+            cvd_values, closes, lookback, current_position
+        )
 
-    def _get_cached_volatility_samples(
-        self, symbol: str, closes: List[float]
-    ) -> List[float]:
-        """
-        Get volatility samples with caching for performance.
-        Uses 3 strategic sample points instead of O(n) sampling.
+    def _interpret_rsi_context(
+        self, rsi: float, adx: float, price_slope: float = 0.0
+    ) -> Tuple[str, str]:
+        """Delegate to IndicatorInterpreter."""
+        return self._indicator_interpreter.interpret_rsi_context(rsi, adx, price_slope)
 
-        Args:
-            symbol: Trading symbol for cache key
-            closes: List of close prices
-
-        Returns:
-            List of realized volatility samples
-        """
-        import time as time_module
-
-        if len(closes) < 60:
-            return []
-
-        # Create cache key from symbol and data fingerprint (first, last, length)
-        data_fingerprint = f"{closes[0]:.2f}_{closes[-1]:.2f}_{len(closes)}"
-        cache_key = f"{symbol}_{data_fingerprint}"
-
-        current_time = time_module.time()
-
-        # Check cache
-        if cache_key in self._vol_cache:
-            cached_time, cached_samples = self._vol_cache[cache_key]
-            if current_time - cached_time < self._vol_cache_ttl:
-                return cached_samples
-
-        # Calculate using 3 strategic sample points instead of O(n)
-        # Points: early (25%), middle (50%), recent (100%)
-        samples = []
-        data_len = len(closes)
-
-        sample_points = [
-            int(data_len * 0.25),  # Early: 25% of data
-            int(data_len * 0.5),   # Middle: 50% of data
-            data_len,              # Recent: all data
-        ]
-
-        for point in sample_points:
-            if point >= 60:  # Need at least 60 points for valid calculation
-                rv = self._compute_realized_vol_pct(closes[:point], lookback=50)
-                if rv > 0:
-                    samples.append(rv)
-
-        # Cache the result
-        self._vol_cache[cache_key] = (current_time, samples)
-
-        # Cleanup old cache entries (keep cache small)
-        if len(self._vol_cache) > 100:
-            oldest_keys = sorted(
-                self._vol_cache.keys(),
-                key=lambda k: self._vol_cache[k][0]
-            )[:50]
-            for k in oldest_keys:
-                del self._vol_cache[k]
-
-        return samples
+    def _interpret_funding_oi_context(
+        self, funding_rate: float, oi_current: float, oi_avg: float, price_slope: float
+    ) -> Tuple[str, str]:
+        """Delegate to IndicatorInterpreter."""
+        return self._indicator_interpreter.interpret_funding_oi_context(
+            funding_rate, oi_current, oi_avg, price_slope
+        )
 
     # ---------------------------------------------------------------------
     # Regime mapping (RELATIVE)
@@ -532,7 +317,7 @@ class Nof1PromptBuilder:
             atr_pct = 1.0  # Default fallback
 
         regime = self._vol_regime_key()
-        params = _VOLATILITY_PARAMS[regime]
+        params = VOLATILITY_PARAMS[regime]
 
         side_mult = 1.0  # Eşit muamele: SHORT ve LONG için aynı SL multiplier
 
@@ -559,7 +344,7 @@ class Nof1PromptBuilder:
             atr_pct = 1.0  # Default fallback
 
         regime = self._vol_regime_key()
-        params = _VOLATILITY_PARAMS[regime]
+        params = VOLATILITY_PARAMS[regime]
 
         # Min TP: SL × R:R ratio (ensures consistent risk/reward)
         if sl_min and sl_min > 0:
@@ -583,7 +368,7 @@ class Nof1PromptBuilder:
     def _recommended_leverage_cap(self, vol: float, position_side: Optional[str] = None) -> Tuple[int, str]:
         """Volatility-based dynamic leverage cap (no swing/scalp modes)"""
         regime = self._vol_regime_key()
-        params = _VOLATILITY_PARAMS[regime]
+        params = VOLATILITY_PARAMS[regime]
         cap = params["max_lev"]
 
         # Eşit muamele: SHORT için leverage cezası kaldırıldı
@@ -623,33 +408,7 @@ class Nof1PromptBuilder:
     # ---------------------------------------------------------------------
     # Series summarization (token saver)
     # ---------------------------------------------------------------------
-    def _summarize_series(self, values: List[float], decimals: int = 2, name: str = "") -> str:
-        if not values:
-            return f"{name}: N/A"
 
-        tail = values[-self._series_tail:]
-        last = values[-1]
-        vmin = min(values[-50:]) if len(values) >= 50 else min(values)
-        vmax = max(values[-50:]) if len(values) >= 50 else max(values)
-        mean = sum(values[-50:]) / (50 if len(values) >= 50 else len(values))
-
-        if len(tail) >= 2:
-            slope = (tail[-1] - tail[0]) / max(1, (len(tail) - 1))
-        else:
-            slope = 0.0
-
-        if len(tail) >= 2:
-            m = sum(tail) / len(tail)
-            var = sum((x - m) ** 2 for x in tail) / len(tail)
-            std = var ** 0.5
-        else:
-            std = 0.0
-
-        return (
-            f"{name}: last={last:.{decimals}f}, "
-            f"min={vmin:.{decimals}f}, max={vmax:.{decimals}f}, "
-            f"mean={mean:.{decimals}f}, slope={slope:.{decimals}f}/bar, std_tail={std:.{decimals}f}"
-        )
 
     # ---------------------------------------------------------------------
     # Market structure via pivots - DELEGATED TO EntryAnalyzer (v4.0)
@@ -674,127 +433,25 @@ class Nof1PromptBuilder:
             return self._entry_analyzer.analyze_market_structure(hist_data, atr_pct, vol)
         return "UNKNOWN"
 
+    def _detect_data_conflicts(
+        self,
+        trend_direction: str,
+        market_structure: str,
+        rsi: float,
+        ema_distance: float
+    ) -> List[str]:
+        """Delegate to MarketAnalyzer."""
+        return self._market_analyzer.detect_data_conflicts(
+            trend_direction, market_structure, rsi, ema_distance
+        )
+
     # ---------------------------------------------------------------------
     # PRE-CALCULATED ANALYSIS (Token Optimization)
+    # Delegated to MarketAnalyzer
     # ---------------------------------------------------------------------
     def _calculate_mtf_alignment(self, current_snapshots: Dict) -> Dict:
-        """Calculate trend for each timeframe and weighted alignment score"""
-        tf_trends = {}
-
-        for tf in ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]:
-            data = current_snapshots.get(tf, {})
-            close = data.get("close", 0)
-            ema20 = data.get("ema_20", 0)
-            ema50 = data.get("ema_50", 0)
-
-            if close > 0 and ema20 > 0 and ema50 > 0:
-                if close > ema20 > ema50:
-                    trend = "BULLISH"
-                elif close < ema20 < ema50:
-                    trend = "BEARISH"
-                else:
-                    trend = "NEUTRAL"
-            else:
-                trend = "N/A"
-
-            tf_trends[tf] = trend
-
-        # Weighted alignment score using MTF weights
-        bullish_weight = 0.0
-        bearish_weight = 0.0
-        total_weight = 0.0
-
-        # P1-002 FIX: Count only TFs with weight > 0 (consistent with weighting)
-        bullish_count = 0
-        bearish_count = 0
-        total_valid = 0
-        ignored_tfs = []
-
-        for tf, trend in tf_trends.items():
-            weight = self._mtf_weights.get(tf, 1.0)
-
-            # Skip TFs with zero or negative weight
-            if weight <= 0:
-                ignored_tfs.append(tf)
-                continue
-
-            if trend == "N/A":
-                continue
-
-            total_weight += weight
-            total_valid += 1
-
-            if trend == "BULLISH":
-                bullish_weight += weight
-                bullish_count += 1
-            elif trend == "BEARISH":
-                bearish_weight += weight
-                bearish_count += 1
-
-        # Weighted alignment determination
-        if total_weight == 0:
-            alignment = "UNKNOWN"
-        else:
-            bullish_pct = bullish_weight / total_weight
-            bearish_pct = bearish_weight / total_weight
-
-            if bullish_pct >= 0.7:
-                alignment = "STRONG_BULLISH"
-            elif bullish_pct >= 0.5:
-                alignment = "WEAK_BULLISH"
-            elif bearish_pct >= 0.7:
-                alignment = "STRONG_BEARISH"
-            elif bearish_pct >= 0.5:
-                alignment = "WEAK_BEARISH"
-            else:
-                alignment = "MIXED"
-
-        return {
-            "trends": tf_trends,
-            "alignment": alignment,
-            "bullish_count": bullish_count,
-            "bearish_count": bearish_count,
-            "total_valid": total_valid,
-            "bullish_weight": round(bullish_weight, 2),
-            "bearish_weight": round(bearish_weight, 2),
-            "total_weight": round(total_weight, 2),
-            "ignored_tfs": ignored_tfs,  # P1-002: Debug info for excluded TFs
-        }
-
-    def _detect_market_regime_type(self, historical_arrays: Dict, current_snapshots: Dict) -> str:
-        """
-        Detect TRENDING vs RANGING market for dynamic prompt instructions.
-        Returns: "TREND_STRONG", "TREND_WEAK", "RANGE", or "CHOPPY"
-        """
-        # Get MTF alignment info
-        mtf = self._calculate_mtf_alignment(current_snapshots)
-        alignment = mtf.get("alignment", "MIXED")
-
-        # Get ATR ratio for volatility context
-        atr_ratio = self._atr_ratio or 1.0
-
-        # Strong trend detection
-        if alignment in ["STRONG_BULLISH", "STRONG_BEARISH"]:
-            return "TREND_STRONG" if atr_ratio > 0.8 else "TREND_WEAK"
-        elif alignment in ["WEAK_BULLISH", "WEAK_BEARISH"]:
-            return "TREND_WEAK" if atr_ratio >= 1.0 else "RANGE"
-        else:
-            # MIXED alignment
-            return "RANGE" if atr_ratio < 0.7 else "CHOPPY"
-
-    def _get_regime_instructions(self, regime_type: str) -> str:
-        """
-        Get compact trading instructions specific to market regime.
-        Returns 1-2 line regime hint (~50 tokens).
-        """
-        if regime_type == "TREND_STRONG":
-            return "📈 REJİM: GÜÇLÜ TREND - Trend yönünde işlem, pullback'lerde giriş. KARŞI YÖNDE İŞLEM AÇMA!"
-        elif regime_type == "TREND_WEAK":
-            return "📊 REJİM: ZAYIF TREND - Dikkatli ol, pozisyon boyutunu küçük tut, tight stop kullan."
-        elif regime_type == "RANGE":
-            return "📦 REJİM: YATAY PİYASA - Destek/direnç seviyelerinde işlem, ortada HOLD, breakout bekle."
-        else:  # CHOPPY
-            return "⚠️ REJİM: DALGALI - İşlem açmaktan KAÇIN, net trend bekle. Sadece çok yüksek confidence için gir."
+        """Delegate to MarketAnalyzer."""
+        return self._market_analyzer.calculate_mtf_alignment(current_snapshots)
 
     def _check_liquidity_sweep(self, data_primary: Dict, mtf_alignment: Dict) -> bool:
         """Delegate to EntryAnalyzer (v4.0)"""
@@ -867,30 +524,47 @@ CONTEXTUAL METRICS:
         d1_close = data_1d.get("close", 0)
         d1_ema20 = data_1d.get("ema_20", 0)
         d1_ema50 = data_1d.get("ema_50", 0)
-        lines.append(f"  [1D] Price: {d1_close:.2f} | EMA20: {d1_ema20:.2f} | EMA50: {d1_ema50:.2f}")
+        d1_rsi = data_1d.get("rsi_14", 50)
+        lines.append(f"  [1D] Price: {d1_close:.2f} | EMA20: {d1_ema20:.2f} | EMA50: {d1_ema50:.2f} | RSI: {d1_rsi:.1f}")
 
         h4_close = data_4h.get("close", 0)
         h4_ema20 = data_4h.get("ema_20", 0)
         h4_ema50 = data_4h.get("ema_50", 0)
         h4_rsi = data_4h.get("rsi_14", 50)
-        lines.append(f"  [4H] Price: {h4_close:.2f} | EMA20: {h4_ema20:.2f} | EMA50: {h4_ema50:.2f} | RSI: {h4_rsi:.1f}")
+        # OBV trend for 4H
+        hist_4h = historical_arrays.get("4h", {})
+        h4_obv = "N/A"
+        if hist_4h.get("close") and hist_4h.get("volume"):
+            h4_obv = self._volume_analyzer.get_obv_trend(hist_4h["close"], hist_4h["volume"])
+        lines.append(f"  [4H] Price: {h4_close:.2f} | EMA20: {h4_ema20:.2f} | EMA50: {h4_ema50:.2f} | RSI: {h4_rsi:.1f} | OBV: {h4_obv}")
 
         h1_close = data_1h.get("close", 0)
         h1_ema20 = data_1h.get("ema_20", 0)
-        lines.append(f"  [1H] Price: {h1_close:.2f} | EMA20: {h1_ema20:.2f}")
+        h1_rsi = data_1h.get("rsi_14", 50)
+        lines.append(f"  [1H] Price: {h1_close:.2f} | EMA20: {h1_ema20:.2f} | RSI: {h1_rsi:.1f}")
         lines.append("")
 
-        # B. Momentum Vectors (Son 4 bar dizisi - GLM egilimi gorebilsin)
-        hist_4h = historical_arrays.get("4h", {})
-        lines.append("B. MOMENTUM VECTORS (Last 4 bars):")
-        if hist_4h:
-            rsi_series = hist_4h.get("rsi_14", [])[-4:]
-            if rsi_series:
-                lines.append(f"  RSI Sequence: {self._format_array(rsi_series, 1)}")
+        # MTF Sentez Rehberi
+        lines.extend([
+            "  MTF SENTEZ KURALI:",
+            "  - 3/3 TF ayni yonde (Price vs EMA) = GUCLU sinyal",
+            "  - 2/3 TF ayni yonde = ORTA sinyal",
+            "  - TF'ler farkli yonde = ZAYIF/CATISMA",
+            "  - HTF (1D) > LTF (1H) onceligi - 1D trend yonu belirleyici",
+            "",
+        ])
 
-            macd_hist_series = hist_4h.get("macd_hist", [])[-4:]
+        # B. Momentum Vectors (Son 8 bar dizisi - GLM egilimi gorebilsin)
+        hist_4h = historical_arrays.get("4h", {})
+        lines.append("B. MOMENTUM VECTORS (Last 8 bars):")
+        if hist_4h:
+            rsi_series = hist_4h.get("rsi_14", [])[-8:]
+            if rsi_series:
+                lines.append(f"                  RSI Sequence: {format_array(rsi_series, 1)}")
+
+            macd_hist_series = hist_4h.get("macd_hist", [])[-8:]
             if macd_hist_series:
-                lines.append(f"  MACD Hist Seq: {self._format_array(macd_hist_series, 4)}")
+                lines.append(f"                  MACD Hist Seq: {format_array(macd_hist_series, 4)}")
         else:
             lines.append("  (No historical data available)")
         lines.append("")
@@ -898,8 +572,16 @@ CONTEXTUAL METRICS:
         # C. Key Levels & Distances (Matematiksel - yorum yok)
         sr = self._calculate_sr_distances(historical_arrays, current_price)
         lines.append("C. PROXIMITY TO KEY LEVELS:")
-        lines.append(f"  Distance to Support: {sr['support_dist_pct']:.2f}% (Level: {sr['nearest_support']:.2f})")
-        lines.append(f"  Distance to Resistance: {sr['resistance_dist_pct']:.2f}% (Level: {sr['nearest_resistance']:.2f})")
+        # Distance to Support with edge case handling
+        if sr['support_dist_pct'] > 0.05:
+            lines.append(f"  Distance to Support: {sr['support_dist_pct']:.2f}% (Level: {sr['nearest_support']:.2f})")
+        else:
+            lines.append(f"  Distance to Support: AT LEVEL (Level: {sr['nearest_support']:.2f})")
+        # Distance to Resistance with edge case handling
+        if sr['resistance_dist_pct'] > 0.05:
+            lines.append(f"  Distance to Resistance: {sr['resistance_dist_pct']:.2f}% (Level: {sr['nearest_resistance']:.2f})")
+        else:
+            lines.append(f"  Distance to Resistance: AT LEVEL (Level: {sr['nearest_resistance']:.2f})")
 
         # EMA Uzakligi (Mean Reversion potansiyeli icin)
         if h4_ema20 > 0 and current_price > 0:
@@ -908,6 +590,12 @@ CONTEXTUAL METRICS:
 
         if sr['rr_ratio'] > 0:
             lines.append(f"  R:R Ratio: {sr['rr_ratio']:.2f}:1")
+        elif sr.get('resistance_dist_pct', 0) < 0.05 and sr.get('support_dist_pct', 0) > 0.05:
+            lines.append("  R:R Ratio: 0:1 (AT RESISTANCE)")
+        elif sr.get('support_dist_pct', 0) < 0.05 and sr.get('resistance_dist_pct', 0) > 0.05:
+            lines.append("  R:R Ratio: INF:1 (AT SUPPORT)")
+        else:
+            lines.append("  R:R Ratio: N/A (price at pivot)")
         lines.append("")
 
         # D. Volatility Context (Ham veri)
@@ -961,14 +649,36 @@ CONTEXTUAL METRICS:
                 highs = hist_primary.get("high", closes)
                 lows = hist_primary.get("low", closes)
 
-                # CVD - raw values only
+                # CVD - raw values + contextual interpretation
                 cvd_values, _ = self._volume_analyzer.calculate_cvd(closes, highs, lows, volumes)
                 if cvd_values:
-                    # Show last 4 CVD values for GLM to analyze slope
-                    cvd_recent = cvd_values[-4:] if len(cvd_values) >= 4 else cvd_values
+                    # Show last 8 CVD values for GLM to analyze slope
+                    cvd_recent = cvd_values[-8:] if len(cvd_values) >= 8 else cvd_values
+
+                    # Mevcut pozisyonu belirle (pozisyon-aware CVD yorumu için)
+                    current_position = None
+                    if portfolio_metrics:
+                        net_pos = portfolio_metrics.get("net_position", 0)
+                        if net_pos > 0:
+                            current_position = "LONG"
+                        elif net_pos < 0:
+                            current_position = "SHORT"
+
+                    # Context-aware interpretation (pozisyon bilgisiyle)
+                    cvd_label, cvd_desc = self._interpret_cvd_context(
+                        cvd_values, closes, current_position=current_position
+                    )
+                    
+                    # Add to active glossary contexts for dynamic glossary
+                    if cvd_label and cvd_label != "NEUTRAL":
+                        if cvd_label not in self._active_glossary_contexts:
+                            self._active_glossary_contexts.append(cvd_label)
+                    
                     lines.extend([
                         "VOLUME DATA:",
-                        f"  CVD Sequence: {self._format_array(cvd_recent, 0)}",
+                        f"  CVD Sequence: {format_array(cvd_recent, 0)}",
+                        f"  Context: [{cvd_label}]",
+                        f"  Interpretation: {cvd_desc}",
                     ])
 
                     # VWAP - raw distance
@@ -977,6 +687,37 @@ CONTEXTUAL METRICS:
                         vwap = vwap_result["vwap"]
                         vwap_dist = ((current_price - vwap) / vwap) * 100
                         lines.append(f"  VWAP: {vwap:,.2f} | Price Distance: {vwap_dist:+.2f}%")
+
+                    # VWAP LEVELS (4H + 1D)
+                    lines.append("")
+                    lines.append("VWAP LEVELS:")
+                    # 4H VWAP (already calculated above)
+                    if vwap_result.get("vwap"):
+                        bias_4h = "BULLISH" if vwap_dist > 0 else "BEARISH"
+                        lines.append(f"  [4H] VWAP: {vwap:,.2f} | Price: {vwap_dist:+.2f}% | Bias: {bias_4h}")
+                    # 1D VWAP
+                    hist_1d = historical_arrays.get("1d", {})
+                    if hist_1d.get("high") and hist_1d.get("low") and hist_1d.get("close") and hist_1d.get("volume"):
+                        vwap_1d = self._volume_analyzer.calculate_vwap(hist_1d["high"], hist_1d["low"], hist_1d["close"], hist_1d["volume"])
+                        if vwap_1d.get("vwap") and current_price > 0:
+                            v1d = vwap_1d["vwap"]
+                            dist_1d = ((current_price - v1d) / v1d) * 100
+                            bias_1d = "BULLISH" if dist_1d > 0 else "BEARISH"
+                            lines.append(f"  [1D] VWAP: {v1d:,.2f} | Price: {dist_1d:+.2f}% | Bias: {bias_1d}")
+
+                    # Volume Spike detection
+                    is_spike, vol_ratio = self._volume_analyzer.detect_volume_spike(volumes)
+                    if is_spike:
+                        lines.append(f"  🔥 Volume Spike: {vol_ratio:.1f}x ortalama - yüksek aktivite")
+                    elif vol_ratio < 0.1:
+                        lines.append(f"  ⚠️ Volume Ratio: {vol_ratio:.2f}x - ÇOK DÜŞÜK HACİM (sahte kırılma riski)")
+                    else:
+                        lines.append(f"  Volume Ratio: {vol_ratio:.1f}x ortalama")
+
+                    # OBV Divergence check
+                    _, obv_divergence = self._volume_analyzer.calculate_obv(closes, volumes)
+                    if obv_divergence:
+                        lines.append(f"  ⚠️ OBV Divergence: Fiyat-Hacim uyumsuzluğu tespit edildi")
 
                     lines.append("")
 
@@ -997,12 +738,22 @@ CONTEXTUAL METRICS:
                         plus_di = plus_di_list[-1]
                         minus_di = minus_di_list[-1]
 
-                        # Raw data only - GLM interprets
+                        # Raw data + RSI contextual interpretation
                         lines.extend([
                             "ADX DATA:",
                             f"  ADX: {adx_value:.1f}",
                             f"  +DI: {plus_di:.1f} | -DI: {minus_di:.1f}",
                         ])
+
+                        # RSI Context (ADX-aware interpretation)
+                        rsi_values = hist_primary.get("rsi_14", [])
+                        if rsi_values:
+                            rsi_current = rsi_values[-1] if rsi_values else 50.0
+                            price_slope = calculate_slope(closes, 4) if closes else 0.0
+                            rsi_label, rsi_desc = self._interpret_rsi_context(rsi_current, adx_value, price_slope)
+                            lines.append(f"  RSI Context: [{rsi_label}]")
+                            lines.append(f"  Interpretation: {rsi_desc}")
+
                         lines.append("")
 
             # 4. Funding Rate Analysis (with signals)
@@ -1056,6 +807,24 @@ CONTEXTUAL METRICS:
 
                             if funding_analysis.opportunity:
                                 lines.append(f"  Opportunity: {funding_analysis.opportunity}")
+
+                    # OI Context (Funding + OI kombinasyonu yorumu)
+                    oi_current = futures_data.get("current", {}).get("open_interest", 0)
+                    oi_avg = futures_data.get("averages", {}).get("open_interest_avg", oi_current)
+                    if oi_current > 0 and hist_primary.get("close"):
+                        closes = hist_primary["close"]
+                        price_slope = calculate_slope(closes, 4) if closes else 0.0
+                        oi_label, oi_desc = self._interpret_funding_oi_context(
+                            funding_rate, oi_current, oi_avg, price_slope
+                        )
+                        
+                        # Add to active glossary contexts for dynamic glossary
+                        if oi_label and oi_label != "NEUTRAL":
+                            if oi_label not in self._active_glossary_contexts:
+                                self._active_glossary_contexts.append(oi_label)
+                        
+                        lines.append(f"  OI Context: [{oi_label}]")
+                        lines.append(f"  Interpretation: {oi_desc}")
 
                     lines.append("")
 
@@ -1476,6 +1245,9 @@ CONTEXTUAL METRICS:
         htf_analysis: Dict[str, Any] = None,
     ) -> str:
         self._invocation_count += 1
+        
+        # Reset active glossary contexts for this invocation
+        self._active_glossary_contexts = []
 
         runtime_minutes = int((datetime.utcnow() - self._start_time).total_seconds() / 60)
         current_time = datetime.utcnow()
@@ -1510,7 +1282,7 @@ CONTEXTUAL METRICS:
             volatility_score = self._risk_manager.calculate_volatility(closes)
 
             # Relative volatility context
-            realized_vol_pct = self._compute_realized_vol_pct(closes, lookback=50)
+            realized_vol_pct = compute_realized_vol_pct(closes, lookback=50)
 
             abs_ret_pct_series = []
             for i in range(1, len(closes)):
@@ -1518,10 +1290,10 @@ CONTEXTUAL METRICS:
                     abs_ret_pct_series.append(abs(closes[i] - closes[i - 1]) / closes[i - 1] * 100)
 
             # Sample realized vol history using cached strategic sampling (O(1) vs O(n))
-            realized_samples = self._get_cached_volatility_samples(symbol, closes)
+            realized_samples = self._vol_cache.get_cached_samples(symbol, closes, compute_realized_vol_pct)
 
-            median_realized = self._rolling_median(realized_samples, lookback=20)
-            median_atr_pct = self._rolling_median(abs_ret_pct_series, lookback=200)
+            median_realized = rolling_median(realized_samples, lookback=20)
+            median_atr_pct = rolling_median(abs_ret_pct_series, lookback=200)
 
             self._current_realized_vol_pct = realized_vol_pct
             self._median_realized_vol_pct = median_realized
@@ -1574,8 +1346,24 @@ CONTEXTUAL METRICS:
         if feedback_section:
             sections.append(feedback_section)
 
-        # Minimal instructions - GLM tamamen özgür
-        sections.append(self._build_instructions(symbol=symbol))
+        # Pozisyon durumunu belirle (instructions için)
+        long_pos = portfolio_metrics.get("long_position", 0.0)
+        short_pos = portfolio_metrics.get("short_position", 0.0)
+        has_long = abs(long_pos) > 0.0001
+        has_short = abs(short_pos) > 0.0001
+        has_position = has_long or has_short
+        position_type = "LONG" if has_long else ("SHORT" if has_short else None)
+
+        # Position-aware instructions (Red Team Mode için ek veriler)
+        sections.append(self._build_instructions(
+            symbol=symbol,
+            has_position=has_position,
+            position_type=position_type,
+            current_price=current_price,
+            current_snapshots=current_snapshots,
+            historical_arrays=historical_arrays,
+            futures_data=futures_data
+        ))
 
         return "\n\n".join(sections)
 
@@ -1654,7 +1442,9 @@ CONTEXTUAL METRICS:
             f"Sonuç: {wins}W/{losses}L | Streak: {streak}{streak_type} | Ort: {avg_pnl:+.1f}%",
         ]
 
-        # GLM özgürlüğü: Uyarı kaldırıldı - GLM kendi kararını verecek
+        # Loss streak uyarısı - overtrading önleme
+        if streak >= 2 and streak_type == "L":
+            lines.append(f"⚠️ UYARI: {streak} ardışık kayıp - overtrading riski, confidence -5")
 
         # Show last trade direction for bias consideration
         if trades:
@@ -1717,6 +1507,17 @@ DATA ORDER: OLDEST → NEWEST"""
             f"• ATR Ratio (proxy): {(self._atr_ratio or 1.0):.2f}x",
             f"• Relative Intensity (max ratio): {rel:.2f}x",
             f"• Regime Key: {regime_key.upper()}",
+            "",
+        ])
+
+        # Volatilite Risk Etkisi Rehberi
+        lines.extend([
+            "VOLATILITE RISK ETKISI:",
+            "• LOW regime: Dar SL kabul edilebilir, R:R hedefi yukselt (2:1+)",
+            "• MEDIUM regime: Standart SL/TP mesafeleri uygula",
+            "• HIGH regime: Pozisyon boyutu %50 azalt, SL mesafesi 1.2x genis tut",
+            "• EXTREME regime: Confidence -15, pozisyon boyutu %75 azalt veya HOLD",
+            "• Dusuk hacim (Vol Ratio < 0.3) + HIGH vol = Sahte kirilma riski yuksek",
             "",
         ])
 
@@ -1809,13 +1610,27 @@ DATA ORDER: OLDEST → NEWEST"""
                     "",
                 ])
 
+            # Data conflict detection
+            data_conflicts = self._detect_data_conflicts(
+                trend_direction=trend_direction,
+                market_structure=market_structure,
+                rsi=rsi,
+                ema_distance=ema20_dist
+            )
+            if data_conflicts:
+                lines.extend([
+                    "DATA CONFLICTS DETECTED:",
+                    *data_conflicts,
+                    "",
+                ])
+
             lines.extend([
                 f"SERIES SUMMARIES ({primary_tf} tail stats):",
-                self._summarize_series(hist_primary.get("close", []), 2, "Close"),
-                self._summarize_series(hist_primary.get("ema_20", []), 2, "EMA20"),
-                self._summarize_series(hist_primary.get("ema_50", []), 2, "EMA50"),
-                self._summarize_series(hist_primary.get("macd", []), 2, "MACD"),
-                self._summarize_series(hist_primary.get("rsi_14", []), 2, "RSI14"),
+                summarize_series(hist_primary.get("close", []), 2, "Close"),
+                summarize_series(hist_primary.get("ema_20", []), 2, "EMA20"),
+                summarize_series(hist_primary.get("ema_50", []), 2, "EMA50"),
+                summarize_series(hist_primary.get("macd", []), 2, "MACD"),
+                summarize_series(hist_primary.get("rsi_14", []), 2, "RSI14"),
                 "",
             ])
 
@@ -1846,6 +1661,19 @@ DATA ORDER: OLDEST → NEWEST"""
                 "",
             ])
 
+            # Futures Yorum Rehberi
+            lines.extend([
+                "FUTURES YORUM REHBERI:",
+                "- OI azaliyor + Fiyat dusuyor = Long Liquidation (bearish devam)",
+                "- OI artiyor + Fiyat dusuyor = Aggressive Shorting (short squeeze riski)",
+                "- OI azaliyor + Fiyat yukseliyor = Short Liquidation (bullish devam)",
+                "- OI artiyor + Fiyat yukseliyor = New Longs (bullish momentum)",
+                "- L/S > 3.0 + Destek yakin = Long squeeze potansiyeli",
+                "- Funding > 0.01% = Crowded long, contrarian short sinyali",
+                "- Funding < -0.01% = Crowded short, contrarian long sinyali",
+                "",
+            ])
+
         # Intraday 1m summary
         hist_1m = historical_arrays.get("1m", {})
         if hist_1m and "close" in hist_1m:
@@ -1853,40 +1681,15 @@ DATA ORDER: OLDEST → NEWEST"""
                 "",
                 "=" * 80,
                 "INTRADAY (1-minute) SUMMARY:",
-                self._summarize_series(hist_1m.get("close", []), 2, "1m Close"),
-                self._summarize_series(hist_1m.get("rsi_14", []), 2, "1m RSI14"),
-                self._summarize_series(hist_1m.get("macd", []), 2, "1m MACD"),
+                summarize_series(hist_1m.get("close", []), 2, "1m Close"),
+                summarize_series(hist_1m.get("rsi_14", []), 2, "1m RSI14"),
+                summarize_series(hist_1m.get("macd", []), 2, "1m MACD"),
                 "",
             ])
-
-        # 4H context
-        data_4h = current_snapshots.get("4h", {})
-        if data_4h:
-            lines.extend([
-                "",
-                "=" * 80,
-                "LONGER-TERM CONTEXT (4H):",
-                f"4H Close: {data_4h.get('close', 0):.2f}",
-                f"4H EMA20: {data_4h.get('ema_20', 0):.2f}",
-                f"4H EMA50: {data_4h.get('ema_50', 0):.2f}",
-                f"4H ATR14: {data_4h.get('atr_14', 0):.2f}",
-                "",
-            ])
-
-        lines.extend([
-            "=" * 80,
-            "ADDITIONAL TIMEFRAMES SNAPSHOT:",
-        ])
-        for tf in ["5m", "15m", "1h", "1d"]:
-            d = current_snapshots.get(tf, {})
-            if d:
-                lines.append(
-                    f"{tf.upper()} | Close: {d.get('close',0):.2f} | EMA20: {d.get('ema_20',0):.2f} | EMA50: {d.get('ema_50',0):.2f} | RSI14: {d.get('rsi_14',50):.2f}"
-                )
-            else:
-                lines.append(f"{tf.upper()}: No data available")
 
         # v3.2: Narrative Context - yorumlanmış veri
+        # NOTE: LONGER-TERM CONTEXT (4H) ve ADDITIONAL TIMEFRAMES SNAPSHOT kaldırıldı
+        # Çünkü aynı veriler Section A (MTF Structure) ve PRIMARY TIMEFRAME'de zaten mevcut
         lines.append(self._generate_narrative(data_primary))
 
         return "\n".join(lines)
@@ -1915,9 +1718,15 @@ DATA ORDER: OLDEST → NEWEST"""
             f"Current Total Return (percent): {total_return_pct:.2f}%",
             f"Available Cash: {portfolio_metrics.get('available_cash', equity):.2f}",
             f"Current Account Value: {equity:.2f}",
-            f"Recent Win Rate (last {len(self._performance_history)} trades): {self._recent_win_rate:.0%}",
-            "",
         ])
+        # Win Rate conditional display
+        if len(self._performance_history) >= 3:
+            lines.append(f"Recent Win Rate (last {len(self._performance_history)} trades): {self._recent_win_rate:.0%}")
+        elif len(self._performance_history) > 0:
+            lines.append(f"Recent Win Rate: Insufficient data ({len(self._performance_history)} trades)")
+        else:
+            lines.append("Recent Win Rate: N/A (no trade history)")
+        lines.append("")
 
         long_position = portfolio_metrics.get("long_position", 0.0)
         short_position = portfolio_metrics.get("short_position", 0.0)
@@ -2060,31 +1869,58 @@ DATA ORDER: OLDEST → NEWEST"""
 
     def _build_instructions(self, symbol: str = "BTCUSDT", **kwargs) -> str:
         """
-        GLM için minimal talimatlar - tamamen özgür analiz.
+        GLM için pozisyon durumuna göre farklı talimatlar.
+        Uses modular template functions from prompts module.
         """
-        return f"""
-================================================================================
-GOREV: Market verilerini analiz et ve sinyal ver
-================================================================================
+        has_position = kwargs.get('has_position', False)
+        position_type = kwargs.get('position_type', None)
 
-CIKTI FORMATI (JSON):
-```json
-{{
-  "{symbol}": {{
-    "signal": "BUY" | "SELL" | "HOLD",
-    "confidence": <0-100>,
-    "reasoning": "Analiz aciklamasi (TURKCE yazilmali)"
-  }}
-}}
-```
+        if has_position:
+            # Logic Gates section oluştur (if builder available)
+            logic_gates_section = ""
+            if self._logic_gates_builder and self._enhanced_features_enabled:
+                current_price = kwargs.get('current_price', 0.0)
+                current_snapshots = kwargs.get('current_snapshots', {})
+                historical_arrays = kwargs.get('historical_arrays', {})
+                futures_data = kwargs.get('futures_data', {})
+                
+                if historical_arrays and current_price > 0:
+                    try:
+                        logic_gates_section = self._logic_gates_builder.build_section(
+                            symbol=symbol,
+                            position_type=position_type,
+                            current_price=current_price,
+                            current_snapshots=current_snapshots,
+                            historical_arrays=historical_arrays,
+                            futures_data=futures_data
+                        )
+                    except Exception as e:
+                        logger.warning(f"Logic gates section failed: {e}")
+                        logic_gates_section = "\n[Logic Gates: Hesaplanamadı]\n"
+            
+            # Build glossary with active contexts
+            glossary_section = build_dynamic_glossary(self._active_glossary_contexts)
+            
+            # Use modular template
+            return build_position_active_instructions_template(
+                symbol=symbol,
+                position_type=position_type,
+                logic_gates_section=logic_gates_section,
+                glossary_section=glossary_section
+            )
+        else:
+            # Build glossary with active contexts
+            glossary_section = build_dynamic_glossary(self._active_glossary_contexts)
+            
+            # Use modular template
+            return build_no_position_instructions_template(
+                symbol=symbol,
+                glossary_section=glossary_section
+            )
 
-NOT: "reasoning" alani MUTLAKA TURKCE yazilmalidir.
-"""
-
-    def _format_array(self, values: List[float], decimals: int = 2) -> str:
-        if not values:
-            return "[]"
-        return "[" + ", ".join(f"{v:.{decimals}f}" for v in values) + "]"
+    # =========================================================================
+    # INSTRUCTION TEMPLATES - Now using modular templates
+    # =========================================================================
 
     def _check_position_close_notification(self, symbol: str = "BTCUSDT") -> Optional[Dict[str, Any]]:
         """
