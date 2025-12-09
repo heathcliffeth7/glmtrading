@@ -545,7 +545,7 @@ def _health_check_monitor(symbol: str, max_silence_seconds: Optional[int] = None
             
             # Check if listener is still marked as started
             if not _listeners_started.get(symbol_key):
-                logger.warning("⚠️ Listener flag cleared for %s, monitor exiting", symbol_key)
+                logger.debug("Listener flag cleared for %s, monitor exiting (normal shutdown/restart)", symbol_key)
                 break
             
             # Check thread health

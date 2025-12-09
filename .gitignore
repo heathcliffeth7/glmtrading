@@ -84,3 +84,4 @@ tests/
 get-pip.py
 
 .venv/
+node_modules/

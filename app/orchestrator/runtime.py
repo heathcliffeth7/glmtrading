@@ -13,7 +13,7 @@ from app.data_feeds.service import orchestrator as data_feed_orchestrator
 from app.executor.executor import Executor, ExecutionResult
 from app.executor.ledger import engine
 from app.risk_manager.manager import RiskDecision, RiskManager
-from app.risk_manager.glm_client import GLMClient
+from app.risk_manager.qwen_client import QwenClient
 from app.risk_manager.partial_tp_manager import PartialTakeProfitManager
 from app.utils.logging import configure_logging, get_logger
 from app.utils.telegram import format_markdown, telegram_client
@@ -76,18 +76,11 @@ class AutomatedRunner:
         self._agents = {}
         self._glm_clients = {}
 
-        # API key mapping for parallel GLM calls - each symbol gets its own key
-        api_key_map = {
-            "BTCUSDT": settings.zai.api_key,
-            "ETHUSDT": settings.zai.api_key_2,
-            "SOLUSDT": settings.zai.api_key_3,
-        }
-
+        # Create separate QwenClient for each symbol to avoid chat_id conflicts
+        # Note: All clients share same cookies/auth but have separate chat sessions
         for sym in self._symbols:
-            # Create GLM client with symbol-specific API key for parallel processing
-            api_key = api_key_map.get(sym, settings.zai.api_key)
-            self._glm_clients[sym] = GLMClient(api_key=api_key)
-            logger.info("🔑 Created GLMClient for %s with key: %s...", sym, api_key[:8])
+            self._glm_clients[sym] = QwenClient()
+            logger.info("🔑 Created QwenClient for %s (cookie-based)", sym)
 
             # Use passed components if single symbol and matches, otherwise create new
             if sym == symbol and risk_manager:
@@ -300,29 +293,29 @@ class AutomatedRunner:
 
     async def _run_cycle(self) -> None:
         """
-        Execute-As-You-Go Cycle: Each symbol evaluates and executes independently.
+        Sequential Cycle: Each symbol evaluates and executes one after another.
 
-        Key difference from old approach:
-        - OLD: Wait for ALL GLM evaluations → Then execute ALL
-        - NEW: Each symbol executes IMMEDIATELY after its GLM returns
+        Key behavior:
+        - Process symbols SEQUENTIALLY to avoid Qwen API rate limiting
+        - Each symbol completes before the next one starts
+        - This ensures stable API communication with chat.qwen.ai
 
-        This prevents STALE decisions caused by waiting for slow symbols.
+        Rate limit context: Qwen uses cookie-based auth with WAF tokens,
+        parallel requests can cause "peer closed connection" errors.
         """
         start_time = datetime.now(timezone.utc)
         logger.info("🚀 Cycle started at %s for symbols: %s", start_time.isoformat(), self._symbols)
-        logger.info("📊 Execute-As-You-Go pattern: Each symbol executes immediately after GLM returns")
+        logger.info("📊 Sequential pattern: Each symbol completes before next starts (Qwen rate limit)")
 
-        # Launch all symbols in parallel - each handles its own execution
-        tasks = [
-            asyncio.create_task(
-                self._evaluate_and_execute_symbol(symbol),
-                name=f"eval_exec:{symbol}"
-            )
-            for symbol in self._symbols
-        ]
-
-        # Wait for all to complete (but each has already executed individually)
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Process symbols SEQUENTIALLY to avoid Qwen API conflicts
+        results = []
+        for symbol in self._symbols:
+            try:
+                result = await self._evaluate_and_execute_symbol(symbol)
+                results.append(result)
+            except Exception as exc:
+                logger.error("[%s] Sequential execution failed: %s", symbol, exc)
+                results.append({'success': False, 'error': str(exc), 'symbol': symbol})
 
         # Log summary
         cycle_duration = (datetime.now(timezone.utc) - start_time).total_seconds()

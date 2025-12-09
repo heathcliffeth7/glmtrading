@@ -12,6 +12,7 @@ from app.risk_manager.risk_controls import (
     DynamicThreshold,
     SafetyLimits,
 )
+from app.risk_manager.tp_sl_calculator import TPSLCalculator
 from app.utils.logging import get_logger
 from app.utils.runtime_tracker import RuntimeTracker
 
@@ -49,6 +50,33 @@ class Evaluator:
         self._settings = settings
         self._runtime_tracker = runtime_tracker
         self._symbol = symbol
+        
+        # Initialize TP/SL calculator with regime config
+        regime_config = {
+            'low': {
+                'sl_multiplier': settings.trading.tp_sl_low_vol_multiplier,
+                'risk_reward': settings.trading.tp_sl_low_vol_rr,
+            },
+            'medium': {
+                'sl_multiplier': settings.trading.tp_sl_medium_vol_multiplier,
+                'risk_reward': settings.trading.tp_sl_medium_vol_rr,
+            },
+            'high': {
+                'sl_multiplier': settings.trading.tp_sl_high_vol_multiplier,
+                'risk_reward': settings.trading.tp_sl_high_vol_rr,
+            },
+            'extreme': {
+                'sl_multiplier': settings.trading.tp_sl_extreme_vol_multiplier,
+                'risk_reward': settings.trading.tp_sl_extreme_vol_rr,
+            },
+        }
+        
+        self._tp_sl_calc = TPSLCalculator(
+            use_dynamic_regime=settings.trading.tp_sl_use_dynamic_regime,
+            regime_config=regime_config,
+            default_atr_multiplier=settings.trading.tp_sl_atr_multiplier,
+            default_risk_reward=settings.trading.tp_sl_risk_reward_ratio,
+        )
     
     def evaluate(
         self,
@@ -151,6 +179,85 @@ class Evaluator:
             decision = self._apply_consistency_validation(decision, original_action)
             decision = self._enforce_confidence_threshold(decision, volatility_context["volatility_regime"])
             
+            min_confidence = self._settings.trading.min_confidence_for_trade
+            
+            if decision.glm_confidence < min_confidence and decision.action in ['BUY', 'SELL']:
+                logger.warning(
+                    "Confidence %.1f%% < %.1f%% threshold, forcing HOLD",
+                    decision.glm_confidence, min_confidence
+                )
+                original_reasoning = decision.reasoning or f"{decision.action} ({decision.glm_confidence:.1f}% conf)"
+                decision.action = 'HOLD'
+                decision.amount = 0.0
+                decision.reasoning = (
+                    f"Original: {original_reasoning} - "
+                    f"Forced HOLD (confidence below {min_confidence:.0f}% threshold)"
+                )
+            
+            if decision.action in ['BUY', 'SELL'] and decision.glm_confidence >= min_confidence:
+                entry_price = signals[0].metadata.get('price', 0) if signals else 0
+                atr = volatility_context.get('atr', 0)
+                volatility_regime = volatility_context.get('volatility_regime', 'medium')
+                
+                # Initialize exit_plan if not exists
+                if decision.exit_plan is None:
+                    decision.exit_plan = {}
+                
+                if entry_price > 0 and atr > 0:
+                    # ATR-based TP/SL calculator with dynamic regime
+                    tp_sl = self._tp_sl_calc.calculate(
+                        signal=decision.action,
+                        entry_price=entry_price,
+                        atr=atr,
+                        volatility_regime=volatility_regime,
+                    )
+                    
+                    decision.exit_plan['stop_loss'] = tp_sl['stop_loss']
+                    decision.exit_plan['take_profit'] = tp_sl['take_profit']
+                    
+                    logger.info(
+                        "✅ TP/SL [%s regime] calculated: TP=$%.2f SL=$%.2f (risk=%.1f%%, reward=%.1f%%, mult=%.1fx, R:R=%.1f:1)",
+                        tp_sl['regime'].upper(),
+                        tp_sl['take_profit'], tp_sl['stop_loss'],
+                        tp_sl['risk_pct'], tp_sl['reward_pct'],
+                        tp_sl['atr_multiplier'], tp_sl['risk_reward']
+                    )
+                elif entry_price > 0:
+                    # FALLBACK: Percentage-based TP/SL
+                    logger.warning("Cannot calculate ATR-based TP/SL (entry=%.2f, atr=%.2f), using fallback", entry_price, atr)
+                    
+                    sl_pct = self._settings.trading.get('tp_sl_fallback_sl_pct', 2.0) / 100.0
+                    tp_pct = self._settings.trading.get('tp_sl_fallback_tp_pct', 5.0) / 100.0
+                    
+                    if decision.action == 'BUY':
+                        decision.exit_plan['stop_loss'] = entry_price * (1 - sl_pct)
+                        decision.exit_plan['take_profit'] = entry_price * (1 + tp_pct)
+                    else:  # SELL
+                        decision.exit_plan['stop_loss'] = entry_price * (1 + sl_pct)
+                        decision.exit_plan['take_profit'] = entry_price * (1 - tp_pct)
+                    
+                    logger.info(
+                        "✅ Fallback TP/SL: TP=$%.2f SL=$%.2f (±%.1f%%/%.1f%%)",
+                        decision.exit_plan['take_profit'],
+                        decision.exit_plan['stop_loss'],
+                        sl_pct * 100,
+                        tp_pct * 100
+                    )
+                else:
+                    # WORST CASE: No entry price
+                    logger.error("❌ No entry price available, cannot set exit_plan - forcing HOLD")
+                    decision.action = 'HOLD'
+                    decision.amount = 0.0
+                    decision.reasoning = f"Forced HOLD - no price data for exit plan (original: {decision.action})"
+                
+                # Add invalidation condition if exit_plan is set
+                if decision.action in ['BUY', 'SELL'] and 'stop_loss' in decision.exit_plan:
+                    decision.exit_plan['invalidation_condition'] = self._generate_invalidation_condition(
+                        decision.action,
+                        decision.exit_plan['stop_loss'],
+                        signals
+                    )
+            
             logger.info(
                 "GLM decision: action=%s amount=%.4f leverage=%.2f confidence=%.1f",
                 decision.action,
@@ -167,10 +274,10 @@ class Evaluator:
             return decision
             
         except Exception as exc:
-            error_msg = f"GLM API hatası: {str(exc)}"
-            logger.error("GLM request failed: %s", exc, exc_info=True)
-            
-            self._fallback_handler.notify_glm_failure(signals, str(exc))
+            error_msg = f"LLM API hatası: {str(exc)}"
+            logger.error("LLM request failed: %s", exc, exc_info=True)
+
+            self._fallback_handler.notify_llm_failure(signals, str(exc))
             
             fallback_decision = self._fallback_handler.fallback_decision(signals, error_msg)
             logger.warning(
@@ -362,6 +469,65 @@ class Evaluator:
             )
         
         return decision
+    
+    def _generate_invalidation_condition(
+        self,
+        action: str,
+        stop_loss: float,
+        signals: list,
+    ) -> str:
+        """
+        Generate invalidation condition using support/resistance if available.
+        
+        Args:
+            action: 'BUY' or 'SELL'
+            stop_loss: Stop loss price level
+            signals: Market signals with metadata
+            
+        Returns:
+            Human-readable invalidation condition string
+        """
+        metadata = signals[0].metadata if signals else {}
+        
+        if action == 'BUY':
+            # Check for support level below SL
+            support_4h = metadata.get('support_4h')
+            support_daily = metadata.get('support_daily')
+            
+            support = None
+            support_tf = None
+            
+            if support_4h and support_4h < stop_loss:
+                support = support_4h
+                support_tf = "4h"
+            elif support_daily and support_daily < stop_loss:
+                support = support_daily
+                support_tf = "daily"
+            
+            if support:
+                return f"15m candle closes below ${support:.2f} ({support_tf} support level)"
+            else:
+                return f"15m candle closes below ${stop_loss:.2f} (stop loss)"
+        
+        else:  # SELL
+            # Check for resistance level above SL
+            resistance_4h = metadata.get('resistance_4h')
+            resistance_daily = metadata.get('resistance_daily')
+            
+            resistance = None
+            resistance_tf = None
+            
+            if resistance_4h and resistance_4h > stop_loss:
+                resistance = resistance_4h
+                resistance_tf = "4h"
+            elif resistance_daily and resistance_daily > stop_loss:
+                resistance = resistance_daily
+                resistance_tf = "daily"
+            
+            if resistance:
+                return f"15m candle closes above ${resistance:.2f} ({resistance_tf} resistance level)"
+            else:
+                return f"15m candle closes above ${stop_loss:.2f} (stop loss)"
     
     def _attach_context(
         self,

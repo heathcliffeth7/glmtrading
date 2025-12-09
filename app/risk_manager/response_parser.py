@@ -189,6 +189,42 @@ class ResponseParser:
         raw = raw.strip()
         logger.debug("Original JSON payload length: %d", len(raw))
 
+        if not raw:
+            logger.warning("Empty GLM response content received")
+            return raw
+
+        def _find_balanced_json(text: str) -> Optional[str]:
+            """Return the last balanced JSON object found via brace scan."""
+            start_idx = None
+            depth = 0
+            in_string = False
+            escape_next = False
+            candidate = None
+
+            for i, ch in enumerate(text):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == "\\":
+                    escape_next = True
+                    continue
+                if ch == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    if depth == 0:
+                        start_idx = i
+                    depth += 1
+                elif ch == "}" and depth > 0:
+                    depth -= 1
+                    if depth == 0 and start_idx is not None:
+                        candidate = text[start_idx : i + 1]
+                        start_idx = None
+
+            return candidate
+
         # Extract JSON from markdown code block ANYWHERE in the text
         json_block_match = re.search(r'```json\s*([\s\S]*?)```', raw)
         if json_block_match:
@@ -209,6 +245,15 @@ class ResponseParser:
                 if raw.endswith("```"):
                     raw = raw[:-3]
                 raw = raw.strip()
+
+        # If raw text still contains extra prose, keep only the last balanced JSON chunk
+        balanced_json = _find_balanced_json(raw)
+        if balanced_json:
+            if len(balanced_json) < len(raw):
+                logger.info("Trimmed mixed content to balanced JSON object")
+            raw = balanced_json.strip()
+        elif "{" not in raw:
+            logger.warning("No JSON braces detected in GLM content; length=%d", len(raw))
 
         # Handle truncated JSON responses - find the last complete JSON object
         brace_count = 0
@@ -406,19 +451,22 @@ class ResponseParser:
         if not self._glm:
             return text
 
-        # Check for common English words/patterns
+        # Check for common English words/patterns (enhanced detection)
         english_markers = [
-            'the ', 'market', 'price', 'trend', 'bearish', 'bullish',
-            'support', 'resistance', 'momentum', 'indicates', 'suggests',
-            'trading', 'position', 'volume', 'level', 'break', 'strong',
-            'despite', 'therefore', 'however', 'confluence'
+            ' the ', ' is ', ' are ', ' and ', ' but ', ' however ', ' with ',
+            ' market', ' price', ' trend', ' bearish', ' bullish',
+            ' support', ' resistance', ' momentum', ' indicates', ' suggests',
+            ' trading', ' position', ' volume', ' level', ' break', ' strong',
+            ' despite', ' therefore', ' however', ' confluence', ' although',
+            ' while ', ' when ', ' that ', ' this ', ' these ', ' those '
         ]
 
-        text_lower = text.lower()
+        text_lower = f" {text.lower()} "  # Add spaces for word boundary matching
         english_word_count = sum(1 for marker in english_markers if marker in text_lower)
 
-        # If less than 3 English markers found, assume it's already Turkish
-        if english_word_count < 3:
+        # Lower threshold: 5+ English markers → likely English
+        if english_word_count < 5:
+            logger.debug("Turkish reasoning detected (%d English markers < 5), skipping translation", english_word_count)
             return text
 
         logger.info("English reasoning detected (%d markers), translating...", english_word_count)
@@ -439,9 +487,13 @@ class ResponseParser:
                 translated = response["choices"][0]["message"]["content"].strip()
                 logger.info("Translation completed: %d → %d chars", len(text), len(translated))
                 return translated
+            else:
+                logger.warning("Translation response empty, using original text")
 
         except Exception as e:
             logger.warning("Translation failed: %s - using original text", e)
+            # Fallback: Add warning prefix
+            return f"[Çeviri başarısız - orijinal metin] {text}"
 
         return text
 
@@ -506,7 +558,7 @@ class ResponseParser:
                     amount = quantity
 
                     leverage = float(signal_args.get("leverage", 5))
-                    glm_confidence = float(signal_args.get("confidence", 0)) * 100
+                    glm_confidence = float(signal_args.get("confidence", 0))
 
                     stop_loss = float(signal_args.get("stop_loss", 0))
                     take_profit = float(signal_args.get("take_profit", 0))
@@ -518,7 +570,7 @@ class ResponseParser:
                         "invalidation_condition": invalidation
                     }
 
-                    reasoning = payload[first_key].get("gerekçe", "")
+                    reasoning = payload[first_key].get("gerekçe", payload[first_key].get("reasoning", ""))
                     reason_primary = signal_args.get("reason_primary", "")
                     reason_secondary = signal_args.get("reason_secondary", "")
 

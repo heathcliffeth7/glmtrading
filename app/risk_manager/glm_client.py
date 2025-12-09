@@ -15,6 +15,9 @@ from app.utils.rate_limiter import SlidingWindowRateLimiter
 settings = get_settings()
 logger = get_logger(__name__)
 
+# GLM prompts log file
+GLM_PROMPTS_LOG = Path("/root/trading/logs/glm_prompts.log")
+
 
 class GLMClient:
     def __init__(self, api_key: Optional[str] = None) -> None:
@@ -49,6 +52,36 @@ class GLMClient:
         if base_url.endswith("/chat/completions"):
             return base_url
         return f"{base_url}/chat/completions"
+
+    def _log_prompt_response(
+        self,
+        messages: List[Dict[str, str]],
+        response_content: str,
+        latency_ms: float,
+    ) -> None:
+        """Log prompt and response to glm_prompts.log for debugging."""
+        try:
+            timestamp = datetime.now(timezone.utc).isoformat()
+            separator = "=" * 80
+
+            with GLM_PROMPTS_LOG.open("a", encoding="utf-8") as f:
+                f.write(f"\n{separator}\n")
+                f.write(f"[{timestamp}] GLM REQUEST/RESPONSE (latency: {latency_ms:.1f}ms)\n")
+                f.write(f"{separator}\n\n")
+
+                # Log each message in the prompt
+                f.write(">>> PROMPT:\n")
+                for i, msg in enumerate(messages):
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    f.write(f"\n--- Message {i+1} ({role}) ---\n")
+                    f.write(f"{content}\n")
+
+                f.write(f"\n>>> RESPONSE:\n")
+                f.write(f"{response_content}\n")
+                f.write(f"\n{separator}\n")
+        except Exception as exc:
+            logger.debug("Failed to write to glm_prompts.log: %s", exc)
 
     def _record_token_usage(
         self,
@@ -273,8 +306,11 @@ class GLMClient:
                             logger.error("❌ No content found in any field - this is a GLM API issue")
             # Persist usage for offline analysis (token cap tuning)
             self._record_token_usage(prompt_tokens, completion_tokens, total_tokens, glm_latency_ms)
+
+            # Log prompt and response to file
+            self._log_prompt_response(messages, content, glm_latency_ms)
         except Exception as exc:  # noqa: BLE001
             logger.debug("Response logging hatası: %s", exc)
-            
+
             logger.debug("GLM API response received in %.0fms", glm_latency_ms)
         return result

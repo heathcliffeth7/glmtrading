@@ -248,7 +248,8 @@ def summarize_series(
     
     # Show last 6 values to avoid token explosion
     tail = values[-6:]
-    formatted = [f"{v:.{decimals}f}" for v in tail]
+    # Filter out None values and format
+    formatted = [f"{v:.{decimals}f}" if v is not None else "None" for v in tail]
     result = "[" + ", ".join(formatted) + "]"
     
     return f"{name}: {result}" if name else result
@@ -267,7 +268,8 @@ def format_array(values: List[float], decimals: int = 2) -> str:
     """
     if not values:
         return "[]"
-    return "[" + ", ".join(f"{v:.{decimals}f}" for v in values) + "]"
+    # Filter out None values and format
+    return "[" + ", ".join(f"{v:.{decimals}f}" if v is not None else "None" for v in values) + "]"
 
 
 __all__ = [

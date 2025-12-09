@@ -4,7 +4,7 @@ from app.agents.base import AgentSignal
 from app.config.settings import get_settings
 from app.risk_manager.decision_models import RiskDecision
 from app.risk_manager.fallback_handler import FallbackHandler
-from app.risk_manager.glm_client import GLMClient
+from app.risk_manager.qwen_client import QwenClient
 from app.risk_manager.glm_communicator import GLMCommunicator
 from app.risk_manager.manager_modules.evaluator import Evaluator
 from app.risk_manager.manager_modules.metrics_calculator import MetricsCalculator
@@ -37,18 +37,18 @@ class RiskManager:
     Refactored from 1,557 lines → ~150 lines (90% reduction)
     """
     
-    def __init__(self, glm_client: GLMClient | None = None, symbol: str = "BTCUSDT") -> None:
+    def __init__(self, glm_client: QwenClient | None = None, symbol: str = "BTCUSDT") -> None:
         """
         Initialize RiskManager.
 
         Args:
-            glm_client: Optional GLMClient instance. If not provided, creates default.
-                        Use this to inject custom GLM clients with different API keys
+            glm_client: Optional QwenClient instance. If not provided, creates default.
+                        Use this to inject custom clients with different configs
                         for parallel processing across symbols.
             symbol: Trading symbol (e.g., BTCUSDT, ETHUSDT, SOLUSDT)
         """
         self._symbol = symbol
-        self._glm = glm_client if glm_client else GLMClient()
+        self._glm = glm_client if glm_client else QwenClient()
         self._communicator = GLMCommunicator(self._glm)
         self._settings = get_settings()
         self._runtime_tracker = RuntimeTracker.get_instance()

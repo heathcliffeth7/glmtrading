@@ -1,7 +1,7 @@
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from pydantic import AnyHttpUrl, AnyUrl, Field, validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -135,6 +135,152 @@ class TradingConfig(BaseSettings):
     max_margin_per_position: float = Field(3000.0, alias="TRADING_MAX_MARGIN_PER_POSITION")
     max_leverage: int = Field(20, alias="TRADING_MAX_LEVERAGE")
     example_position_usd: float = Field(50000.0, alias="TRADING_EXAMPLE_POSITION_USD")
+    
+    # Risk Management Settings
+    min_confidence_for_trade: float = Field(
+        80.0,
+        alias="MIN_CONFIDENCE_FOR_TRADE",
+        description="Minimum GLM confidence % to execute BUY/SELL (0-100). Below this, force HOLD."
+    )
+    
+    # TP/SL Calculation Settings
+    tp_sl_use_dynamic_regime: bool = Field(
+        True,
+        alias="TP_SL_USE_DYNAMIC_REGIME",
+        description="Enable volatility regime-based TP/SL calculation"
+    )
+    
+    # LOW volatility regime
+    tp_sl_low_vol_multiplier: float = Field(
+        1.0,
+        alias="TP_SL_LOW_VOL_MULTIPLIER",
+        description="ATR multiplier for SL in LOW volatility regime"
+    )
+    tp_sl_low_vol_rr: float = Field(
+        3.0,
+        alias="TP_SL_LOW_VOL_RR",
+        description="Risk/Reward ratio in LOW volatility regime"
+    )
+    
+    # MEDIUM volatility regime
+    tp_sl_medium_vol_multiplier: float = Field(
+        1.5,
+        alias="TP_SL_MEDIUM_VOL_MULTIPLIER",
+        description="ATR multiplier for SL in MEDIUM volatility regime"
+    )
+    tp_sl_medium_vol_rr: float = Field(
+        2.5,
+        alias="TP_SL_MEDIUM_VOL_RR",
+        description="Risk/Reward ratio in MEDIUM volatility regime"
+    )
+    
+    # HIGH volatility regime
+    tp_sl_high_vol_multiplier: float = Field(
+        2.0,
+        alias="TP_SL_HIGH_VOL_MULTIPLIER",
+        description="ATR multiplier for SL in HIGH volatility regime"
+    )
+    tp_sl_high_vol_rr: float = Field(
+        2.0,
+        alias="TP_SL_HIGH_VOL_RR",
+        description="Risk/Reward ratio in HIGH volatility regime"
+    )
+    
+    # EXTREME volatility regime
+    tp_sl_extreme_vol_multiplier: float = Field(
+        2.5,
+        alias="TP_SL_EXTREME_VOL_MULTIPLIER",
+        description="ATR multiplier for SL in EXTREME volatility regime"
+    )
+    tp_sl_extreme_vol_rr: float = Field(
+        1.5,
+        alias="TP_SL_EXTREME_VOL_RR",
+        description="Risk/Reward ratio in EXTREME volatility regime"
+    )
+    
+    # Fallback defaults (if regime disabled or unavailable)
+    tp_sl_atr_multiplier: float = Field(
+        1.5,
+        alias="TP_SL_ATR_MULTIPLIER",
+        description="Fallback ATR multiplier for stop loss distance"
+    )
+    tp_sl_risk_reward_ratio: float = Field(
+        2.5,
+        alias="TP_SL_RISK_REWARD_RATIO",
+        description="Fallback risk/reward ratio for take profit"
+    )
+
+
+class QwenSettings(BaseSettings):
+    """Qwen Chat (chat.qwen.ai) web API settings."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="QWEN_",
+        env_file=str(ENV_FILE),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="allow",
+    )
+
+    # Browser'dan alınan token (Authorization: Bearer xxx)
+    auth_token: str = Field("changeme", alias="QWEN_AUTH_TOKEN")
+    # Browser'dan alınan cookie string
+    cookie: str = Field("changeme", alias="QWEN_COOKIE")
+    # Kullanılacak model
+    model: str = Field("qwen-max-latest", alias="QWEN_MODEL")
+    # İsteğe bağlı sabit chat_id (verilmezse her çağrıda yeni oluşturulur)
+    chat_id: Optional[str] = Field(None, alias="QWEN_CHAT_ID")
+    # WAF tetiklemek için opsiyonel GET path'i (örn: /api/v2/models)
+    trigger_path: Optional[str] = Field(None, alias="QWEN_TRIGGER_PATH")
+    # WAF tetik GET timeout
+    trigger_timeout_sec: int = Field(15, alias="QWEN_TRIGGER_TIMEOUT_SEC")
+    # Authorization header'ını gönder (cookie tabanlı auth için kapatılabilir)
+    use_auth_header: bool = Field(False, alias="QWEN_USE_AUTH_HEADER")
+    # Qwen'i aktif et (True ise GLM yerine Qwen kullanılır)
+    enabled: bool = Field(False, alias="QWEN_ENABLED")
+    # Redis'ten gelen cookie'yi kullan (varsayılan: devre dışı, sadece WAF headerları alınır)
+    use_redis_cookies: bool = Field(False, alias="QWEN_USE_REDIS_COOKIES")
+    
+    # Auto-refresh settings
+    auto_refresh_enabled: bool = Field(
+        True,
+        alias="QWEN_AUTO_REFRESH_ENABLED",
+        description="Enable automatic cookie refresh on auth errors and periodically"
+    )
+    refresh_interval_seconds: int = Field(
+        1500,
+        alias="QWEN_REFRESH_INTERVAL_SECONDS",
+        description="Interval for periodic cookie refresh in seconds (0 = disable periodic refresh, default 1500 = 25 min)"
+    )
+    retry_after_refresh: bool = Field(
+        True,
+        alias="QWEN_RETRY_AFTER_REFRESH",
+        description="Retry failed request after successful cookie refresh"
+    )
+    
+    # Chat ID Management
+    enable_chat_id_management: bool = Field(
+        True,
+        alias="QWEN_ENABLE_CHAT_ID_MANAGEMENT",
+        description="Enable Redis-based chat ID persistence per symbol"
+    )
+    chat_id_ttl_seconds: int = Field(
+        3600,
+        alias="QWEN_CHAT_ID_TTL_SECONDS",
+        description="TTL for chat IDs in Redis (seconds)"
+    )
+    
+    # Retry Configuration
+    max_retry_attempts: int = Field(
+        3,
+        alias="QWEN_MAX_RETRY_ATTEMPTS",
+        description="Maximum retry attempts for failed requests"
+    )
+    retry_delay_seconds: int = Field(
+        2,
+        alias="QWEN_RETRY_DELAY_SECONDS",
+        description="Base delay between retries (seconds)"
+    )
 
 
 class ZAISettings(BaseSettings):
@@ -239,6 +385,7 @@ class AppSettings(BaseSettings):
     influx: InfluxSettings = Field(default_factory=InfluxSettings)
     qlib: QLibSettings = Field(default_factory=QLibSettings)
     zai: ZAISettings = Field(default_factory=ZAISettings)
+    qwen: QwenSettings = Field(default_factory=QwenSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     trading: TradingConfig = Field(default_factory=TradingConfig)
 

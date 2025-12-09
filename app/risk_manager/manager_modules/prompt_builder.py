@@ -72,11 +72,12 @@ class PromptBuilder:
             estimated_tokens = len(content) // 4
             logger.info("📤 NOF1 GLM Prompt: %d chars, ~%d tokens", len(content), estimated_tokens)
 
-            system_message = "Sen bir kripto analisti. Verileri analiz et ve JSON formatında yanıt ver."
+            # System instruction'ı user content'in başına ekle (tek mesaj olarak gönder)
+            system_instruction = "Sen bir kripto analisti. Verileri analiz et ve JSON formatında yanıt ver.\n\n"
+            combined_content = system_instruction + content
 
             return [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": content}
+                {"role": "user", "content": combined_content}
             ]
         
         logger.warning("No raw_market_data in nof1 prompt, using fallback")
@@ -284,14 +285,15 @@ class PromptBuilder:
         estimated_tokens = len(prompt_content) // 4
         logger.info("📤 GLM Prompt (fallback): %d chars, ~%d tokens", len(prompt_content), estimated_tokens)
         
-        system_message = (
+        # System instruction'ı user content'in başına ekle (tek mesaj olarak gönder)
+        system_instruction = (
             "Sen AGRESİF ve kar odaklı bir profesyonel kripto para türev piyasası traderısın. "
-            "KRİTİK KURAL: JSON yanıtındaki 'justification' alanı MUTLAKA TÜRKÇE olmalıdır."
+            "KRİTİK KURAL: JSON yanıtındaki 'justification' alanı MUTLAKA TÜRKÇE olmalıdır.\n\n"
         )
-        
+        combined_content = system_instruction + prompt_content
+
         return [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": prompt_content},
+            {"role": "user", "content": combined_content},
         ]
     
     def _build_regular_style_prompt(
@@ -368,6 +370,7 @@ IMPORTANT:
             
             return {
                 "volatility": getattr(self._nof1_prompt_builder, "_current_volatility", None),
+                "atr": getattr(self._nof1_prompt_builder, "_current_atr", None),
                 "atr_pct": getattr(self._nof1_prompt_builder, "_current_atr_pct", None),
                 "vol_ratio": getattr(self._nof1_prompt_builder, "_vol_ratio", None),
                 "atr_ratio": getattr(self._nof1_prompt_builder, "_atr_ratio", None),
@@ -377,6 +380,7 @@ IMPORTANT:
             logger.warning("Failed to get volatility context: %s", e)
             return {
                 "volatility": None,
+                "atr": None,
                 "atr_pct": None,
                 "vol_ratio": None,
                 "atr_ratio": None,

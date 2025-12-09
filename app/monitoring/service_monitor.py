@@ -60,27 +60,62 @@ def get_service_name(interval_key: str, symbol: str) -> str:
     return f"trading-enriched-feed-{symbol_prefix}-{interval_key}"
 
 
-def check_service_status(service_name: str) -> bool:
+def check_service_status(service_name: str, retry_count: int = 2) -> bool:
     """
     Systemd servisinin aktif olup olmadığını kontrol et
     
     Args:
         service_name: Systemd servis adı
+        retry_count: Servis kontrolü için retry sayısı (geçici durumlar için)
         
     Returns:
         True eğer servis aktifse, False değilse
     """
-    try:
-        result = subprocess.run(
-            ["systemctl", "is-active", service_name],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return result.returncode == 0 and result.stdout.strip() == "active"
-    except Exception as exc:
-        logger.error("Failed to check service status for %s: %s", service_name, exc)
-        return False
+    for attempt in range(retry_count + 1):
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", service_name],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            status = result.stdout.strip()
+            
+            # "active" durumu - servis çalışıyor
+            if result.returncode == 0 and status == "active":
+                return True
+            
+            # "activating" durumu - servis başlatılıyor, kısa bir süre bekle ve tekrar kontrol et
+            if status == "activating" and attempt < retry_count:
+                logger.debug(
+                    "Service %s is activating, waiting before retry (attempt %d/%d)",
+                    service_name, attempt + 1, retry_count + 1
+                )
+                time.sleep(2)  # 2 saniye bekle
+                continue
+            
+            # Diğer durumlar (inactive, failed, etc.)
+            if attempt == 0 and retry_count > 0:
+                logger.debug(
+                    "Service %s status: %s, retrying...",
+                    service_name, status
+                )
+                time.sleep(1)
+                continue
+            
+            return False
+            
+        except subprocess.TimeoutExpired:
+            logger.warning("Service status check timeout for %s (attempt %d/%d)", service_name, attempt + 1, retry_count + 1)
+            if attempt < retry_count:
+                time.sleep(1)
+                continue
+            return False
+        except Exception as exc:
+            logger.error("Failed to check service status for %s: %s", service_name, exc)
+            return False
+    
+    return False
 
 
 def check_data_freshness(

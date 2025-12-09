@@ -26,6 +26,7 @@ ta = "^0.11.0"
 anthropic = "^0.75.0"
 fastapi = "^0.115.0"
 uvicorn = {version = "^0.32.0", extras = ["standard"]}
+playwright = "^1.46.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.0"

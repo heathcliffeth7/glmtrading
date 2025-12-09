@@ -1,0 +1,24 @@
+[Unit]
+Description=Qwen WAF Token Refresh Service
+After=network-online.target redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/trading
+EnvironmentFile=/root/trading/.env
+ExecStart=/root/trading/.venv/bin/python -m app.services.qwen_token_service
+Restart=always
+RestartSec=30
+User=root
+
+# Network permissions
+PrivateNetwork=no
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

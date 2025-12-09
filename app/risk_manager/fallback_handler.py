@@ -1,9 +1,9 @@
 """
 Fallback Handler Module
 
-Handles error recovery and fallback decisions when GLM fails:
+Handles error recovery and fallback decisions when LLM fails:
 - Conservative fallback decisions
-- GLM failure notifications
+- LLM failure notifications
 - Translation utilities
 """
 
@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 
 class FallbackHandler:
     """
-    Handles fallback decisions when GLM API is unavailable or fails.
+    Handles fallback decisions when LLM API is unavailable or fails.
     """
 
     def __init__(self, market_analyzer=None):
@@ -38,9 +38,9 @@ class FallbackHandler:
         reason: str
     ) -> RiskDecision:
         """
-        Produce a conservative decision when GLM API fails.
+        Produce a conservative decision when LLM API fails.
 
-        When GLM API is unavailable, we prioritize risk management:
+        When LLM API is unavailable, we prioritize risk management:
         - Default to HOLD to avoid making decisions without AI analysis
         - Only allow trading if there's very strong signal confidence
         - Use reduced position sizes for safety
@@ -50,7 +50,7 @@ class FallbackHandler:
             return RiskDecision(
                 action="HOLD",
                 amount=0.0,
-                reasoning=f"GLM API unavailable and no signals: {reason}",
+                reasoning=f"LLM API unavailable and no signals: {reason}",
                 leverage=5.0,
                 decision_timestamp=datetime.now(timezone.utc),
             )
@@ -58,16 +58,16 @@ class FallbackHandler:
         # Get confidence band from available signals
         band = self._get_confidence_band(signals)
 
-        # Extra conservative approach when GLM is down
+        # Extra conservative approach when LLM is down
         if band["confidence"] < 70.0:
             logger.info(
-                "GLM API down - signal confidence %.1f%% below 70%% threshold → HOLD for safety",
+                "LLM API down - signal confidence %.1f%% below 70%% threshold → HOLD for safety",
                 band["confidence"]
             )
             return RiskDecision(
                 action="HOLD",
                 amount=0.0,
-                reasoning=f"GLM API unavailable - signal confidence too low ({band['confidence']:.1f}% < 70%): {reason}",
+                reasoning=f"LLM API unavailable - signal confidence too low ({band['confidence']:.1f}% < 70%): {reason}",
                 leverage=5.0,
                 decision_timestamp=datetime.now(timezone.utc),
             )
@@ -75,12 +75,12 @@ class FallbackHandler:
         # If confidence is high enough, allow trading but with reduced size
         reduced_amount = min(band["amount"] * 0.5, 0.1)
         reasoning = (
-            f"GLM API down - using reduced position (confidence={band['confidence']:.1f}%, "
+            f"LLM API down - using reduced position (confidence={band['confidence']:.1f}%, "
             f"reduced_amount={reduced_amount:.3f}) | {reason}"
         )
 
         logger.warning(
-            "GLM API down but using fallback trade: action=%s amount=%.3f confidence=%.1f%%",
+            "LLM API down but using fallback trade: action=%s amount=%.3f confidence=%.1f%%",
             band["action"],
             reduced_amount,
             band["confidence"]
@@ -141,13 +141,13 @@ class FallbackHandler:
 
         return {"action": "HOLD", "amount": 0.0, "confidence": max(avg_buy, avg_sell)}
 
-    def notify_glm_failure(
+    def notify_llm_failure(
         self,
         signals: List[Any],
         error: str
     ) -> None:
         """
-        Send Telegram notification when GLM fails.
+        Send Telegram notification when LLM fails.
         """
         try:
             if not telegram_client.enabled():
@@ -161,7 +161,7 @@ class FallbackHandler:
                 signal_summary.append(f"  • {direction} (conf: {conf:.2f})")
 
             message = "\n".join([
-                "🚨 *GLM API ERROR*",
+                "🚨 *LLM API ERROR*",
                 "",
                 "*Error Details:*",
                 f"{format_markdown(error)}",
@@ -170,21 +170,21 @@ class FallbackHandler:
                 "\n".join(signal_summary) if signal_summary else "  No signals",
                 "",
                 "⚠️ *Decision: HOLD (Safe mode)*",
-                "No trading while GLM is unavailable.",
+                "No trading while LLM is unavailable.",
                 "",
                 f"🕒 {datetime.utcnow().isoformat()}",
                 "",
                 "💡 *Action:*",
-                "1. Check GLM API key",
-                "2. Verify GLM service status",
+                "1. Check LLM API key/cookie",
+                "2. Verify LLM service status",
                 "3. Check logs if error persists",
             ])
 
             telegram_client.send_message(message)
-            logger.info("GLM failure notification sent to Telegram")
+            logger.info("LLM failure notification sent to Telegram")
 
         except Exception as exc:
-            logger.error("Failed to send GLM failure notification: %s", exc)
+            logger.error("Failed to send LLM failure notification: %s", exc)
 
     def translate_to_turkish(self, text: str, glm_client=None) -> str:
         """

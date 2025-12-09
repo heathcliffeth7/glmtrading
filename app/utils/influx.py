@@ -40,11 +40,31 @@ def _influx_retry(func):
                 logger.warning("InfluxDB API error (attempt %d/%d): %s", attempt + 1, max_retries, e)
                 time.sleep(retry_delay * (2 ** attempt))
             except Exception as e:
-                if attempt == max_retries - 1:
+                error_str = str(e).lower()
+                # Connection refused hatası için özel mesaj
+                if "connection refused" in error_str or "errno 111" in error_str:
+                    if attempt == max_retries - 1:
+                        logger.error(
+                            "InfluxDB bağlantı hatası: Sunucuya bağlanılamıyor (%s:%s). "
+                            "Lütfen InfluxDB servisinin çalıştığından emin olun: %s",
+                            settings.influx.url.host if hasattr(settings.influx.url, 'host') else str(settings.influx.url),
+                            settings.influx.url.port if hasattr(settings.influx.url, 'port') else '8086',
+                            e
+                        )
+                    else:
+                        logger.warning(
+                            "InfluxDB bağlantı hatası (deneme %d/%d): %s - Tekrar deneniyor...",
+                            attempt + 1, max_retries, e
+                        )
+                elif attempt == max_retries - 1:
                     logger.error("InfluxDB connection error after %d attempts: %s", max_retries, e)
+                else:
+                    logger.warning("InfluxDB connection error (attempt %d/%d): %s", attempt + 1, max_retries, e)
+                
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (2 ** attempt))
+                else:
                     raise
-                logger.warning("InfluxDB connection error (attempt %d/%d): %s", attempt + 1, max_retries, e)
-                time.sleep(retry_delay * (2 ** attempt))
     return wrapper
 
 
@@ -84,7 +104,15 @@ def _ensure_client() -> None:
                 _query_api = _client.query_api()
                 logger.info("InfluxDB client initialized successfully (PID: %d)", __import__('os').getpid())
             except Exception as e:
-                logger.error("Failed to initialize InfluxDB client: %s", e)
+                error_str = str(e).lower()
+                if "connection refused" in error_str or "errno 111" in error_str:
+                    logger.error(
+                        "InfluxDB başlatılamadı: Sunucuya bağlanılamıyor (%s). "
+                        "Lütfen InfluxDB servisinin çalıştığından emin olun: docker-compose up -d influxdb",
+                        settings.influx.url
+                    )
+                else:
+                    logger.error("Failed to initialize InfluxDB client: %s", e)
                 # Reset all state on failure to allow retry
                 _client = None
                 _write_api = None

@@ -469,7 +469,7 @@ class Executor:
                     cooldown_period = 1800  # 30 dakika
                     
                     if time_since_close < cooldown_period:
-                        required_confidence = 85.0
+                        required_confidence = 80.0
                         if decision.glm_confidence < required_confidence:
                             remaining = cooldown_period - time_since_close
                             logger.warning(
