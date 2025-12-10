@@ -195,7 +195,10 @@ class Evaluator:
                 )
             
             if decision.action in ['BUY', 'SELL'] and decision.glm_confidence >= min_confidence:
-                entry_price = signals[0].metadata.get('price', 0) if signals else 0
+                entry_price = (
+                    signals[0].metadata.get('price', 0) if signals
+                    else portfolio_metrics.get('current_price', 0)
+                )
                 atr = volatility_context.get('atr', 0)
                 volatility_regime = volatility_context.get('volatility_regime', 'medium')
                 
@@ -257,7 +260,23 @@ class Evaluator:
                         decision.exit_plan['stop_loss'],
                         signals
                     )
-            
+
+                # Fix: If amount is 0, set default based on confidence ($2000-3000 position @ 10x)
+                if decision.amount < 0.01:  # Less than 1% is effectively zero
+                    # Set default amount based on confidence (equity ratio for $10k account)
+                    if decision.glm_confidence >= 90:
+                        default_amount = 0.30  # $3000 position
+                    elif decision.glm_confidence >= 85:
+                        default_amount = 0.25  # $2500 position
+                    else:  # 80-84
+                        default_amount = 0.20  # $2000 position
+
+                    logger.info(
+                        "📊 Amount was %.4f (too small), setting default: %.4f (GLM confidence %.1f%%)",
+                        decision.amount, default_amount, decision.glm_confidence
+                    )
+                    decision.amount = default_amount
+
             logger.info(
                 "GLM decision: action=%s amount=%.4f leverage=%.2f confidence=%.1f",
                 decision.action,

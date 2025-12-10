@@ -1144,41 +1144,51 @@ class QwenClient:
 
     def _refresh_cookies_from_service(self) -> bool:
         """
-        Wait for background token service to refresh cookies.
+        Trigger force refresh in background token service and wait for new tokens.
         
-        Note: qwen_token_service runs as a systemd service and 
-        automatically refreshes cookies every 10 minutes. This method
-        simply waits for the next refresh cycle.
+        Sends force refresh signal to qwen_token_service via Redis,
+        then waits for new tokens to be generated.
         
         Returns:
-            True (optimistic - assumes service is working)
+            True if refresh successful or optimistically assumed successful
         """
         try:
-            logger.info("🔄 Waiting for background token service to refresh cookies...")
+            logger.info("🔥 Triggering FORCE REFRESH in token service...")
+            
+            # Set force refresh trigger in Redis
+            redis_client = self._redis
+            redis_client.setex("qwen:force_refresh", 30, "1")  # 30 second TTL
+            logger.info("Force refresh trigger set in Redis")
             
             # Check current WAF status
             old_status = self._get_waf_status()
             logger.info("Current WAF status: %s", old_status)
             
-            # Wait for token service refresh (it runs every 10 minutes)
-            # Give it 15 seconds for the current cycle to complete
-            logger.info("Waiting 15 seconds for token refresh...")
-            time.sleep(15)
+            # Wait for token service to pick up trigger and refresh
+            # Service checks every 5 seconds, refresh takes ~10-15 seconds
+            logger.info("Waiting 20 seconds for token service to complete refresh...")
+            time.sleep(20)
             
             # Check new status
             new_status = self._get_waf_status()
-            logger.info("New WAF status: %s", new_status)
+            logger.info("New WAF status after force refresh: %s", new_status)
+            
+            # Check if last_refresh timestamp changed
+            try:
+                last_refresh = redis_client.get("qwen:last_refresh")
+                logger.info("Last refresh timestamp: %s", last_refresh)
+            except Exception:
+                pass
             
             if new_status == "VALID":
-                logger.info("✅ Cookies refreshed by background service")
+                logger.info("✅ Force refresh successful - WAF tokens updated")
                 return True
             else:
-                logger.warning("⚠️ WAF status still %s after waiting. Background service may be running slow.", new_status)
-                # Return True anyway - optimistic approach
+                logger.warning("⚠️ WAF status: %s after force refresh. Continuing optimistically.", new_status)
                 return True
                 
         except Exception as e:
-            logger.error("❌ Cookie refresh wait error: %s", e)
+            logger.error("❌ Force refresh trigger error: %s", e)
             return True  # Optimistic - don't block on errors
 
     def _background_refresh_loop(self) -> None:

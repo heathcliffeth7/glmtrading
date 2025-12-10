@@ -337,7 +337,7 @@ class AppSettings(BaseSettings):
     # SWING TRADE SETTINGS
     # =========================================================================
     swing_trade_mode: bool = Field(True, alias="SWING_TRADE_MODE")
-    swing_max_leverage: int = Field(7, alias="SWING_MAX_LEVERAGE")
+    swing_max_leverage: int = Field(10, alias="SWING_MAX_LEVERAGE")
     swing_primary_timeframe: str = Field("4h", alias="SWING_PRIMARY_TIMEFRAME")
 
     # Performance Tracking Override

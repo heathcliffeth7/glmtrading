@@ -35,6 +35,7 @@ class QwenTokenService:
     TOKEN_TTL = 1500            # 25 minutes (tokens valid ~20-30min)
     STATUS_TTL = 1800           # 30 minutes
     MAX_RETRIES = 3
+    FORCE_REFRESH_CHECK_INTERVAL = 5  # Check for force refresh every 5 seconds
 
     REDIS_KEYS = {
         "bx_ua": "qwen:bx_ua",
@@ -43,6 +44,7 @@ class QwenTokenService:
         "last_refresh": "qwen:last_refresh",
         "status": "qwen:token_status",
         "error": "qwen:error_message",
+        "force_refresh": "qwen:force_refresh",  # Trigger key for immediate refresh
     }
 
     def __init__(self):
@@ -55,22 +57,53 @@ class QwenTokenService:
         logger.info("Qwen Token Service Starting")
         logger.info("=" * 60)
         logger.info("Refresh interval: %ds, Token TTL: %ds", self.REFRESH_INTERVAL, self.TOKEN_TTL)
+        logger.info("Force refresh check interval: %ds", self.FORCE_REFRESH_CHECK_INTERVAL)
 
         self._running = True
 
         # Initial refresh
         await self._refresh_with_retry()
 
-        # Continuous refresh loop
+        # Continuous refresh loop with force refresh support
+        seconds_since_refresh = 0
         while self._running:
-            logger.info("Sleeping %ds until next refresh...", self.REFRESH_INTERVAL)
-            await asyncio.sleep(self.REFRESH_INTERVAL)
-            await self._refresh_with_retry()
+            await asyncio.sleep(self.FORCE_REFRESH_CHECK_INTERVAL)
+            seconds_since_refresh += self.FORCE_REFRESH_CHECK_INTERVAL
+            
+            # Check for force refresh trigger
+            if self._check_force_refresh():
+                logger.info("🔥 Force refresh triggered!")
+                await self._refresh_with_retry()
+                seconds_since_refresh = 0
+                continue
+            
+            # Regular interval refresh
+            if seconds_since_refresh >= self.REFRESH_INTERVAL:
+                logger.info("⏰ Scheduled refresh")
+                await self._refresh_with_retry()
+                seconds_since_refresh = 0
 
     async def stop(self):
         """Stop the service gracefully."""
         logger.info("Stopping Qwen Token Service...")
         self._running = False
+    
+    def _check_force_refresh(self) -> bool:
+        """Check if force refresh was triggered via Redis."""
+        try:
+            redis = get_redis_client()
+            trigger = redis.get(self.REDIS_KEYS["force_refresh"])
+            
+            if trigger:
+                # Delete trigger key immediately to prevent repeated refreshes
+                redis.delete(self.REDIS_KEYS["force_refresh"])
+                logger.info("Force refresh trigger found and cleared")
+                return True
+            
+            return False
+        except Exception as e:
+            logger.warning("Failed to check force refresh trigger: %s", e)
+            return False
 
     async def _refresh_with_retry(self):
         """Refresh tokens with retry logic."""
