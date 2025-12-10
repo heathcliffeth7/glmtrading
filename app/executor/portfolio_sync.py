@@ -325,7 +325,7 @@ def sync_portfolio_with_trades(session: Session, symbol: str) -> Portfolio:
 
     # Keep lock waits bounded and give heavier work enough headroom.
     try:
-        session.execute(text("SET LOCAL lock_timeout = '1s'"))
+        session.execute(text("SET LOCAL lock_timeout = '5s'"))
         session.execute(text("SET LOCAL statement_timeout = '60s'"))
     except Exception:
         logger.debug("Could not set local DB timeouts for portfolio sync")
@@ -338,7 +338,7 @@ def sync_portfolio_with_trades(session: Session, symbol: str) -> Portfolio:
         )
     except OperationalError as e:
         session.rollback()
-        logger.warning("Advisory lock busy, skipping sync for %s: %s", symbol, e)
+        logger.info("Advisory lock busy, skipping sync for %s (normal during concurrent operations)", symbol)
         return _fallback_portfolio()
     except Exception as e:
         session.rollback()
