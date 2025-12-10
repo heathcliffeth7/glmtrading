@@ -1013,11 +1013,16 @@ class QwenClient:
                             logger.info("🔄 Retrying with new chat ID in %.1fs...", delay)
                             time.sleep(delay)
                             
-                            # Update chat_id_to_use for next attempt
+                            # ALWAYS create new chat on chat_not_exist error
                             if symbol and settings.qwen.enable_chat_id_management:
                                 chat_id_to_use = self._get_or_create_chat_id(symbol)
-                                endpoint = f"{self.BASE_URL}/api/v2/chat/completions?chat_id={chat_id_to_use}"
-                                payload["chat_id"] = chat_id_to_use
+                            else:
+                                # Force create new chat even if management disabled
+                                chat_id_to_use = self._create_new_chat()
+                                logger.info("Created new chat (forced): %s", chat_id_to_use[:16])
+                            
+                            endpoint = f"{self.BASE_URL}/api/v2/chat/completions?chat_id={chat_id_to_use}"
+                            payload["chat_id"] = chat_id_to_use
                             
                             continue
                     
@@ -1050,7 +1055,7 @@ class QwenClient:
                     # Auth errors - try auto-refresh once
                     if status in [401, 403]:
                         # Invalidate chat ID on auth errors
-                        if symbol and settings.qwen.enable_chat_id_management:
+                        if symbol:
                             self._invalidate_chat_id(symbol)
                         
                         if self._auto_refresh_enabled and self._retry_after_refresh and not self._refresh_attempted:
@@ -1061,11 +1066,15 @@ class QwenClient:
                                 logger.info("🔄 Cookie yenilendi, request tekrar deneniyor...")
                                 time.sleep(3)
                                 
-                                # Get new chat ID if symbol exists
+                                # ALWAYS create new chat after refresh
                                 if symbol and settings.qwen.enable_chat_id_management:
                                     chat_id_to_use = self._get_or_create_chat_id(symbol)
-                                    endpoint = f"{self.BASE_URL}/api/v2/chat/completions?chat_id={chat_id_to_use}"
-                                    payload["chat_id"] = chat_id_to_use
+                                else:
+                                    chat_id_to_use = self._create_new_chat()
+                                    logger.info("Created new chat (forced): %s", chat_id_to_use[:16])
+                                
+                                endpoint = f"{self.BASE_URL}/api/v2/chat/completions?chat_id={chat_id_to_use}"
+                                payload["chat_id"] = chat_id_to_use
                                 
                                 continue
                             else:
