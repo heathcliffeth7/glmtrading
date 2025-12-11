@@ -154,10 +154,28 @@ class Evaluator:
             
             decision.decision_timestamp = datetime.now(timezone.utc)
             decision.market_snapshot_timestamp = market_snapshot_timestamp
-            
+
+            # Prompt'u decision'a ekle (CSV export için)
+            try:
+                if isinstance(prompt_messages, list):
+                    decision.prompt_sent = "\n".join(
+                        f"[{m.get('role', 'unknown')}]\n{m.get('content', '')}"
+                        for m in prompt_messages if isinstance(m, dict)
+                    )
+                    logger.info("📝 prompt_sent set: %d chars (list with %d items)",
+                               len(decision.prompt_sent) if decision.prompt_sent else 0,
+                               len(prompt_messages))
+                elif isinstance(prompt_messages, str):
+                    decision.prompt_sent = prompt_messages
+                    logger.info("📝 prompt_sent (str) set: %d chars", len(decision.prompt_sent))
+                else:
+                    logger.warning("⚠️ prompt_messages type unexpected: %s", type(prompt_messages))
+            except Exception as pe:
+                logger.warning("Failed to attach prompt to decision: %s", pe, exc_info=True)
+
             if '_glm_latency_ms' in response:
                 decision.glm_response_time_ms = response['_glm_latency_ms']
-                logger.info("✅ GLM latency captured: %.0fms", decision.glm_response_time_ms)
+                logger.info("✅ LLM latency captured: %.0fms", decision.glm_response_time_ms)
             
             decision = self._attach_context(decision, volatility_context, market_snapshot_timestamp)
             

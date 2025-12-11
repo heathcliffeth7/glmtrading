@@ -1,9 +1,12 @@
 """Trades API Routes"""
+import csv
+import io
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
 import numpy as np
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -188,6 +191,7 @@ async def get_trades(
             timestamp=t.timestamp.isoformat() if t.timestamp else "",
             close_time=t.close_time.isoformat() if t.close_time else None,
             exit_plan=exit_plan,
+            exit_reasoning=t.exit_reasoning,
             is_partial_close=is_partial_close,
             action_label=action_label,
             remaining_amount=remaining_amount,
@@ -279,6 +283,94 @@ async def get_pnl_histogram(
             max_loss=round(min(pnls), 2),
             profit_factor=round(profit_factor, 2),
         ),
+    )
+
+
+@router.get("/export/csv")
+async def export_trades_csv(
+    symbol: Optional[str] = Query(None, description="Filter by symbol"),
+    status: str = Query("all", regex="^(open|closed|all)$", description="Trade status filter"),
+    days: int = Query(30, ge=1, le=365, description="Days of history"),
+    db: Session = Depends(get_db)
+):
+    """Export trades to CSV file"""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    query = db.query(Trade).filter(Trade.timestamp >= cutoff)
+
+    if symbol:
+        query = query.filter(Trade.symbol == symbol.upper())
+
+    if status == "open":
+        query = query.filter(Trade.close_price.is_(None))
+    elif status == "closed":
+        query = query.filter(Trade.close_price.isnot(None))
+
+    trades = query.order_by(Trade.timestamp.desc()).all()
+
+    # CSV oluştur
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Header
+    writer.writerow([
+        "ID", "Position ID", "Symbol", "Side", "Position Side",
+        "Amount", "Entry Price", "Exit Price", "PnL", "PnL %",
+        "Leverage", "Fees", "Entry Time", "Exit Time",
+        "Entry Reasoning", "Entry Prompt", "Exit Reasoning", "Exit Prompt"
+    ])
+
+    # Data rows
+    for t in trades:
+        pnl_pct = None
+        if t.pnl and t.price and t.amount:
+            position_value = t.price * t.amount
+            if position_value > 0:
+                pnl_pct = round((t.pnl / position_value) * 100, 2)
+
+        # Entry reasoning: exit_plan içindeki reasoning veya entry_reasoning alanı
+        entry_reasoning = ""
+        if t.exit_plan and isinstance(t.exit_plan, dict):
+            entry_reasoning = t.exit_plan.get("reasoning", "")
+        if not entry_reasoning and t.entry_reasoning:
+            entry_reasoning = t.entry_reasoning
+
+        # Entry prompt
+        entry_prompt = t.entry_prompt or ""
+
+        # Exit reasoning: exit_reasoning alanı
+        exit_reasoning = t.exit_reasoning or ""
+
+        # Exit prompt
+        exit_prompt = t.exit_prompt or ""
+
+        writer.writerow([
+            t.id,
+            t.position_id or "",
+            t.symbol,
+            t.side,
+            t.position_side or "",
+            t.amount,
+            t.price,
+            t.close_price or "",
+            t.pnl or 0,
+            pnl_pct or "",
+            t.leverage or 1,
+            t.fees or 0,
+            t.timestamp.isoformat() if t.timestamp else "",
+            t.close_time.isoformat() if t.close_time else "",
+            entry_reasoning,
+            entry_prompt,
+            exit_reasoning,
+            exit_prompt
+        ])
+
+    output.seek(0)
+    filename = f"trades_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
 

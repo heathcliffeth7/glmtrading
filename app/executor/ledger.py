@@ -35,6 +35,8 @@ class Trade(Base):
     exit_plan_history = Column(JSON, nullable=True)  # Tüm exit plan güncellemelerin logu: {"updates": [...]}
     entry_reasoning = Column(String(1000), nullable=True)  # Pozisyon açılış gerekçesi
     exit_reasoning = Column(String(1000), nullable=True)  # Pozisyon kapanış gerekçesi
+    entry_prompt = Column(String(10000), nullable=True)  # GLM'e gönderilen açılış prompt'u
+    exit_prompt = Column(String(10000), nullable=True)  # GLM'e gönderilen kapanış prompt'u
     timestamp = Column(DateTime, default=datetime.utcnow)
 
 
@@ -301,10 +303,11 @@ def record_trade(
     position_id: Optional[str] = None,
     exit_plan: Optional[dict] = None,
     entry_reasoning: Optional[str] = None,
+    entry_prompt: Optional[str] = None,
 ) -> Trade:
     """
     Record a trade
-    
+
     Args:
         side: Trade direction (BUY/SELL)
         position_side: Position type (LONG/SHORT) - for futures
@@ -312,10 +315,11 @@ def record_trade(
         fees: İşlem ücreti
         close_price: If position is being closed, set this to the closing price.
                      If None, position is still open (or being opened/increased).
+        entry_prompt: GLM'e gönderilen açılış prompt'u
     """
     # Standardize notional as unleveraged position value (amount × price)
     notional_value = price * amount if price and amount else None
-    
+
     trade = Trade(
         position_id=position_id,
         symbol=symbol,
@@ -330,6 +334,7 @@ def record_trade(
         pnl=pnl,
         exit_plan=exit_plan,
         entry_reasoning=entry_reasoning[:1000] if entry_reasoning else None,
+        entry_prompt=entry_prompt[:10000] if entry_prompt else None,
     )
     session.add(trade)
     return trade
@@ -343,17 +348,19 @@ def close_open_trades(
     close_price: float,
     taker_fee_rate: float | None = None,
     exit_reasoning: str | None = None,
+    exit_prompt: str | None = None,
 ) -> tuple[int, float, float]:
     """
     FIFO mantığıyla açık pozisyonları kapat ve close_price'larını güncelle.
-    
+
     Args:
         symbol: Sembol (örn: BTCUSDT)
         close_side: Kapanış trade'inin yönü (BUY, SELL veya CLOSE)
                    CLOSE gelirse tüm açık trade'leri kapatır
         close_amount: Kapatılan miktar
         close_price: Kapanış fiyatı
-    
+        exit_prompt: GLM'e gönderilen kapanış prompt'u
+
     Returns:
         Tuple(updated_trade_count, realized_pnl_delta, total_closing_fee)
     """
@@ -433,6 +440,8 @@ def close_open_trades(
             trade.pnl = new_pnl
             if exit_reasoning:
                 trade.exit_reasoning = exit_reasoning[:1000]  # Truncate to 1000 chars
+            if exit_prompt:
+                trade.exit_prompt = exit_prompt[:10000]  # Truncate to 10000 chars
         else:
             # Kısmi kapanış: mevcut kaydı kalan miktarla açık bırak, kapanan kısmı yeni kayıt olarak ekle
             open_remainder = original_amount - close_part
@@ -461,7 +470,9 @@ def close_open_trades(
                 fees=closed_open_fee + closing_fee,
                 pnl=new_pnl,
                 timestamp=trade.timestamp,
+                entry_prompt=trade.entry_prompt,  # Orijinal entry prompt'u kopyala
                 exit_reasoning=exit_reasoning[:1000] if exit_reasoning else None,
+                exit_prompt=exit_prompt[:10000] if exit_prompt else None,
             )
             session.add(closed_trade)
 

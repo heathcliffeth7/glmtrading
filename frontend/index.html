@@ -65,13 +65,17 @@
         .trade-tooltip {
             position: fixed;
             z-index: 9999;
-            max-width: 400px;
-            padding: 12px 16px;
+            max-width: 500px;
+            min-width: 350px;
+            max-height: 70vh;
+            overflow-y: auto;
+            padding: 16px 20px;
+            padding-top: 36px;
             background: #10121a;
             border: 1px solid #283139;
             border-radius: 12px;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-            pointer-events: none;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+            pointer-events: auto;
             opacity: 0;
             transform: translateY(4px);
             transition: opacity 0.15s ease, transform 0.15s ease;
@@ -143,6 +147,26 @@
         }
         .trade-row-hoverable:hover {
             background-color: rgba(255, 255, 255, 0.03);
+        }
+        .trade-tooltip-close {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(255,255,255,0.1);
+            border-radius: 50%;
+            cursor: pointer;
+            color: #8a8a8a;
+            font-size: 14px;
+            transition: all 0.15s ease;
+        }
+        .trade-tooltip-close:hover {
+            background: rgba(255,255,255,0.2);
+            color: #fff;
         }
     </style>
 </head>
@@ -289,7 +313,13 @@
 </div>
 </div>
 <div class="w-full">
-<h3 class="text-text-light text-lg font-bold leading-tight tracking-[-0.015em] pb-2 pt-4">Recent Trades</h3>
+<div class="flex items-center justify-between pb-2 pt-4">
+<h3 class="text-text-light text-lg font-bold leading-tight tracking-[-0.015em]">Recent Trades</h3>
+<button onclick="downloadTradesCSV()" class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-colors">
+<span class="material-symbols-outlined text-base">download</span>
+<span>CSV İndir</span>
+</button>
+</div>
 <div class="bg-panel-dark rounded-xl border border-border-dark overflow-x-auto">
 <table class="w-full text-sm text-left text-text-secondary">
 <thead class="text-xs text-text-secondary uppercase bg-panel-dark">
@@ -584,9 +614,16 @@ function showReasoningTooltip(event, signal, trade) {
         }
     }
 
+    // Kapanış gerekçesi (exit_reasoning)
+    const exitReasoning = trade.exit_reasoning || '';
+    const isClosed = !!trade.close_price;
+
     const tooltip = document.createElement('div');
     tooltip.className = 'trade-tooltip';
     tooltip.innerHTML = `
+        <!-- Close Button -->
+        <div class="trade-tooltip-close" onclick="hideReasoningTooltip()">✕</div>
+
         <!-- Header -->
         <div class="trade-tooltip-section">
             <div class="trade-tooltip-row">
@@ -644,29 +681,39 @@ function showReasoningTooltip(event, signal, trade) {
         ` : ''}`}
 
         ${reasoning ? `
-        <!-- Gerekçe (Reasoning) -->
+        <!-- Giriş Gerekçesi (Entry Reasoning) -->
         <div class="trade-tooltip-section">
-            <div class="trade-tooltip-label" style="margin-bottom: 6px;">Gerekçe</div>
-            <div class="trade-tooltip-content" style="max-height: 150px; overflow-y: auto;">${reasoning}</div>
+            <div class="trade-tooltip-label" style="margin-bottom: 6px;">Giriş Gerekçesi</div>
+            <div class="trade-tooltip-content" style="max-height: 300px; overflow-y: auto;">${reasoning}</div>
+        </div>
+        ` : ''}
+
+        ${isClosed && exitReasoning ? `
+        <!-- Kapanış Gerekçesi (Exit Reasoning) -->
+        <div class="trade-tooltip-section">
+            <div class="trade-tooltip-label" style="margin-bottom: 6px; color: #6366f1;">Kapanış Gerekçesi</div>
+            <div class="trade-tooltip-content" style="max-height: 300px; overflow-y: auto; border-left: 2px solid #6366f1; padding-left: 8px;">${exitReasoning}</div>
         </div>
         ` : ''}
     `;
     document.body.appendChild(tooltip);
     activeTooltip = tooltip;
 
-    // Position tooltip near cursor
-    const rect = event.target.closest('tr').getBoundingClientRect();
+    // Position tooltip - center on screen for better visibility
     const tooltipRect = tooltip.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
 
-    let left = event.clientX + 10;
-    let top = rect.top - tooltipRect.height - 8;
+    // Center horizontally, position in upper half of screen
+    let left = Math.max(20, (viewportWidth - tooltipRect.width) / 2);
+    let top = Math.max(20, (viewportHeight - tooltipRect.height) / 3);
 
-    // Adjust if tooltip goes off screen
-    if (left + tooltipRect.width > window.innerWidth) {
-        left = window.innerWidth - tooltipRect.width - 10;
+    // Make sure it doesn't go off screen
+    if (left + tooltipRect.width > viewportWidth - 20) {
+        left = viewportWidth - tooltipRect.width - 20;
     }
-    if (top < 10) {
-        top = rect.bottom + 8;
+    if (top + tooltipRect.height > viewportHeight - 20) {
+        top = viewportHeight - tooltipRect.height - 20;
     }
 
     tooltip.style.left = `${left}px`;
@@ -1065,9 +1112,10 @@ function updateTradesTable(trades) {
         `;
     }).join('');
 
-    // Add hover event listeners for tooltip - use trade's exit_plan data directly
+    // Add click event listeners for tooltip - use trade's exit_plan data directly
     tbody.querySelectorAll('.trade-row-hoverable').forEach(row => {
-        row.addEventListener('mouseenter', (e) => {
+        row.addEventListener('click', (e) => {
+            e.stopPropagation();
             const tradeIndex = parseInt(row.dataset.tradeIndex);
             if (isNaN(tradeIndex) || !cachedTrades[tradeIndex]) return;
 
@@ -1075,11 +1123,22 @@ function updateTradesTable(trades) {
             // Signal aramaya gerek yok - trade.exit_plan verisini doğrudan kullan
             showReasoningTooltip(e, null, trade);
         });
-        row.addEventListener('mouseleave', () => {
-            hideReasoningTooltip();
-        });
     });
 }
+
+// Close tooltip when clicking outside
+document.addEventListener('click', (e) => {
+    if (activeTooltip && !activeTooltip.contains(e.target) && !e.target.closest('.trade-row-hoverable')) {
+        hideReasoningTooltip();
+    }
+});
+
+// Close tooltip with Escape key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && activeTooltip) {
+        hideReasoningTooltip();
+    }
+});
 
 // Fetch equity curve
 async function fetchEquityCurve(days = 30, symbol = null) {
@@ -1193,6 +1252,17 @@ function filterBySymbol(symbol) {
     if (portfolioData) {
         updatePortfolioUIForSymbol(symbol);
     }
+}
+
+// Download trades as CSV
+function downloadTradesCSV() {
+    let url = `${API_BASE}/api/trades/export/csv?days=30&status=all`;
+    if (currentSymbol) {
+        url += `&symbol=${currentSymbol}`;
+    }
+
+    // Yeni sekme/pencerede aç (download tetikler)
+    window.open(url, '_blank');
 }
 
 // Update portfolio UI for specific symbol or all

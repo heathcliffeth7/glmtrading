@@ -127,6 +127,8 @@ class ExitManager:
         )
 
         # Update existing trades (no new trade created for CLOSE)
+        exit_prompt_value = getattr(decision, 'prompt_sent', None)
+        logger.info("📝 CLOSE (exit_manager): exit_prompt length=%d", len(exit_prompt_value) if exit_prompt_value else 0)
         updated_count, realized_delta, closing_fee_total = close_open_trades(
             session=session,
             symbol=self._symbol,
@@ -135,6 +137,7 @@ class ExitManager:
             close_price=eff_price,
             taker_fee_rate=self._taker_fee_rate,
             exit_reasoning=decision.reasoning,
+            exit_prompt=exit_prompt_value,
         )
 
         if updated_count == 0:
@@ -334,6 +337,7 @@ class ExitManager:
                     close_amount=btc_amount,
                     close_price=eff_price,
                     taker_fee_rate=self._taker_fee_rate,
+                    exit_reasoning=f"Exit plan: {trigger_type} - {reason}",
                 )
 
                 if updated_count == 0:
@@ -478,6 +482,7 @@ class ExitManager:
                     close_amount=actual_close_qty,
                     close_price=close_price,
                     taker_fee_rate=self._taker_fee_rate,
+                    exit_reasoning=f"Partial close TP{tp_level}: {reason}",
                 )
 
                 if updated_count == 0:
@@ -770,6 +775,7 @@ class ExitManager:
                 close_amount=position_amount,
                 close_price=current_price,
                 taker_fee_rate=self._taker_fee_rate,
+                exit_reasoning=f"Trigger: {trigger_type}",
             )
 
             if updated_count > 0:

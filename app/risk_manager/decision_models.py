@@ -53,9 +53,10 @@ class RiskDecision:
     glm_response_time_ms: float = 0.0  # GLM API response time in milliseconds
     exit_plan: Optional[dict] = None   # GLM's exit plan: {profit_target, stop_loss, invalidation_condition}
     close_side: Optional[str] = None   # "LONG" or "SHORT" (for CLOSE action)
-    glm_response_json: Optional[dict] = None  # GLM response JSON for Telegram notification
+    glm_response_json: Optional[dict] = None  # LLM response JSON for Telegram notification
+    prompt_sent: Optional[str] = None  # LLM'e gönderilen prompt
 
-    # Exit validation for CLOSE decisions (GLM Elite Swing Trader)
+    # Exit validation for CLOSE decisions
     exit_validation: Optional[str] = None  # SL_HIT, TP_HIT, THESIS_INVALID, or N/A
 
     # Timing and staleness detection

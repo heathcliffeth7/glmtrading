@@ -671,7 +671,9 @@ class Executor:
                 except Exception:
                     return None
             stop_loss_val = _is_number(exit_plan.get("stop_loss") if exit_plan else None)
-            profit_target_val = _is_number(exit_plan.get("profit_target") if exit_plan else None)
+            profit_target_val = _is_number(
+                exit_plan.get("profit_target") or exit_plan.get("take_profit") if exit_plan else None
+            )
             if (
                 not exit_plan
                 or stop_loss_val is None
@@ -737,6 +739,7 @@ class Executor:
             price=price, pnl=pnl, leverage=leverage, fees=fee, position_side=position_side,
             position_id=current_position_id, exit_plan=exit_plan,
             entry_reasoning=decision.reasoning,
+            entry_prompt=getattr(decision, 'prompt_sent', None),
         )
         session.flush()
 
@@ -1199,6 +1202,8 @@ class Executor:
         
         # Sadece mevcut trade'leri güncelle (YENİ TRADE YOK!)
         # close_open_trades artık "CLOSE" action'ını da destekliyor
+        exit_prompt_value = getattr(decision, 'prompt_sent', None)
+        logger.info("📝 CLOSE: exit_prompt length=%d", len(exit_prompt_value) if exit_prompt_value else 0)
         updated_count, realized_delta, closing_fee_total = close_open_trades(
             session=session,
             symbol=self._symbol,
@@ -1207,6 +1212,7 @@ class Executor:
             close_price=eff_price,
             taker_fee_rate=self._taker_fee_rate,
             exit_reasoning=decision.reasoning,
+            exit_prompt=exit_prompt_value,
         )
         
         # Duplicate close prevention - if no trades were updated, position already closed
@@ -1422,6 +1428,7 @@ class Executor:
                     close_amount=btc_amount,
                     close_price=eff_price,
                     taker_fee_rate=self._taker_fee_rate,
+                    exit_reasoning=f"Exit plan: {trigger_type} - {reason}",
                 )
 
                 # Duplicate close prevention - if no trades were updated, position already closed
@@ -1559,6 +1566,7 @@ class Executor:
                     close_amount=actual_close_qty,
                     close_price=close_price,
                     taker_fee_rate=self._taker_fee_rate,
+                    exit_reasoning=f"Partial close TP{tp_level}: {reason}",
                 )
 
                 if updated_count == 0:
