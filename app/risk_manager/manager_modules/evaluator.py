@@ -13,6 +13,7 @@ from app.risk_manager.risk_controls import (
     SafetyLimits,
 )
 from app.risk_manager.tp_sl_calculator import TPSLCalculator
+from app.risk_manager.hard_veto import check_market_conditions_veto
 from app.utils.logging import get_logger
 from app.utils.runtime_tracker import RuntimeTracker
 
@@ -192,7 +193,17 @@ class Evaluator:
                 )
             
             decision = SafetyLimits.apply(decision, portfolio_metrics)
-            
+
+            # Extract market data for veto/penalty checks
+            market_data_for_veto = self._extract_market_data_for_veto(signals, volatility_context)
+
+            # STEP 1: Hard veto check (ADX + Volume + Trend)
+            decision = self._check_hard_veto(decision, market_data_for_veto)
+
+            # STEP 2: Apply confidence penalties (ADX + Volume + Trend)
+            if decision.action in ['BUY', 'SELL']:  # Only if not already vetoed
+                decision = self._apply_confidence_penalties(decision, market_data_for_veto)
+
             original_action = decision.action
             decision = self._apply_consistency_validation(decision, original_action)
             decision = self._enforce_confidence_threshold(decision, volatility_context["volatility_regime"])
@@ -566,6 +577,217 @@ class Evaluator:
             else:
                 return f"15m candle closes above ${stop_loss:.2f} (stop loss)"
     
+    def _apply_confidence_penalties(
+        self,
+        decision: RiskDecision,
+        market_data: dict,
+    ) -> RiskDecision:
+        """
+        GLM confidence'ını market koşullarına göre düzelt.
+
+        ADX, Volume ve Trend Strength bazlı cezalar uygular.
+
+        Args:
+            decision: GLM'den gelen karar
+            market_data: Market verileri (adx, volume_ratio, trend_strength)
+
+        Returns:
+            Düzeltilmiş confidence ile karar
+        """
+        if decision.action not in ['BUY', 'SELL']:
+            return decision
+
+        original_confidence = decision.glm_confidence
+        penalties = []
+
+        adx = market_data.get('adx', 25.0)
+        vol_ratio = market_data.get('volume_ratio', 1.0)
+        trend_strength = market_data.get('trend_strength', 'MODERATE')
+
+        # Normalize values
+        adx = float(adx) if adx is not None else 25.0
+        vol_ratio = float(vol_ratio) if vol_ratio is not None else 1.0
+
+        # =====================================================================
+        # ADX-based penalties
+        # =====================================================================
+        if adx < 15:
+            penalties.append(("ADX < 15 (no trend)", -30))
+        elif adx < 20:
+            penalties.append(("ADX < 20 (ranging)", -25))
+        elif adx < 25:
+            penalties.append(("ADX < 25 (weak trend)", -15))
+
+        # =====================================================================
+        # Volume-based penalties (threshold raised from 0.3 to 0.4)
+        # =====================================================================
+        if vol_ratio < 0.4:
+            penalties.append(("Volume < 0.4 (illiquid)", -25))
+        elif vol_ratio < 0.5:
+            penalties.append(("Volume < 0.5 (low)", -20))
+        elif vol_ratio < 0.7:
+            penalties.append(("Volume < 0.7 (below avg)", -10))
+
+        # =====================================================================
+        # R:R Ratio penalties
+        # =====================================================================
+        rr_ratio = market_data.get('rr_ratio', 2.0)
+        rr_ratio = float(rr_ratio) if rr_ratio is not None else 2.0
+
+        if rr_ratio < 1.0:
+            penalties.append((f"R:R {rr_ratio:.2f} < 1:1 (bad)", -25))
+        elif rr_ratio < 1.5:
+            penalties.append((f"R:R {rr_ratio:.2f} < 1.5:1 (weak)", -10))
+
+        # =====================================================================
+        # Trend strength penalties
+        # =====================================================================
+        if trend_strength == 'WEAK':
+            penalties.append(("WEAK trend", -20))
+        elif trend_strength == 'MODERATE':
+            penalties.append(("MODERATE trend", -10))
+        # STRONG trend = no penalty
+
+        # Apply penalties
+        total_penalty = sum(p[1] for p in penalties)
+        new_confidence = max(0.0, original_confidence + total_penalty)
+
+        if penalties:
+            penalty_str = ", ".join(f"{name}={val}" for name, val in penalties)
+            logger.warning(
+                "📉 Confidence penalty applied: %.1f → %.1f (total: %d) | %s",
+                original_confidence, new_confidence, total_penalty, penalty_str
+            )
+            decision.glm_confidence = new_confidence
+            decision.reasoning = (
+                f"{decision.reasoning} | Confidence adjusted: "
+                f"{original_confidence:.0f}% → {new_confidence:.0f}% (penalties: {total_penalty})"
+            )
+
+        return decision
+
+    def _check_hard_veto(
+        self,
+        decision: RiskDecision,
+        market_data: dict,
+    ) -> RiskDecision:
+        """
+        Hard veto kontrolü - ADX/Volume/Trend bazlı.
+
+        Belirli koşullarda GLM kararından bağımsız HOLD'a zorlar.
+
+        Args:
+            decision: GLM'den gelen karar
+            market_data: Market verileri (adx, volume_ratio, trend_strength)
+
+        Returns:
+            Veto uygulanmışsa HOLD kararı, değilse orijinal karar
+        """
+        if decision.action not in ['BUY', 'SELL']:
+            return decision
+
+        should_veto, veto_reason = check_market_conditions_veto(market_data)
+
+        if should_veto:
+            logger.warning(
+                "🚫 HARD VETO: %s → %s | Forcing HOLD",
+                decision.action, veto_reason
+            )
+
+            return RiskDecision(
+                action="HOLD",
+                amount=0.0,
+                reasoning=f"{veto_reason} | Original: {decision.action} ({decision.glm_confidence:.0f}% conf)",
+                leverage=decision.leverage,
+                glm_confidence=0.0,
+                reason_primary="HARD_VETO",
+                reason_secondary=veto_reason,
+                glm_response_time_ms=decision.glm_response_time_ms,
+                exit_plan=None,
+                decision_timestamp=decision.decision_timestamp,
+                market_snapshot_timestamp=decision.market_snapshot_timestamp,
+                context_volatility=decision.context_volatility,
+                context_atr_pct=decision.context_atr_pct,
+                context_vol_ratio=decision.context_vol_ratio,
+                context_atr_ratio=decision.context_atr_ratio,
+                thought_process=decision.thought_process,
+                volatility_regime=decision.volatility_regime,
+            )
+
+        return decision
+
+    def _extract_market_data_for_veto(
+        self,
+        signals: List[AgentSignal],
+        volatility_context: dict,
+    ) -> dict:
+        """
+        Signal ve volatility context'ten veto kontrolü için market data çıkar.
+
+        Args:
+            signals: Agent sinyalleri
+            volatility_context: Volatility context dict
+
+        Returns:
+            Market data dict (adx, volume_ratio, trend_strength)
+        """
+        market_data = {
+            'adx': 25.0,
+            'volume_ratio': 1.0,
+            'trend_strength': 'MODERATE',
+            'logic_gates_risk_count': 0,
+            'rr_ratio': 2.0,  # Default good R:R
+        }
+
+        if not signals:
+            return market_data
+
+        # Extract from signal metadata
+        metadata = signals[0].metadata or {}
+        raw_market_data = metadata.get('raw_market_data', {})
+        current_snapshots = raw_market_data.get('current_snapshots', {})
+        snapshot_4h = current_snapshots.get('4h', {})
+
+        # ADX - handle both list and single float values
+        adx_values = snapshot_4h.get('adx_14', [])
+        if isinstance(adx_values, (list, tuple)) and len(adx_values) > 0:
+            market_data['adx'] = float(adx_values[-1])
+        elif isinstance(adx_values, (int, float)):
+            market_data['adx'] = float(adx_values)
+
+        # Volume ratio from volatility context
+        vol_ratio = volatility_context.get('vol_ratio', 1.0)
+        if vol_ratio is not None:
+            market_data['volume_ratio'] = float(vol_ratio)
+
+        # Trend strength from metadata
+        trend_strength = metadata.get('trend_strength', 'MODERATE')
+        if trend_strength:
+            market_data['trend_strength'] = str(trend_strength).upper()
+
+        # Logic gates risk count
+        logic_gates_risk = metadata.get('logic_gates_risk_count', 0)
+        if logic_gates_risk is not None:
+            market_data['logic_gates_risk_count'] = int(logic_gates_risk)
+
+        # R:R Ratio from metadata
+        rr_ratio = metadata.get('rr_ratio', 2.0)
+        if rr_ratio is not None:
+            try:
+                market_data['rr_ratio'] = float(rr_ratio)
+            except (ValueError, TypeError):
+                market_data['rr_ratio'] = 2.0
+
+        logger.debug(
+            "📊 Market data for veto check: ADX=%.1f, Vol=%.2fx, Trend=%s, R:R=%.2f",
+            market_data['adx'],
+            market_data['volume_ratio'],
+            market_data['trend_strength'],
+            market_data['rr_ratio']
+        )
+
+        return market_data
+
     def _attach_context(
         self,
         decision: RiskDecision,
@@ -578,5 +800,5 @@ class Evaluator:
         decision.context_vol_ratio = volatility_context.get("vol_ratio")
         decision.context_atr_ratio = volatility_context.get("atr_ratio")
         decision.volatility_regime = volatility_context.get("volatility_regime", "medium")
-        
+
         return decision
