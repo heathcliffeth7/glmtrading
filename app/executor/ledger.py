@@ -35,8 +35,8 @@ class Trade(Base):
     exit_plan_history = Column(JSON, nullable=True)  # Tüm exit plan güncellemelerin logu: {"updates": [...]}
     entry_reasoning = Column(String(1000), nullable=True)  # Pozisyon açılış gerekçesi
     exit_reasoning = Column(String(1000), nullable=True)  # Pozisyon kapanış gerekçesi
-    entry_prompt = Column(String(10000), nullable=True)  # GLM'e gönderilen açılış prompt'u
-    exit_prompt = Column(String(10000), nullable=True)  # GLM'e gönderilen kapanış prompt'u
+    entry_prompt = Column(String(50000), nullable=True)  # GLM'e gönderilen açılış prompt'u (50K limit)
+    exit_prompt = Column(String(50000), nullable=True)  # GLM'e gönderilen kapanış prompt'u (50K limit)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
 
@@ -192,7 +192,11 @@ if _db_url.startswith("sqlite"):
     # SQLite uses file or in-memory DB; avoid PostgreSQL-specific pool options
     _engine_kwargs["connect_args"] = {"check_same_thread": False}
 else:
-    _engine_kwargs.update({"pool_size": 10, "max_overflow": 20})
+    _engine_kwargs.update({
+        "pool_size": 50,
+        "max_overflow": 100,
+        "pool_recycle": 3600,
+    })
 
 engine = create_engine(_db_url, **_engine_kwargs)
 
@@ -206,9 +210,8 @@ if not _db_url.startswith("sqlite"):
         """
         with dbapi_conn.cursor() as cur:
             cur.execute("SET application_name = 'trading-api'")
-            cur.execute("SET idle_in_transaction_session_timeout = 60000")  # 60s
-            # Allow heavier portfolio syncs to finish; still keep a ceiling to avoid runaway queries.
-            cur.execute("SET statement_timeout = 60000")  # 60s
+            cur.execute("SET idle_in_transaction_session_timeout = 30000")  # 30s
+            cur.execute("SET statement_timeout = 30000")  # 30s (faster fail)
 
 # Optional: auto-create schema for test databases (e.g., in-memory SQLite)
 if os.getenv("TEST_AUTOCREATE_SCHEMA", "").lower() in {"1", "true", "yes"}:
@@ -334,7 +337,7 @@ def record_trade(
         pnl=pnl,
         exit_plan=exit_plan,
         entry_reasoning=entry_reasoning[:1000] if entry_reasoning else None,
-        entry_prompt=entry_prompt[:10000] if entry_prompt else None,
+        entry_prompt=entry_prompt[:50000] if entry_prompt else None,
     )
     session.add(trade)
     return trade
@@ -441,7 +444,7 @@ def close_open_trades(
             if exit_reasoning:
                 trade.exit_reasoning = exit_reasoning[:1000]  # Truncate to 1000 chars
             if exit_prompt:
-                trade.exit_prompt = exit_prompt[:10000]  # Truncate to 10000 chars
+                trade.exit_prompt = exit_prompt[:50000]  # Truncate to 50000 chars
         else:
             # Kısmi kapanış: mevcut kaydı kalan miktarla açık bırak, kapanan kısmı yeni kayıt olarak ekle
             open_remainder = original_amount - close_part
@@ -472,7 +475,7 @@ def close_open_trades(
                 timestamp=trade.timestamp,
                 entry_prompt=trade.entry_prompt,  # Orijinal entry prompt'u kopyala
                 exit_reasoning=exit_reasoning[:1000] if exit_reasoning else None,
-                exit_prompt=exit_prompt[:10000] if exit_prompt else None,
+                exit_prompt=exit_prompt[:50000] if exit_prompt else None,
             )
             session.add(closed_trade)
 

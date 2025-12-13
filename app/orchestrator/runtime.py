@@ -200,10 +200,15 @@ class AutomatedRunner:
         logger.info("✅ Service Monitor started (checking every 5 minutes)")
         
         # 4. Position Monitor task (3-minute exit plan checks)
+        # STAGGERED START: Each monitor starts with a delay to avoid lock contention
         if settings.enable_position_monitor:
             from app.monitoring.position_monitor import PositionMonitor
 
-            for sym in self._symbols:
+            # Stagger monitor starts by 30 seconds each to reduce lock contention
+            # BTCUSDT: +0s, ETHUSDT: +30s, SOLUSDT: +60s
+            stagger_delay_seconds = 30
+
+            for symbol_index, sym in enumerate(self._symbols):
                 # Get crash handler for this symbol (if crash protection is enabled)
                 crash_handler = None
                 if self._crash_protection_manager:
@@ -216,14 +221,28 @@ class AutomatedRunner:
                     enable_telegram=True,
                     crash_handler=crash_handler,  # Pass crash handler for state sync
                 )
+
+                # Create staggered start wrapper to avoid lock contention
+                async def start_monitor_with_delay(monitor, delay, symbol):
+                    if delay > 0:
+                        logger.info("⏳ Position Monitor for %s will start in %ds (staggered)", symbol, delay)
+                        await asyncio.sleep(delay)
+                    await monitor.start()
+
+                # Calculate stagger delay for this symbol
+                monitor_delay = symbol_index * stagger_delay_seconds
+
                 # Create unique task name
                 task_name = f"position_monitor_{sym}"
-                position_monitor_task = asyncio.create_task(position_monitor.start())
+                position_monitor_task = asyncio.create_task(
+                    start_monitor_with_delay(position_monitor, monitor_delay, sym)
+                )
                 tasks.append((task_name, position_monitor_task))
                 logger.info(
-                    "✅ Position Monitor started for %s (%d-second interval checks for exit plan)",
+                    "✅ Position Monitor queued for %s (%d-second interval, +%ds stagger offset)",
                     sym,
-                    settings.position_monitor_interval_seconds
+                    settings.position_monitor_interval_seconds,
+                    monitor_delay
                 )
         else:
             logger.info("Position Monitor disabled in settings")

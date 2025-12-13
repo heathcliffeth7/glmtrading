@@ -16,17 +16,24 @@ class AdvancedInvalidationParser:
     def __init__(self):
         # Önceden derlenmiş regex desenleri
         self.patterns = [
+            # Zaman ile başlayan İngilizce mum koşulları (örn: "15m candle closes below $3070.20 (stop loss)")
+            {
+                "name": "time_first_candle",
+                "pattern": r'(\d+)\s*(m|min|minute|hour|h|day|d)\s*candle\s+closes?\s+(below|above)\s+\$?([\d,.]+)',
+                "processor": self._parse_time_first_candle,
+            },
+
             # Zaman bazlı desenler
             {
                 "name": "time_based_candle",
-                "pattern": r'if\s+price\s+closes?\s+(below|above)\s+([\d,.]+)\s+on\s+(\d+)-?(m|min|minute|hour|h|day|d)s?\s+candle',
+                "pattern": r'if\s+price\s+closes?\s+(below|above)\s+\$?([\d,.]+)\s+on\s+(\d+)-?(m|min|minute|hour|h|day|d)s?\s+candle',
                 "processor": self._parse_time_based_candle
             },
             
             # Basit fiyat seviyesi desenleri
             {
                 "name": "simple_price_level",
-                "pattern": r'(if\s+)?price\s+(closes?\s+)?(below|above)\s+([\d,.]+)',
+                "pattern": r'(if\s+)?price\s+(closes?\s+)?(below|above)\s+\$?([\d,.]+)',
                 "processor": self._parse_simple_price_level
             },
             
@@ -163,6 +170,24 @@ class AdvancedInvalidationParser:
             time_frame = "3m"  # Varsayılan
             
         return direction, price, time_frame, {"type": "time_based_candle"}
+
+    def _parse_time_first_candle(self, match, original_text: str) -> Tuple[Optional[str], Optional[float], Optional[str], Optional[Dict]]:
+        """Zaman ile başlayan İngilizce mum deseni parse eder"""
+        time_value = int(match.group(1))
+        time_unit = match.group(2).lower()
+        direction = match.group(3).lower()
+        price = float(match.group(4).replace(",", ""))
+
+        if time_unit.startswith("m"):
+            time_frame = f"{time_value}m"
+        elif time_unit.startswith("h"):
+            time_frame = f"{time_value}h"
+        elif time_unit.startswith("d"):
+            time_frame = f"{time_value}d"
+        else:
+            time_frame = "3m"
+
+        return direction, price, time_frame, {"type": "time_first_candle"}
     
     def _parse_simple_price_level(self, match, original_text: str) -> Tuple[Optional[str], Optional[float], Optional[str], Optional[Dict]]:
         """Basit fiyat seviyesi deseni parse eder"""

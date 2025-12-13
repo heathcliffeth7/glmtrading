@@ -23,6 +23,9 @@ class TradeResponse(BaseModel):
     close_time: Optional[str] = None
     exit_plan: Optional[Dict[str, Any]] = None
     exit_reasoning: Optional[str] = None
+    entry_reasoning: Optional[str] = None
+    entry_prompt: Optional[str] = None
+    exit_prompt: Optional[str] = None
     is_partial_close: bool = False
     action_label: Optional[str] = None
     remaining_amount: Optional[float] = None

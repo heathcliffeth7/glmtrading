@@ -14,7 +14,7 @@ SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 
 @router.get("/recent")
-async def get_recent_signals(
+def get_recent_signals(
     symbol: Optional[str] = Query(None, description="Filter by symbol (e.g., BTCUSDT)"),
     limit: int = Query(50, ge=1, le=200, description="Number of signals to return"),
     days: int = Query(7, ge=1, le=30, description="How many days back to look")

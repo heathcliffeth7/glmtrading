@@ -265,8 +265,9 @@ class LiquidationAnalyzer:
         )
 
         # Separate by side
-        long_levels = [l for l in levels if l.side == "LONG"]
-        short_levels = [l for l in levels if l.side == "SHORT"]
+        # Long liquidations happen below current price; shorts above current price.
+        long_levels = [l for l in levels if l.side == "LONG" and l.price < current_price]
+        short_levels = [l for l in levels if l.side == "SHORT" and l.price > current_price]
 
         # Find nearest levels
         nearest_long = long_levels[0] if long_levels else None

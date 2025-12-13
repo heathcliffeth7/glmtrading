@@ -16,7 +16,7 @@ from sqlalchemy import text
 
 from app.api.config import get_dashboard_settings
 from app.api.middleware.cors import setup_cors
-from app.api.routes import portfolio, trades, pnl, health, websocket, signals
+from app.api.routes import portfolio, trades, pnl, health, websocket, signals, metrics
 from app.utils.price_cache import price_cache
 
 # Configure logging
@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
 
     logger.info(f"Dashboard API starting on port {settings.api_port}")
 
-    # Verify database connectivity
+    # Verify database connectivity (lightweight check only)
     try:
         from app.executor.ledger import engine
         with engine.connect() as conn:
@@ -81,9 +81,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Database connection failed: {e}")
 
-    # Initialize price cache with current prices
-    await _init_price_cache()
-    logger.info("Price cache initialized for PnL calculations")
+    # Initialize price cache asynchronously (non-blocking)
+    # Don't wait for it - let it happen in the background
+    asyncio.create_task(_init_price_cache())
+    logger.info("Price cache initialization started (non-blocking)")
 
     # Start background price refresh task
     _price_refresh_task = asyncio.create_task(_price_refresh_loop())
@@ -121,6 +122,7 @@ app.include_router(portfolio.router, prefix="/api/portfolio", tags=["Portfolio"]
 app.include_router(trades.router, prefix="/api/trades", tags=["Trades"])
 app.include_router(pnl.router, prefix="/api/pnl", tags=["PnL"])
 app.include_router(health.router, prefix="/api", tags=["Health"])
+app.include_router(metrics.router, prefix="/api", tags=["Metrics"])
 app.include_router(websocket.router, prefix="/ws", tags=["WebSocket"])
 app.include_router(signals.router, prefix="/api/signals", tags=["Signals"])
 

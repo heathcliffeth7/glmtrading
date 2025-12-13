@@ -73,12 +73,13 @@ class RedisSettings(BaseSettings):
     max_consecutive_errors: int = Field(10, alias="REDIS_MAX_CONSECUTIVE_ERRORS")
 
     # Symbol-specific health monitor thresholds (in seconds)
+    # Binance WebSocket'te normal market consolidation'da 50-70s mesaj boşluğu olabiliyor
     price_cache_monitor_thresholds: dict = Field(
         default={
-            "BTCUSDT": 45,      # BTC: 45s (volatile, can have traffic gaps)
-            "ETHUSDT": 45,      # ETH: 45s
-            "SOLUSDT": 45,      # SOL: 45s
-            "default": 60,      # Conservative 60s default
+            "BTCUSDT": 90,      # BTC: 90s (1.5 dakika - konsolidasyon için yeterli)
+            "ETHUSDT": 90,      # ETH: 90s
+            "SOLUSDT": 120,     # SOL: 120s (daha az likid, daha geniş margin)
+            "default": 120,     # 2 dakika default
         },
         description="Symbol-specific silence thresholds for pub/sub health monitor"
     )

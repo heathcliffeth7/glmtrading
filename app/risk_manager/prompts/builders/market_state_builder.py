@@ -22,6 +22,60 @@ from app.risk_manager.prompts import (
 logger = logging.getLogger(__name__)
 
 
+def calculate_level_status(
+    *,
+    current_price: float,
+    support_level: float,
+    resistance_level: float,
+    proximity_threshold: float = 0.25,
+) -> Dict[str, Any]:
+    """
+    Summarize price position vs support/resistance.
+
+    proximity_threshold is percent distance (e.g. 0.5 = 0.5%).
+    """
+    def _dist_pct(level: float, price: float) -> Optional[float]:
+        if not level or level <= 0 or not price or price <= 0:
+            return None
+        return abs((price - level) / level * 100)
+
+    support_dist = _dist_pct(support_level, current_price)
+    resistance_dist = _dist_pct(resistance_level, current_price)
+
+    if not current_price or current_price <= 0 or not support_level or support_level <= 0 or not resistance_level or resistance_level <= 0:
+        return {
+            "position": "UNKNOWN",
+            "support": {"level": support_level, "status": "UNKNOWN", "distance_pct": support_dist},
+            "resistance": {"level": resistance_level, "status": "UNKNOWN", "distance_pct": resistance_dist},
+            "proximity_threshold": proximity_threshold,
+        }
+
+    position = "IN_RANGE"
+    if current_price > resistance_level:
+        position = "BREAKOUT"
+    elif current_price < support_level:
+        position = "BREAKDOWN"
+
+    support_status = "ABOVE_SUPPORT"
+    if current_price < support_level:
+        support_status = "BELOW_SUPPORT"
+    elif support_dist is not None and support_dist <= proximity_threshold:
+        support_status = "AT_SUPPORT"
+
+    resistance_status = "BELOW_RESISTANCE"
+    if current_price > resistance_level:
+        resistance_status = "ABOVE_RESISTANCE"
+    elif resistance_dist is not None and resistance_dist <= proximity_threshold:
+        resistance_status = "AT_RESISTANCE"
+
+    return {
+        "position": position,
+        "support": {"level": support_level, "status": support_status, "distance_pct": support_dist},
+        "resistance": {"level": resistance_level, "status": resistance_status, "distance_pct": resistance_dist},
+        "proximity_threshold": proximity_threshold,
+    }
+
+
 class MarketStateBuilder:
     """Builds market state section of GLM prompts"""
 
@@ -396,16 +450,20 @@ class MarketStateBuilder:
         # C. Key Levels & Distances (Matematiksel - yorum yok)
         sr = self._calculate_sr_distances(historical_arrays, current_price)
         lines.append("C. PROXIMITY TO KEY LEVELS:")
-        # Distance to Support with edge case handling
-        if sr['support_dist_pct'] > 0.05:
-            lines.append(f"  Distance to Support: {sr['support_dist_pct']:.2f}% (Level: {sr['nearest_support']:.2f})")
-        else:
-            lines.append(f"  Distance to Support: AT LEVEL (Level: {sr['nearest_support']:.2f})")
-        # Distance to Resistance with edge case handling
-        if sr['resistance_dist_pct'] > 0.05:
-            lines.append(f"  Distance to Resistance: {sr['resistance_dist_pct']:.2f}% (Level: {sr['nearest_resistance']:.2f})")
-        else:
-            lines.append(f"  Distance to Resistance: AT LEVEL (Level: {sr['nearest_resistance']:.2f})")
+        support_level = float(sr.get("nearest_support") or 0.0)
+        resistance_level = float(sr.get("nearest_resistance") or 0.0)
+        level_status = calculate_level_status(
+            current_price=current_price,
+            support_level=support_level,
+            resistance_level=resistance_level,
+        )
+
+        support_label = f"{support_level:.2f}" if support_level > 0 else "N/A"
+        resistance_label = f"{resistance_level:.2f}" if resistance_level > 0 else "N/A"
+        lines.append(f"  Support: {support_label} ({level_status['support']['status']})")
+        lines.append(f"  Resistance: {resistance_label} ({level_status['resistance']['status']})")
+        lines.append(f"  Position: {level_status['position']}")
+        lines.append("  [15M] Support: N/A | Resistance: N/A | Position: UNKNOWN")
 
         # EMA Uzakligi (Mean Reversion potansiyeli icin)
         if h4_ema20 > 0 and current_price > 0:

@@ -38,11 +38,21 @@ class PureDataCollector(Agent):
         
         # Simple reasoning - GLM will do all analysis
         reasoning = f"GLM Portfolio Management - Raw data for {self._symbol}"
-        
+
+        # Extract current price from collected data (prefer 1m, fallback to 4h)
+        current_price = 0.0
+        snapshots = raw_market_data.get("current_snapshots", {})
+        for tf in ["1m", "5m", "15m", "4h", "1h"]:
+            tf_data = snapshots.get(tf, {})
+            if tf_data and tf_data.get("close"):
+                current_price = float(tf_data["close"])
+                break
+
         # Send everything to GLM
         metadata = {
             "raw_market_data": raw_market_data,
             "htf_analysis": htf_analysis if htf_analysis and htf_analysis.get("status") == "success" else None,
+            "price": current_price,  # Required for exit_plan calculation
         }
         
         return AgentSignal(

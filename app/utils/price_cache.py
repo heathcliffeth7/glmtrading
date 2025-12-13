@@ -518,6 +518,88 @@ def _schedule_delayed_restart(symbol: str, delay_seconds: int = 60) -> None:
     thread.start()
 
 
+def _coerce_monitor_thresholds(raw_thresholds: object) -> Dict[str, int]:
+    """
+    Normalize monitor threshold config to a dict of ints.
+
+    Supports env overrides like:
+      - dict/JSON: {"BTCUSDT": 90, "default": 120}
+      - single number: 90  -> {"default": 90}
+    """
+    if isinstance(raw_thresholds, dict):
+        coerced: Dict[str, int] = {}
+        for key, value in raw_thresholds.items():
+            try:
+                coerced[str(key).upper()] = int(value)
+            except (TypeError, ValueError):
+                continue
+        return coerced
+
+    if isinstance(raw_thresholds, (int, float)):
+        return {"DEFAULT": int(raw_thresholds)}
+
+    if isinstance(raw_thresholds, str):
+        try:
+            return {"DEFAULT": int(float(raw_thresholds.strip()))}
+        except ValueError:
+            return {}
+
+    return {}
+
+
+def _compute_effective_max_silence(symbol_key: str, override: Optional[int]) -> int:
+    """
+    Compute the max silence threshold for a symbol, applying a safety floor.
+
+    The floor ensures the health monitor doesn't restart listeners more
+    aggressively than the Redis pub/sub socket timeout, which would otherwise
+    create orphaned listener threads while listen() is still blocking.
+    """
+    try:
+        current_settings = get_settings()
+    except Exception:
+        current_settings = settings
+
+    thresholds_raw = current_settings.redis.price_cache_monitor_thresholds
+    thresholds = _coerce_monitor_thresholds(thresholds_raw)
+
+    configured = override
+    if configured is None:
+        configured = thresholds.get(symbol_key, thresholds.get("DEFAULT", thresholds.get("default", 60)))
+
+    try:
+        configured_int = int(configured)
+    except (TypeError, ValueError):
+        configured_int = 60
+
+    try:
+        pubsub_timeout = int(getattr(current_settings.redis, "pubsub_socket_timeout", 60))
+    except (TypeError, ValueError):
+        pubsub_timeout = 60
+
+    effective = max(configured_int, pubsub_timeout)
+    if effective != configured_int:
+        logger.warning(
+            "⚙️ max_silence_seconds for %s (%ds) < pubsub_socket_timeout (%ds); clamping to %ds",
+            symbol_key,
+            configured_int,
+            pubsub_timeout,
+            effective,
+        )
+
+    return effective
+
+
+def _stop_pubsub_listener(symbol_key: str) -> None:
+    """Best-effort stop of a blocking Redis pub/sub listen loop."""
+    pubsub_name = f"price_listener_{symbol_key}"
+    try:
+        from app.utils.redis_manager import get_redis_manager
+        get_redis_manager().release_pubsub(pubsub_name)
+    except Exception:
+        pass
+
+
 def _health_check_monitor(symbol: str, max_silence_seconds: Optional[int] = None) -> None:
     """
     Monitor listener health and restart if necessary.
@@ -529,10 +611,7 @@ def _health_check_monitor(symbol: str, max_silence_seconds: Optional[int] = None
     """
     symbol_key = symbol.upper()
 
-    # Use symbol-specific threshold from settings if not explicitly provided
-    if max_silence_seconds is None:
-        thresholds = settings.redis.price_cache_monitor_thresholds
-        max_silence_seconds = thresholds.get(symbol_key, thresholds.get("default", 60))
+    max_silence_seconds = _compute_effective_max_silence(symbol_key, max_silence_seconds)
 
     logger.info(
         "🏥 Health check monitor started for %s (max_silence: %ds)",
@@ -594,6 +673,10 @@ def _restart_listener(symbol: str, max_attempts: int = 5) -> None:
         return
 
     try:
+        # Signal any existing listener to stop and close its pub/sub socket.
+        _listeners_started.pop(symbol_key, None)
+        _stop_pubsub_listener(symbol_key)
+
         reconnect_count = _listener_reconnect_count.get(symbol_key, 0)
 
         if reconnect_count >= max_attempts:
@@ -702,7 +785,7 @@ def ensure_price_cache_listener(symbol: str, channel: str = KLINE_CHANNEL) -> No
     
     Features:
     - Initial price from REST API (never start with empty cache)
-    - Health check monitoring (restart if silent for 30s)
+    - Health check monitoring (restart if silent past configured threshold)
     - Auto-reconnect on crash (exponential backoff, max 5 attempts)
     - Thread liveness monitoring
     """

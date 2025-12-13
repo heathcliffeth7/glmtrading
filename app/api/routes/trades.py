@@ -2,10 +2,11 @@
 import csv
 import io
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import numpy as np
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -21,11 +22,14 @@ from app.api.schemas.trade import (
 from app.executor.ledger import Trade
 from app.utils.influx import query_historical_snapshots
 from app.utils.logging import get_logger
+from app.utils.exit_plan_history import normalize_exit_plan_history
+from app.utils.prompt_restore import find_best_entry_in_log_file
 
 router = APIRouter()
 logger = get_logger(__name__)
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+LOG_FILE_PATH = "/root/trading/logs/glm_prompts.log"
 
 
 def _fetch_signals_for_reasoning(symbols: List[str], hours: int = 30 * 24) -> List[Dict[str, Any]]:
@@ -98,7 +102,7 @@ def _find_matching_signal(
 
 
 @router.get("", response_model=TradeListResponse)
-async def get_trades(
+def get_trades(
     symbol: Optional[str] = Query(None, description="Filter by symbol"),
     status: str = Query("all", regex="^(open|closed|all)$", description="Trade status filter"),
     page: int = Query(1, ge=1, description="Page number"),
@@ -175,6 +179,25 @@ async def get_trades(
             if matching_signal and matching_signal.get('reasoning'):
                 exit_plan['reasoning'] = matching_signal['reasoning']
 
+        # Exit prompt/reasoning fallback - log'dan ara
+        resolved_exit_prompt = t.exit_prompt
+        resolved_exit_reasoning = t.exit_reasoning
+
+        if t.close_time and (t.exit_prompt is None or t.exit_reasoning is None):
+            match, _, _ = find_best_entry_in_log_file(
+                Path(LOG_FILE_PATH),
+                max_bytes=50 * 1024 * 1024,  # 50MB
+                symbol=t.symbol,
+                target_timestamp=t.close_time,
+                preferred_signals=["CLOSE"],
+                tolerance_seconds=3600,
+            )
+            if match:
+                if t.exit_prompt is None and match.prompt:
+                    resolved_exit_prompt = match.prompt
+                if t.exit_reasoning is None and match.response:
+                    resolved_exit_reasoning = match.response
+
         trade_responses.append(TradeResponse(
             id=t.id,
             position_id=t.position_id,
@@ -191,7 +214,10 @@ async def get_trades(
             timestamp=t.timestamp.isoformat() if t.timestamp else "",
             close_time=t.close_time.isoformat() if t.close_time else None,
             exit_plan=exit_plan,
-            exit_reasoning=t.exit_reasoning,
+            exit_reasoning=resolved_exit_reasoning,
+            entry_reasoning=t.entry_reasoning,
+            entry_prompt=t.entry_prompt,
+            exit_prompt=resolved_exit_prompt,
             is_partial_close=is_partial_close,
             action_label=action_label,
             remaining_amount=remaining_amount,
@@ -207,7 +233,7 @@ async def get_trades(
 
 
 @router.get("/pnl-histogram", response_model=PnLHistogramResponse)
-async def get_pnl_histogram(
+def get_pnl_histogram(
     symbol: Optional[str] = Query(None, description="Filter by symbol"),
     days: int = Query(30, ge=1, le=365, description="Days of history"),
     bins: int = Query(10, ge=5, le=50, description="Number of histogram bins"),
@@ -287,7 +313,7 @@ async def get_pnl_histogram(
 
 
 @router.get("/export/csv")
-async def export_trades_csv(
+def export_trades_csv(
     symbol: Optional[str] = Query(None, description="Filter by symbol"),
     status: str = Query("all", regex="^(open|closed|all)$", description="Trade status filter"),
     days: int = Query(30, ge=1, le=365, description="Days of history"),
@@ -375,14 +401,13 @@ async def export_trades_csv(
 
 
 @router.get("/{trade_id}")
-async def get_trade_detail(
+def get_trade_detail(
     trade_id: int,
     db: Session = Depends(get_db)
 ):
     """Get single trade details"""
     trade = db.query(Trade).filter(Trade.id == trade_id).first()
     if not trade:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Trade not found")
 
     return {
@@ -399,7 +424,106 @@ async def get_trade_detail(
         "fees": trade.fees,
         "notional_value": trade.notional_value,
         "exit_plan": trade.exit_plan,
-        "exit_plan_history": trade.exit_plan_history,
+        "exit_plan_history": normalize_exit_plan_history(trade.exit_plan_history),
+        "entry_reasoning": trade.entry_reasoning,
+        "exit_reasoning": trade.exit_reasoning,
+        "entry_prompt": trade.entry_prompt,
+        "exit_prompt": trade.exit_prompt,
         "timestamp": trade.timestamp.isoformat() if trade.timestamp else None,
         "close_time": trade.close_time.isoformat() if trade.close_time else None,
+    }
+
+
+@router.get("/{trade_id}/resolved-prompts")
+def resolve_trade_prompts(
+    trade_id: int,
+    max_scan_kb: int = Query(131072, ge=512, le=524288, description="Max log tail to scan (KB)"),
+    tolerance_seconds: int = Query(3600, ge=60, le=86400, description="Timestamp matching tolerance (seconds)"),
+    db: Session = Depends(get_db),
+):
+    """
+    Resolve missing prompts for historical trades by matching symbol + timestamp against glm_prompts.log.
+
+    This endpoint does NOT persist anything (no DB writes). It is intended purely for copy UX.
+    """
+    trade = db.query(Trade).filter(Trade.id == trade_id).first()
+    if not trade:
+        raise HTTPException(status_code=404, detail="Trade not found")
+
+    if not trade.timestamp:
+        raise HTTPException(status_code=400, detail="Trade has no timestamp")
+
+    entry_prompt = trade.entry_prompt
+    exit_prompt = trade.exit_prompt
+    debug: dict[str, Any] = {}
+
+    log_path = Path(LOG_FILE_PATH)
+    try:
+        file_size = log_path.stat().st_size
+    except FileNotFoundError:
+        return {
+            "id": trade.id,
+            "entry_prompt": entry_prompt,
+            "exit_prompt": exit_prompt,
+            "debug": {"reason": "Log file not found"},
+        }
+
+    max_bytes = min(max_scan_kb * 1024, file_size)
+    initial_bytes = min(20 * 1024 * 1024, max_bytes)  # 20MB fast path
+    debug["log_file_bytes"] = file_size
+
+    if not entry_prompt:
+        preferred_signals = [trade.side] if trade.side in {"BUY", "SELL"} else []
+        match, _candidate, stats = find_best_entry_in_log_file(
+            log_path,
+            max_bytes=initial_bytes,
+            symbol=trade.symbol,
+            target_timestamp=trade.timestamp,
+            preferred_signals=preferred_signals,
+            tolerance_seconds=tolerance_seconds,
+        )
+        entry_debug: dict[str, Any] = {"scanned_bytes": initial_bytes, **stats}
+        if not match and initial_bytes < max_bytes:
+            match, _candidate, stats = find_best_entry_in_log_file(
+                log_path,
+                max_bytes=max_bytes,
+                symbol=trade.symbol,
+                target_timestamp=trade.timestamp,
+                preferred_signals=preferred_signals,
+                tolerance_seconds=tolerance_seconds,
+            )
+            entry_debug = {"scanned_bytes": max_bytes, **stats}
+        debug["entry"] = entry_debug
+        if match and match.prompt:
+            entry_prompt = match.prompt[:50000]
+
+    if trade.close_time and not exit_prompt:
+        match, _candidate, stats = find_best_entry_in_log_file(
+            log_path,
+            max_bytes=initial_bytes,
+            symbol=trade.symbol,
+            target_timestamp=trade.close_time,
+            preferred_signals=["CLOSE"],
+            tolerance_seconds=tolerance_seconds,
+        )
+        exit_debug: dict[str, Any] = {"scanned_bytes": initial_bytes, **stats}
+        if not match and initial_bytes < max_bytes:
+            match, _candidate, stats = find_best_entry_in_log_file(
+                log_path,
+                max_bytes=max_bytes,
+                symbol=trade.symbol,
+                target_timestamp=trade.close_time,
+                preferred_signals=["CLOSE"],
+                tolerance_seconds=tolerance_seconds,
+            )
+            exit_debug = {"scanned_bytes": max_bytes, **stats}
+        debug["exit"] = exit_debug
+        if match and match.prompt:
+            exit_prompt = match.prompt[:50000]
+
+    return {
+        "id": trade.id,
+        "entry_prompt": entry_prompt,
+        "exit_prompt": exit_prompt,
+        "debug": debug,
     }

@@ -539,6 +539,14 @@ class ResponseParser:
         """
         Parse raw content string into a dictionary suitable for RiskDecision.
         """
+        def _as_float(value: Any, default: float = 0.0) -> float:
+            try:
+                if value is None:
+                    return default
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
         try:
             content = self.prepare_json_payload(content)
             payload = json.loads(content)
@@ -554,14 +562,14 @@ class ResponseParser:
                     logger.info("Detected nested NOF1 style response format")
                     signal_args = payload[first_key]["trade_signal_args"]
                     action = signal_args.get("signal", "HOLD").upper()
-                    quantity = float(signal_args.get("quantity", 0))
+                    quantity = _as_float(signal_args.get("quantity", 0))
                     amount = quantity
 
-                    leverage = float(signal_args.get("leverage", 5))
-                    glm_confidence = float(signal_args.get("confidence", 0))
+                    leverage = _as_float(signal_args.get("leverage", 5), default=5.0)
+                    glm_confidence = _as_float(signal_args.get("confidence", 0))
 
-                    stop_loss = float(signal_args.get("stop_loss", 0))
-                    take_profit = float(signal_args.get("take_profit", 0))
+                    stop_loss = _as_float(signal_args.get("stop_loss", 0))
+                    take_profit = _as_float(signal_args.get("take_profit", 0))
                     invalidation = signal_args.get("invalidation_condition", "")
 
                     exit_plan = {
@@ -594,17 +602,17 @@ class ResponseParser:
                     # Standard flat format (symbol as key)
                     symbol_data = payload[first_key]
                     action = symbol_data.get("signal", symbol_data.get("karar", "HOLD")).upper()
-                    amount = float(symbol_data.get("miktar", 0))
-                    leverage = float(symbol_data.get("kaldıraç", symbol_data.get("leverage", 5)))
+                    amount = _as_float(symbol_data.get("miktar", 0))
+                    leverage = _as_float(symbol_data.get("kaldıraç", symbol_data.get("leverage", 5)), default=5.0)
                     reasoning = symbol_data.get("gerekçe", symbol_data.get("reasoning", ""))
-                    glm_confidence = float(symbol_data.get("confidence", symbol_data.get("ai_confidence", 0)))
+                    glm_confidence = _as_float(symbol_data.get("confidence", symbol_data.get("ai_confidence", 0)))
                     reason_primary = symbol_data.get("reason_primary", "")
                     reason_secondary = symbol_data.get("reason_secondary", "")
 
                     if "stop_loss" in symbol_data:
                         exit_plan = {
-                            "stop_loss": float(symbol_data.get("stop_loss", 0)),
-                            "take_profit": float(symbol_data.get("take_profit", symbol_data.get("profit_target", 0))),
+                            "stop_loss": _as_float(symbol_data.get("stop_loss", 0)),
+                            "take_profit": _as_float(symbol_data.get("take_profit", symbol_data.get("profit_target", 0))),
                             "invalidation_condition": symbol_data.get("invalidation_condition", "")
                         }
 
@@ -625,17 +633,17 @@ class ResponseParser:
             else:
                 # Standard flat format fallback
                 action = payload.get("karar", payload.get("signal", "HOLD")).upper()
-                amount = float(payload.get("miktar", 0))
-                leverage = float(payload.get("kaldıraç", payload.get("leverage", 5)))
+                amount = _as_float(payload.get("miktar", 0))
+                leverage = _as_float(payload.get("kaldıraç", payload.get("leverage", 5)), default=5.0)
                 reasoning = payload.get("gerekçe", payload.get("reasoning", ""))
-                glm_confidence = float(payload.get("ai_confidence", payload.get("confidence", 0)))
+                glm_confidence = _as_float(payload.get("ai_confidence", payload.get("confidence", 0)))
                 reason_primary = payload.get("reason_primary", "")
                 reason_secondary = payload.get("reason_secondary", "")
 
                 if "stop_loss" in payload:
                     exit_plan = {
-                        "stop_loss": float(payload.get("stop_loss", 0)),
-                        "take_profit": float(payload.get("take_profit", payload.get("profit_target", 0))),
+                        "stop_loss": _as_float(payload.get("stop_loss", 0)),
+                        "take_profit": _as_float(payload.get("take_profit", payload.get("profit_target", 0))),
                         "invalidation_condition": payload.get("invalidation_condition", "")
                     }
 
@@ -656,6 +664,18 @@ class ResponseParser:
             if action not in {"BUY", "SELL", "HOLD", "CLOSE"}:
                 return None
 
+            # Confidence semantics:
+            # - HOLD/CLOSE: confidence is always treated as 0
+            # - BUY/SELL: if confidence is missing/zero, auto-convert to HOLD
+            if action in {"HOLD", "CLOSE"}:
+                glm_confidence = 0.0
+            elif action in {"BUY", "SELL"} and glm_confidence <= 0:
+                action = "HOLD"
+                amount = 0.0
+                exit_plan = None
+                glm_confidence = 0.0
+                reasoning = f"{reasoning} | AUTO-HOLD: confidence missing/zero"
+
             amount = self.normalize_quantity_to_allocation(action, amount, portfolio_metrics)
             amount = max(0.0, amount)
             leverage = self.normalize_leverage(leverage)
@@ -667,6 +687,10 @@ class ResponseParser:
 
             reasoning = self.translate_to_turkish(reasoning)
 
+            # GLM CLOSE dediğinde, exit_validation otomatik THESIS_INVALID set et
+            # Bu sayede exit_validator CLOSE kararını kabul eder
+            exit_validation = "THESIS_INVALID" if action == "CLOSE" else None
+
             return {
                 "action": action,
                 "amount": amount,
@@ -676,6 +700,7 @@ class ResponseParser:
                 "reason_primary": reason_primary,
                 "reason_secondary": reason_secondary,
                 "exit_plan": exit_plan,
+                "exit_validation": exit_validation,
                 "thought_process": thought_process,
                 "data_analysis": data_analysis,
             }

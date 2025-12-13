@@ -208,7 +208,7 @@ class Executor:
                     )
 
         with Session(engine) as session:
-            portfolio = get_synced_portfolio(session, self._symbol)
+            portfolio = get_synced_portfolio(session, self._symbol, force_sync=False)
             daily_pnl = get_daily_pnl(session)
             pre_position = portfolio.position
             price = self._resolve_price()
@@ -386,7 +386,7 @@ class Executor:
             # CLOSE ACTION: Strict validation
             if decision.action == "CLOSE":
                 with Session(engine) as session:
-                    portfolio = get_synced_portfolio(session, self._symbol)
+                    portfolio = get_synced_portfolio(session, self._symbol, force_sync=False)
                     price = validated_price
                     from app.executor.ledger import Trade
                     
@@ -431,12 +431,22 @@ class Executor:
 
         # EMERGENCY CHECK
         with Session(engine) as safety_session:
-            safety_portfolio = get_synced_portfolio(safety_session, self._symbol)
+            safety_portfolio = get_synced_portfolio(safety_session, self._symbol, force_sync=False)
             if abs(safety_portfolio.position) > 10.0:
                 logger.critical("EMERGENCY: Position astronomical (%.6f BTC), forcing reset", safety_portfolio.position)
                 price = self._resolve_price()
                 close_side = "SELL" if safety_portfolio.position > 0 else "BUY"
-                close_open_trades(session=safety_session, symbol=self._symbol, close_side=close_side, close_amount=abs(safety_portfolio.position), close_price=price, taker_fee_rate=self._taker_fee_rate)
+                exit_prompt_value = getattr(decision, 'prompt_sent', None)
+                close_open_trades(
+                    session=safety_session,
+                    symbol=self._symbol,
+                    close_side=close_side,
+                    close_amount=abs(safety_portfolio.position),
+                    close_price=price,
+                    taker_fee_rate=self._taker_fee_rate,
+                    exit_reasoning=decision.reasoning,
+                    exit_prompt=exit_prompt_value,
+                )
                 safety_portfolio.position = 0.0
                 safety_portfolio.average_price = 0.0
                 safety_portfolio.updated_at = datetime.utcnow()
@@ -841,7 +851,7 @@ class Executor:
         price = self._resolve_price()
         with Session(engine) as session:
             # Use synced portfolio to ensure accuracy before trade execution
-            portfolio = get_synced_portfolio(session, self._symbol)
+            portfolio = get_synced_portfolio(session, self._symbol, force_sync=False)
             daily_pnl = get_daily_pnl(session)
 
             # Kullanılan margin'i açık pozisyonlardan hesapla
@@ -1370,7 +1380,7 @@ class Executor:
         try:
             with Session(engine) as session:
                 # Portfolio'yu kontrol et
-                portfolio = get_synced_portfolio(session, self._symbol)
+                portfolio = get_synced_portfolio(session, self._symbol, force_sync=False)
 
                 if abs(portfolio.position) < 0.0001:
                     logger.warning("No open position to close")
@@ -1531,7 +1541,7 @@ class Executor:
 
         try:
             with Session(engine) as session:
-                portfolio = get_synced_portfolio(session, self._symbol)
+                portfolio = get_synced_portfolio(session, self._symbol, force_sync=False)
 
                 # Pozisyon kontrolü
                 if position_side == "LONG":
@@ -1729,7 +1739,7 @@ class Executor:
         try:
             # Mevcut pozisyonu kontrol et
             with Session(engine) as session:
-                portfolio = get_synced_portfolio(session, self._symbol)
+                portfolio = get_synced_portfolio(session, self._symbol, force_sync=False)
                 
                 if abs(portfolio.position) < 0.0001:  # Pozisyon yoksa izleme
                     return
@@ -1839,7 +1849,7 @@ class Executor:
             from app.executor.ledger import get_daily_pnl, Trade
             from app.risk_manager.manager import RiskDecision
 
-            portfolio = get_synced_portfolio(session, self._symbol)
+            portfolio = get_synced_portfolio(session, self._symbol, force_sync=False)
 
             if abs(portfolio.position) < 0.0001:
                 logger.warning("Position already closed or no position")

@@ -285,7 +285,7 @@ class ExitManager:
 
         try:
             with Session(engine) as session:
-                portfolio = get_synced_portfolio(session, self._symbol)
+                portfolio = get_synced_portfolio(session, self._symbol, force_sync=False)
 
                 if abs(portfolio.position) < 0.0001:
                     logger.warning("No open position to close")
@@ -450,7 +450,7 @@ class ExitManager:
 
         try:
             with Session(engine) as session:
-                portfolio = get_synced_portfolio(session, self._symbol)
+                portfolio = get_synced_portfolio(session, self._symbol, force_sync=False)
 
                 if position_side == "LONG":
                     current_qty = portfolio.long_position
@@ -615,7 +615,7 @@ class ExitManager:
         """Check stop-loss level and close position if triggered."""
         try:
             with Session(engine) as session:
-                portfolio = get_synced_portfolio(session, self._symbol)
+                portfolio = get_synced_portfolio(session, self._symbol, force_sync=False)
 
                 if abs(portfolio.position) < 0.0001:
                     return
@@ -727,7 +727,7 @@ class ExitManager:
         try:
             from app.risk_manager.decision_models import RiskDecision
 
-            portfolio = get_synced_portfolio(session, self._symbol)
+            portfolio = get_synced_portfolio(session, self._symbol, force_sync=False)
 
             if abs(portfolio.position) < 0.0001:
                 logger.warning("Position already closed or no position")

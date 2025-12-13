@@ -4,6 +4,10 @@
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
 <title>Trading Dashboard</title>
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<!-- Cache buster: v1.0.1 -->
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@200..800&amp;display=swap" rel="stylesheet"/>
 <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
 <script>
@@ -324,19 +328,20 @@
 <table class="w-full text-sm text-left text-text-secondary">
 <thead class="text-xs text-text-secondary uppercase bg-panel-dark">
 <tr>
-<th class="px-6 py-3" scope="col">Symbol</th>
-<th class="px-6 py-3" scope="col">Side</th>
-<th class="px-6 py-3 text-right" scope="col">Amount</th>
-<th class="px-6 py-3 text-right" scope="col">Entry Price</th>
-<th class="px-6 py-3 text-right" scope="col">Exit Price</th>
-<th class="px-6 py-3 text-right" scope="col">PnL</th>
-<th class="px-6 py-3 text-right" scope="col">Time</th>
-<th class="px-6 py-3 text-right" scope="col">Exit Time</th>
+<th class="px-4 py-3" scope="col">Symbol</th>
+<th class="px-4 py-3" scope="col">Side</th>
+<th class="px-4 py-3 text-right" scope="col">Amount</th>
+<th class="px-4 py-3 text-right" scope="col">Entry Price</th>
+<th class="px-4 py-3 text-right" scope="col">Exit Price</th>
+<th class="px-4 py-3 text-right" scope="col">PnL</th>
+<th class="px-4 py-3 text-right" scope="col">Time</th>
+<th class="px-4 py-3 text-right" scope="col">Exit Time</th>
+<th class="px-2 py-3" scope="col"></th>
 </tr>
 </thead>
 <tbody id="trades-tbody">
 <tr>
-<td colspan="8" class="px-6 py-4 text-center text-text-secondary">Loading trades...</td>
+<td colspan="9" class="px-4 py-4 text-center text-text-secondary">Loading trades...</td>
 </tr>
 </tbody>
 </table>
@@ -388,6 +393,23 @@
 </div>
 </div>
 
+<!-- Copy Modal -->
+<div id="copy-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50" onclick="if(event.target === this) closeCopyModal()">
+    <div class="bg-panel-dark border border-border-dark rounded-xl p-6 max-w-md w-full mx-4">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-bold text-text-light">Fields to Copy</h3>
+            <button onclick="closeCopyModal()" class="text-text-secondary hover:text-text-light text-xl">&times;</button>
+        </div>
+        <div id="copy-fields" class="grid grid-cols-2 gap-2 mb-4 max-h-64 overflow-y-auto">
+            <!-- Checkboxes dynamically added -->
+        </div>
+        <div class="flex gap-2">
+            <button onclick="selectAllFields()" class="flex-1 px-3 py-2 text-sm bg-background-dark text-text-light rounded-lg hover:bg-border-dark transition-colors">Select All</button>
+            <button onclick="copySelectedFields()" class="flex-1 px-3 py-2 text-sm bg-primary text-white rounded-lg hover:bg-primary/80 transition-colors">Copy</button>
+        </div>
+    </div>
+</div>
+
 <script>
 // Endpoint keşfi: aynı origin'i dener, gerekirse 8001 portuna geri döner, manuel override için window.dashboardConfig kullanabilirsiniz.
 const dashboardConfig = window.dashboardConfig || {};
@@ -408,125 +430,17 @@ function toWsUrl(baseUrl) {
     return `${wsProto}//${apiUrl.host}/ws/portfolio`;
 }
 
-async function pingEndpoint(baseUrl, timeoutMs = 2000) {
-    try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
-        const resp = await fetch(`${baseUrl}/api/health`, { signal: controller.signal });
-        clearTimeout(timer);
-        return resp.ok;
-    } catch (error) {
-        console.warn(`Health check failed for ${baseUrl}:`, error?.message || error);
-        return false;
-    }
-}
-
-async function testWebSocket(wsUrl, timeoutMs = 5000) {
-    return new Promise((resolve) => {
-        try {
-            const socket = new WebSocket(wsUrl);
-            let resolved = false;
-
-            const cleanup = () => {
-                if (!resolved) {
-                    resolved = true;
-                    // Suppress close errors by clearing handlers before closing
-                    socket.onopen = null;
-                    socket.onerror = null;
-                    socket.onclose = null;
-                    try { socket.close(); } catch (e) {}
-                }
-            };
-
-            const timer = setTimeout(() => {
-                cleanup();
-                resolve(false);
-            }, timeoutMs);
-
-            socket.onopen = () => {
-                clearTimeout(timer);
-                cleanup();
-                resolve(true);
-            };
-            socket.onerror = () => {
-                clearTimeout(timer);
-                cleanup();
-                resolve(false);
-            };
-            socket.onclose = () => {
-                // Ignore close events during test
-            };
-        } catch (error) {
-            resolve(false);
-        }
-    });
-}
-
-async function resolveApiBase() {
-    const candidates = [];
+function initEndpoints() {
+    // Cloudflare/Nginx proxy arkasında - origin her zaman doğru çalışır
+    // Health check'ler gereksiz yere 5-15 saniye gecikme yaratıyordu
     const loc = window.location;
-    const proto = loc.protocol && loc.protocol !== 'file:' ? loc.protocol : 'http:';
-    const host = loc.hostname || FALLBACK_HOST;
 
-    // 1) Explicit override
-    if (dashboardConfig.apiBase) {
-        candidates.push(dashboardConfig.apiBase);
-    }
+    // Explicit override veya current origin
+    const base = dashboardConfig.apiBase ||
+        (loc.origin && loc.origin !== 'null' ? loc.origin : `http://${FALLBACK_HOST}:${DEFAULT_API_PORT}`);
 
-    // 2) Current origin FIRST (Nginx proxy arkasında doğru çalışır)
-    if (loc.origin && loc.origin !== 'null') {
-        candidates.push(loc.origin);
-    }
-
-    // 3) Port 8001 fallback (dev ortamı için)
-    candidates.push(`${proto}//${host}:${DEFAULT_API_PORT}`);
-
-    // 4) Fallback plain http
-    candidates.push(`http://${FALLBACK_HOST}:${DEFAULT_API_PORT}`);
-
-    const uniqueCandidates = uniq(candidates);
-
-    // Try WebSocket handshake first (best signal for streaming)
-    for (const base of uniqueCandidates) {
-        const wsUrl = toWsUrl(base);
-        const ok = false; // Skip WebSocket test - let persistent connection handle it
-        if (ok) {
-            return base;
-        }
-    }
-
-    // Fallback: try health check
-    for (const base of uniqueCandidates) {
-        const ok = await pingEndpoint(base);
-        if (ok) return base;
-    }
-
-    return uniqueCandidates[0];
-}
-
-async function initEndpoints() {
-    const base = await resolveApiBase();
     API_BASE = base;
-
-    const loc = window.location;
-    const apiUrl = new URL(base);
-    const originPort = loc.port || (loc.protocol === 'https:' ? '443' : '80');
-    const apiPort = apiUrl.port || (apiUrl.protocol === 'https:' ? '443' : '80');
-    const sameOrigin = (
-        loc.origin &&
-        loc.origin !== 'null' &&
-        loc.hostname === apiUrl.hostname &&
-        originPort === apiPort &&
-        loc.protocol === apiUrl.protocol
-    );
-    const originIsDev = DEV_PORTS.includes(originPort);
-
-    // Prefer explicit wsUrl override. Otherwise use API_BASE unless the page and API truly share the same origin (avoids hitting the static dev server on :3000).
-    const wsBase = dashboardConfig.wsUrl
-        ? null
-        : (sameOrigin && !originIsDev) ? loc.origin : base;
-
-    WS_URL = dashboardConfig.wsUrl || toWsUrl(wsBase);
+    WS_URL = dashboardConfig.wsUrl || toWsUrl(base);
 
     console.log('Dashboard endpoints resolved', { API_BASE, WS_URL });
 }
@@ -831,7 +745,15 @@ function updateConnectionStatus(connected) {
                 <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
                 <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-primary"></span>
             </span>
-            <span class="text-sm text-primary font-medium">HTTP fallback</span>
+            <span class="text-sm text-primary font-medium">Live (HTTP)</span>
+        `;
+    } else if (wsConnecting) {
+        statusEl.innerHTML = `
+            <span class="relative flex h-2.5 w-2.5">
+                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+                <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-primary"></span>
+            </span>
+            <span class="text-sm text-primary font-medium">Connecting...</span>
         `;
     } else {
         statusEl.innerHTML = `
@@ -1064,7 +986,7 @@ function updateTradesTable(trades) {
     if (!trades || trades.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="8" class="px-6 py-4 text-center text-text-secondary">No trades found</td>
+                <td colspan="9" class="px-4 py-4 text-center text-text-secondary">No trades found</td>
             </tr>
         `;
         return;
@@ -1080,10 +1002,10 @@ function updateTradesTable(trades) {
         const pnlSign = (trade.pnl || 0) >= 0 ? '+' : '';
         const baseSymbol = trade.symbol ? trade.symbol.replace('USDT', '') : '';
         const remainingHtml = isPartial && trade.remaining_amount
-            ? `<div class="text-xs text-primary mt-1">Kalan: ${Number(trade.remaining_amount).toFixed(4)} ${baseSymbol}</div>`
+            ? `<div class="text-xs text-primary mt-1">Remaining: ${Number(trade.remaining_amount).toFixed(4)} ${baseSymbol}</div>`
             : '';
         const closedHtml = isPartial
-            ? `<div class="text-xs text-text-light mt-1">Kapatılan: ${trade.amount.toFixed(4)} ${baseSymbol}</div>`
+            ? `<div class="text-xs text-text-light mt-1">Closed: ${trade.amount.toFixed(4)} ${baseSymbol}</div>`
             : '';
 
         // Time formatting - full date/time format
@@ -1096,18 +1018,23 @@ function updateTradesTable(trades) {
         // Her satıra hover class ekle - signal eşleştirmesi hover zamanında yapılacak
         return `
             <tr class="${borderClass} trade-row-hoverable" data-trade-index="${index}">
-                <td class="px-6 py-4 font-medium text-text-light whitespace-nowrap">${trade.symbol.replace('USDT', '/USD')}</td>
-                <td class="px-6 py-4 ${sideClass}">${sideLabel}</td>
-                <td class="px-6 py-4 text-right">
+                <td class="px-4 py-4 font-medium text-text-light whitespace-nowrap">${trade.symbol.replace('USDT', '/USD')}</td>
+                <td class="px-4 py-4 ${sideClass}">${sideLabel}</td>
+                <td class="px-4 py-4 text-right">
                     ${isPartial ? '' : trade.amount.toFixed(4)}
                     ${closedHtml}
                     ${remainingHtml}
                 </td>
-                <td class="px-6 py-4 text-right">${formatCurrency(trade.entry_price)}</td>
-                <td class="px-6 py-4 text-right">${exitPriceFormatted}</td>
-                <td class="px-6 py-4 text-right ${pnlClass}">${pnlSign}${formatCurrency(trade.pnl || 0)}</td>
-                <td class="px-6 py-4 text-right">${entryTimeFormatted}</td>
-                <td class="px-6 py-4 text-right">${exitTimeFormatted}</td>
+                <td class="px-4 py-4 text-right">${formatCurrency(trade.entry_price)}</td>
+                <td class="px-4 py-4 text-right">${exitPriceFormatted}</td>
+                <td class="px-4 py-4 text-right ${pnlClass}">${pnlSign}${formatCurrency(trade.pnl || 0)}</td>
+                <td class="px-4 py-4 text-right">${entryTimeFormatted}</td>
+                <td class="px-4 py-4 text-right">${exitTimeFormatted}</td>
+                <td class="px-2 py-4 text-center">
+                    <button onclick="copyTradeToClipboard(${index}, event)" class="text-text-secondary hover:text-primary transition-colors" title="Copy">
+                        <span class="material-symbols-outlined text-base" id="copy-icon-${index}">content_copy</span>
+                    </button>
+                </td>
             </tr>
         `;
     }).join('');
@@ -1265,6 +1192,174 @@ function downloadTradesCSV() {
     window.open(url, '_blank');
 }
 
+// Copy modal state
+let currentCopyTradeIndex = null;
+const copyFieldDefinitions = [
+    { key: 'symbol', label: 'Symbol', getValue: (t) => t.symbol || '-' },
+    { key: 'side', label: 'Side', getValue: (t) => t.side || '-' },
+    { key: 'position_side', label: 'Position Side', getValue: (t) => t.position_side || '-' },
+    { key: 'amount', label: 'Amount', getValue: (t) => t.amount || '-' },
+    { key: 'entry_price', label: 'Entry Price', getValue: (t) => t.entry_price || '-' },
+    { key: 'exit_price', label: 'Exit Price', getValue: (t) => t.close_price || '-' },
+    { key: 'pnl', label: 'PnL', getValue: (t) => t.pnl !== undefined && t.pnl !== null ? t.pnl : '-' },
+    { key: 'pnl_pct', label: 'PnL %', getValue: (t) => t.pnl_pct !== undefined && t.pnl_pct !== null ? t.pnl_pct + '%' : '-' },
+    { key: 'leverage', label: 'Leverage', getValue: (t) => (t.leverage || 1) + 'x' },
+    { key: 'fees', label: 'Fees', getValue: (t) => t.total_fees !== undefined && t.total_fees !== null ? t.total_fees : (t.fees !== undefined && t.fees !== null ? t.fees : '-') },
+    { key: 'entry_time', label: 'Entry Time', getValue: (t) => t.timestamp ? new Date(t.timestamp).toLocaleString('tr-TR') : '-' },
+    { key: 'exit_time', label: 'Exit Time', getValue: (t) => t.close_time ? new Date(t.close_time).toLocaleString('tr-TR') : '-' },
+    { key: 'entry_reasoning', label: 'Entry Reasoning', getValue: (t) => t.entry_reasoning || t.exit_plan?.reasoning || 'Bilgi yok' },
+    { key: 'entry_prompt', label: 'Entry Prompt', getValue: (t) => {
+        const prompt = t.entry_prompt;
+        return (prompt && prompt !== null && prompt.trim() !== '') ? prompt : 'Prompt bulunamadı';
+    }},
+    { key: 'exit_reasoning', label: 'Exit Reasoning', getValue: (t) => {
+        if (!t?.close_time) return 'Pozisyon açık (henüz kapanış yok)';
+        return t.exit_reasoning || 'Bilgi yok';
+    }},
+    { key: 'exit_prompt', label: 'Exit Prompt', getValue: (t) => {
+        if (!t?.close_time) return 'Pozisyon açık (kapanış promptu henüz yok)';
+        const prompt = t.exit_prompt;
+        return (prompt && prompt !== null && prompt.trim() !== '') ? prompt : 'Prompt bulunamadı';
+    }}
+];
+
+// Open copy modal
+function copyTradeToClipboard(tradeIndex, event) {
+    event.stopPropagation();
+    showCopyModal(tradeIndex);
+}
+
+function showCopyModal(tradeIndex) {
+    currentCopyTradeIndex = tradeIndex;
+    const fieldsContainer = document.getElementById('copy-fields');
+
+    const trade = cachedTrades?.[tradeIndex];
+    const isClosed = !!trade?.close_time;
+    const isOpen = !isClosed;
+    const isDefaultChecked = (fieldKey) => {
+        if (isOpen && (fieldKey === 'exit_reasoning' || fieldKey === 'exit_prompt')) return false;
+        return true;
+    };
+
+    fieldsContainer.innerHTML = copyFieldDefinitions.map(field => `
+        <label class="flex items-center gap-2 p-2 rounded hover:bg-background-dark cursor-pointer">
+            <input type="checkbox" class="copy-field-checkbox accent-primary" data-field="${field.key}" ${isDefaultChecked(field.key) ? 'checked' : ''}>
+            <span class="text-sm text-text-light">${field.label}</span>
+        </label>
+    `).join('');
+
+    const btn = document.querySelector('button[onclick="selectAllFields()"]');
+    if (btn) {
+        const allChecked = copyFieldDefinitions.every(field => isDefaultChecked(field.key));
+        btn.textContent = allChecked ? 'Deselect All' : 'Select All';
+    }
+
+    document.getElementById('copy-modal').classList.remove('hidden');
+}
+
+function closeCopyModal() {
+    document.getElementById('copy-modal').classList.add('hidden');
+    currentCopyTradeIndex = null;
+}
+
+function selectAllFields() {
+    const checkboxes = document.querySelectorAll('.copy-field-checkbox');
+    const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+    checkboxes.forEach(cb => cb.checked = !allChecked);
+    // Update button text based on state
+    const btn = document.querySelector('button[onclick="selectAllFields()"]');
+    if (btn) {
+        btn.textContent = allChecked ? 'Select All' : 'Deselect All';
+    }
+}
+
+async function ensureTradePromptsResolved(trade, selectedKeys) {
+    if (!trade || !trade.id || !selectedKeys || selectedKeys.length === 0) {
+        return trade;
+    }
+
+    const isBlank = (value) => value === undefined || value === null || (typeof value === 'string' && value.trim() === '');
+    const needsEntryPrompt = selectedKeys.includes('entry_prompt') && isBlank(trade.entry_prompt);
+    const needsExitPrompt = selectedKeys.includes('exit_prompt') && isBlank(trade.exit_prompt) && !!trade.close_time;
+
+    if (!needsEntryPrompt && !needsExitPrompt) {
+        return trade;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE}/api/trades/${trade.id}/resolved-prompts`);
+        if (!response.ok) {
+            console.warn('Prompt resolve request failed:', response.status);
+            return trade;
+        }
+
+        const data = await response.json();
+        if (needsEntryPrompt && data.entry_prompt !== undefined) trade.entry_prompt = data.entry_prompt;
+        if (needsExitPrompt && data.exit_prompt !== undefined) trade.exit_prompt = data.exit_prompt;
+    } catch (err) {
+        console.warn('Prompt resolve request failed:', err);
+    }
+
+    return trade;
+}
+
+async function copySelectedFields() {
+    if (currentCopyTradeIndex === null) {
+        console.error('Trade index bulunamadı');
+        closeCopyModal();
+        return;
+    }
+    const trade = cachedTrades[currentCopyTradeIndex];
+    if (!trade) {
+        console.error('Trade verisi bulunamadı');
+        closeCopyModal();
+        return;
+    }
+
+    const checkboxes = document.querySelectorAll('.copy-field-checkbox:checked');
+    const selectedKeys = Array.from(checkboxes).map(cb => cb.dataset.field).filter(Boolean);
+
+    await ensureTradePromptsResolved(trade, selectedKeys);
+
+    const selectedFields = [];
+
+    checkboxes.forEach(cb => {
+        const fieldKey = cb.dataset.field;
+        const fieldDef = copyFieldDefinitions.find(f => f.key === fieldKey);
+        if (fieldDef) {
+            const value = fieldDef.getValue(trade);
+            selectedFields.push(`${fieldDef.label}: ${value}`);
+        }
+    });
+
+    if (selectedFields.length === 0) {
+        closeCopyModal();
+        return;
+    }
+
+    const text = selectedFields.join('\n');
+
+    // Clipboard'a kopyala
+    try {
+        await navigator.clipboard.writeText(text);
+        console.log('✅ Clipboard\'a başarıyla yazıldı:', text.length, 'karakter');
+
+        const icon = document.getElementById(`copy-icon-${currentCopyTradeIndex}`);
+        if (icon) {
+            icon.textContent = 'check';
+            icon.classList.add('text-profit');
+            setTimeout(() => {
+                icon.textContent = 'content_copy';
+                icon.classList.remove('text-profit');
+            }, 1500);
+        }
+        closeCopyModal();
+    } catch (err) {
+        console.error('Clipboard write failed:', err);
+        closeCopyModal();
+    }
+}
+
 // Update portfolio UI for specific symbol or all
 function updatePortfolioUIForSymbol(symbol) {
     if (!portfolioData) return;
@@ -1342,16 +1437,18 @@ function connectWebSocket() {
         wsReconnectTimeout = null;
     }
 
-    console.log('Attempting WebSocket connection to:', WS_URL);
-    ws = new WebSocket(WS_URL);
+    // Cloudflare için cache-bypass ve priority hint
+    const wsUrlWithParams = `${WS_URL}?cf-priority=high&t=${Date.now()}`;
+    console.log('Attempting WebSocket connection to:', wsUrlWithParams);
+    ws = new WebSocket(wsUrlWithParams);
 
-    // Connection timeout - if not connected in 10 seconds, consider it failed
+    // Connection timeout - 5 seconds to allow server initialization
     const connectionTimeout = setTimeout(() => {
         if (ws && ws.readyState !== WebSocket.OPEN) {
             console.log('WebSocket connection timeout');
             ws.close();
         }
-    }, 10000);
+    }, 5000);
 
     ws.onopen = () => {
         clearTimeout(connectionTimeout);
@@ -1371,7 +1468,7 @@ function connectWebSocket() {
             symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
         }));
 
-        // Start heartbeat at 10 seconds (faster than Cloudflare timeout)
+        // Start heartbeat at 15 seconds (Cloudflare timeout 100s, bu yeterli)
         // Also check connection state and auto-reconnect if needed
         if (pingInterval) clearInterval(pingInterval);
         pingInterval = setInterval(() => {
@@ -1381,7 +1478,7 @@ function connectWebSocket() {
                 console.log('Connection lost in ping check, reconnecting...');
                 connectWebSocket();
             }
-        }, 10000); // 10s for faster disconnect detection
+        }, 15000); // 15s - Cloudflare timeout 100s, bu yeterli ve daha az network overhead
 
         // Start data flow monitor - reconnect if no data for too long
         if (dataFlowMonitor) clearInterval(dataFlowMonitor);
@@ -1442,11 +1539,11 @@ function connectWebSocket() {
             dataFlowMonitor = null;
         }
 
-        // Faster retry if connection was working but data stopped (stale)
+        // Exponential backoff with minimum 1 second delay
         const retryDelay = wasStale
-            ? Math.min(1000 * (wsFailCount + 1), 5000)  // 1-5s for stale
-            : Math.min(2000 * wsFailCount, 10000);      // 2-10s normal
-        console.log(`Retrying WebSocket in ${retryDelay/1000}s (wasStale: ${wasStale})`);
+            ? Math.min(1000 * Math.pow(1.5, wsFailCount - 1), 10000)  // 1s-10s stale
+            : Math.min(1500 * Math.pow(1.5, wsFailCount - 1), 15000); // 1.5s-15s normal
+        console.log(`Retrying WebSocket in ${retryDelay/1000}s (wasStale: ${wasStale}, failCount: ${wsFailCount})`);
         wsReconnectTimeout = setTimeout(connectWebSocket, retryDelay);
     };
 
@@ -1614,10 +1711,10 @@ function handleNewTrade(trade) {
         : (trade.side === 'BUY' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss');
     const baseSymbol = trade.symbol ? trade.symbol.replace('USDT', '') : '';
     const remainingHtml = isPartial && trade.remaining_amount
-        ? `<div class="text-[11px] text-primary mt-1">Kalan: ${Number(trade.remaining_amount).toFixed(4)} ${baseSymbol}</div>`
+        ? `<div class="text-[11px] text-primary mt-1">Remaining: ${Number(trade.remaining_amount).toFixed(4)} ${baseSymbol}</div>`
         : '';
     const closedHtml = isPartial
-        ? `<div class="text-[11px] text-text-light mt-1">Kapatılan: ${Number(trade.amount || 0).toFixed(4)} ${baseSymbol}</div>`
+        ? `<div class="text-[11px] text-text-light mt-1">Closed: ${Number(trade.amount || 0).toFixed(4)} ${baseSymbol}</div>`
         : '';
 
     row.innerHTML = `
@@ -1703,18 +1800,22 @@ function updateAIInsightsUI(signals) {
 }
 
 // Initialize
-document.addEventListener('DOMContentLoaded', async () => {
-    await initEndpoints();
+document.addEventListener('DOMContentLoaded', () => {
+    initEndpoints();
 
-    // Initial fetch
+    // Optimistic başlangıç: Polling ile veriler hemen gelsin
+    startPolling();
+    updateConnectionStatus(false);
+
+    // WebSocket bağlantısını başlat (paralel)
+    connectWebSocket();
+
+    // İlk veri yüklemeleri (paralel)
     fetchPortfolio();
     fetchTrades();
     fetchEquityCurve(30);
     fetchPnLHistogram();
     fetchGLMSignals();
-
-    // Connect WebSocket
-    connectWebSocket();
 
     // Visibility API: Reconnect when page becomes visible again
     // Browsers suspend WebSocket connections when tab is hidden, Cloudflare may drop them

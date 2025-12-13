@@ -143,7 +143,7 @@ class RedisConnectionManager:
         self._pubsub_connections: Dict[str, redis.client.PubSub] = {}
         self._pubsub_clients: Dict[str, redis.Redis] = {}  # Keep client refs for cleanup
         self._pubsub_lock = threading.Lock()
-        self._max_pubsub_connections = 10
+        self._max_pubsub_connections = 20  # Increased for multi-symbol support
 
         # Circuit breaker
         self._circuit_breaker = CircuitBreaker(threshold=5, timeout=60)
@@ -167,7 +167,7 @@ class RedisConnectionManager:
 
             self._sync_pool = redis.ConnectionPool.from_url(
                 str(self._settings.url),
-                max_connections=10,
+                max_connections=100,  # Increased for concurrent operations
                 socket_timeout=socket_timeout,
                 socket_connect_timeout=socket_timeout,
                 health_check_interval=30,
@@ -181,7 +181,7 @@ class RedisConnectionManager:
 
             # Test connection
             self._sync_client.ping()
-            logger.info("Sync Redis pool initialized: max_connections=10")
+            logger.info("Sync Redis pool initialized: max_connections=100")
 
         except Exception as e:
             logger.error("Failed to initialize Redis pool: %s", e)
@@ -210,12 +210,18 @@ class RedisConnectionManager:
 
         with self._async_lock:
             if loop_id not in self._async_clients:
+                socket_timeout = float(self._settings.socket_timeout)
                 self._async_clients[loop_id] = aioredis.from_url(
                     str(self._settings.url),
-                    max_connections=10,
+                    max_connections=100,  # Increased for concurrent operations
+                    socket_timeout=socket_timeout,
+                    socket_connect_timeout=socket_timeout,
                     decode_responses=True,
                 )
-                logger.debug("Async Redis client initialized for loop %d", loop_id)
+                logger.debug(
+                    "Async Redis client initialized for loop %d (timeout=%.1fs)",
+                    loop_id, socket_timeout
+                )
 
             return self._async_clients[loop_id]
 

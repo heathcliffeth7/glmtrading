@@ -570,3 +570,45 @@ async def stream(symbol: str, handler: Callable[[WebSocketMessage], None], inter
         await client.listen(handler)
     finally:
         await client.close()
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Binance WebSocket Kline Feed")
+    parser.add_argument("--symbols", nargs="+", required=True, help="Trading symbols (e.g., BTCUSDT ETHUSDT)")
+    parser.add_argument("--interval", default="1m", help="Kline interval (default: 1m)")
+    args = parser.parse_args()
+
+    async def main():
+        clients = []
+        try:
+            logger.info("Starting Binance WebSocket feed for %s with interval %s", args.symbols, args.interval)
+
+            for symbol in args.symbols:
+                client = BinanceWebSocketClient(symbol=symbol, interval=args.interval)
+                clients.append(client)
+                logger.info("Created WebSocket client for %s", symbol)
+
+            async def handler(msg: WebSocketMessage):
+                # Internal message handling - price caching and Redis publish happens in listen()
+                pass
+
+            # Run all clients concurrently
+            logger.info("Starting %d WebSocket listeners...", len(clients))
+            await asyncio.gather(*[c.listen(handler) for c in clients])
+
+        except KeyboardInterrupt:
+            logger.info("Received shutdown signal")
+        except Exception as e:
+            logger.error("WebSocket feed error: %s", e, exc_info=True)
+        finally:
+            logger.info("Shutting down WebSocket clients...")
+            for c in clients:
+                try:
+                    await c.close()
+                except Exception:
+                    pass
+            logger.info("WebSocket feed shutdown complete")
+
+    asyncio.run(main())

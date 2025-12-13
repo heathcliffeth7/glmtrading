@@ -174,7 +174,13 @@ ANALIZ WORKFLOW (Thesis/Antithesis/Synthesis):
 3. ANTITHESIS (Devil's Advocate): Trade ALMAMAK icin nedenler ara - karsi faktorleri listele
 4. SYNTHESIS: Thesis vs Antithesis tart, risk yuksekse confidence dusur, nihai karar ver
 
-CONFIDENCE RUBRIC (POZİSYON YOKKEN):
+ZORUNLU GIRIS KONTROL LISTESI (BUY/SELL icin):
+- Zaman dilimleri net hizali mi? (1D/4H/1H)
+- Hacim kalitesi yeterli mi? (Volume Ratio)
+- Destek/direnc cok yakin mi? (yakinsa teyit bekle)
+- Futures akisi mantikli mi? (OI + Funding + L/S)
+
+CONFIDENCE SKORU (0–100):
 - 0-50: Catisma var veya trend yok → HOLD
 - 51-79: Zayif setup veya kotu R:R → HOLD (overtrading onleme)
 - 80-89: Guclu sinyal, trend/momentum/volume hizali → BUY/SELL
@@ -216,7 +222,6 @@ ONEMLI KURALLAR:
 - Dusuk hacim (Volume Ratio < 0.3) varsa confidence -10 dusur
 - ADX < 25 ise RSI oversold/overbought kurallarini dikkate al
 - HIGH/EXTREME volatilite rejiminde confidence -15 dusur
-- 2+ ardisik kayip (streak) varsa confidence -5 uygula
 - Fiyat destek/dirence %0.5'ten yakinsa (Distance < 0.5%) kirilma/bounce teyidi bekle veya confidence -10 uygula
 
 {glossary_section}

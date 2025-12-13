@@ -22,7 +22,7 @@ def _get_publisher() -> redis.Redis:
     return get_redis_manager().get_sync_client()
 
 # Local message queue for Redis failure resilience
-_local_queue: deque = deque(maxlen=1000)  # Keep last 1000 messages
+_local_queue: deque = deque(maxlen=50000)  # Keep last 50000 messages (increased for burst handling)
 _redis_connected = True
 _queue_lock = threading.Lock()
 _retry_thread_started = False
@@ -165,7 +165,7 @@ def _get_async_queue() -> asyncio.Queue:
     """Get or create async queue for current event loop."""
     loop_id = _get_loop_id()
     if loop_id not in _async_queues or _async_queues[loop_id] is None:
-        _async_queues[loop_id] = asyncio.Queue(maxsize=1000)
+        _async_queues[loop_id] = asyncio.Queue(maxsize=50000)  # Increased for burst handling
     return _async_queues[loop_id]
 
 

@@ -51,8 +51,34 @@ class QwenTokenService:
         self._running = False
         self._captured_tokens: Dict[str, str] = {}
 
+    async def _ensure_browser_installed(self):
+        """Playwright browser yoksa otomatik yükle."""
+        import subprocess
+
+        browser_path = Path.home() / ".cache/ms-playwright"
+        chromium_exists = browser_path.exists() and any(browser_path.glob("chromium*"))
+
+        if not chromium_exists:
+            logger.warning("Playwright browser not found, installing chromium...")
+            result = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 dakika timeout
+            )
+            if result.returncode == 0:
+                logger.info("Chromium browser installed successfully")
+            else:
+                logger.error("Browser install failed: %s", result.stderr)
+                raise RuntimeError("Could not install Playwright chromium browser")
+        else:
+            logger.info("Playwright browser found")
+
     async def start(self):
         """Main entry point - starts refresh loop."""
+        # Playwright browser kontrolü - yoksa otomatik yükle
+        await self._ensure_browser_installed()
+
         logger.info("=" * 60)
         logger.info("Qwen Token Service Starting")
         logger.info("=" * 60)

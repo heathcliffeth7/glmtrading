@@ -240,6 +240,7 @@ class SafetyLimits:
                     reason_secondary=decision.reason_secondary,
                     glm_response_time_ms=decision.glm_response_time_ms,
                     exit_plan=decision.exit_plan,
+                    prompt_sent=decision.prompt_sent,
                     decision_timestamp=decision.decision_timestamp,
                     market_snapshot_timestamp=decision.market_snapshot_timestamp,
                     close_side=decision.close_side,
@@ -261,6 +262,7 @@ class SafetyLimits:
                 reason_secondary=decision.reason_secondary,
                 glm_response_time_ms=decision.glm_response_time_ms,
                 exit_plan=decision.exit_plan,
+                prompt_sent=decision.prompt_sent,
                 decision_timestamp=decision.decision_timestamp,
                 market_snapshot_timestamp=decision.market_snapshot_timestamp,
                 close_side=decision.close_side,
@@ -323,8 +325,32 @@ class ConfidenceGuardrails:
             else:  # 80-84
                 max_amount = 0.15  # Moderate-high confidence
             
+            # If amount is 0 or too small, set default based on confidence
+            if decision.amount < 0.01:  # Less than 1% is effectively zero
+                logger.info(
+                    "📊 Amount was %.4f (too small), setting default: %.4f (GLM confidence %.1f%%)",
+                    decision.amount,
+                    max_amount,
+                    decision.glm_confidence,
+                )
+                return RiskDecision(
+                    action=decision.action,
+                    amount=max_amount,
+                    reasoning=f"{decision.reasoning} | Default position size {max_amount:.0%} (GLM didn't specify amount)",
+                    leverage=decision.leverage,
+                    glm_confidence=decision.glm_confidence,
+                    reason_primary=decision.reason_primary,
+                    reason_secondary=decision.reason_secondary,
+                    glm_response_time_ms=decision.glm_response_time_ms,
+                    decision_timestamp=decision.decision_timestamp,
+                    market_snapshot_timestamp=decision.market_snapshot_timestamp,
+                    close_side=decision.close_side,
+                    exit_plan=decision.exit_plan,
+                    glm_response_json=decision.glm_response_json,
+                    prompt_sent=decision.prompt_sent,
+                )
             # Clamp amount if GLM requested too much
-            if decision.amount > max_amount:
+            elif decision.amount > max_amount:
                 logger.info(
                     "Position size clamped: %.4f → %.4f (GLM confidence %.1f%%)",
                     decision.amount,
@@ -345,8 +371,9 @@ class ConfidenceGuardrails:
                     close_side=decision.close_side,
                     exit_plan=decision.exit_plan,
                     glm_response_json=decision.glm_response_json,
+                    prompt_sent=decision.prompt_sent,
                 )
-            
+
             # GLM amount is reasonable, use it directly
             logger.info(
                 "Using GLM decision directly: action=%s amount=%.4f confidence=%.1f%%",
@@ -389,6 +416,7 @@ class ConfidenceGuardrails:
                         decision_timestamp=decision.decision_timestamp,
                         market_snapshot_timestamp=decision.market_snapshot_timestamp,
                         close_side=decision.close_side,
+                        prompt_sent=decision.prompt_sent,
                     )
 
             logger.info(
@@ -405,6 +433,7 @@ class ConfidenceGuardrails:
                 reason_primary=decision.reason_primary,
                 reason_secondary=decision.reason_secondary,
                 glm_response_time_ms=decision.glm_response_time_ms,
+                prompt_sent=decision.prompt_sent,
                 decision_timestamp=decision.decision_timestamp,
                 market_snapshot_timestamp=decision.market_snapshot_timestamp,
                 close_side=decision.close_side,
@@ -428,6 +457,7 @@ class ConfidenceGuardrails:
                     reason_primary=decision.reason_primary,
                     reason_secondary=decision.reason_secondary,
                     glm_response_time_ms=decision.glm_response_time_ms,
+                    prompt_sent=decision.prompt_sent,
                     decision_timestamp=decision.decision_timestamp,
                     market_snapshot_timestamp=decision.market_snapshot_timestamp,
                     close_side=decision.close_side,
@@ -448,6 +478,7 @@ class ConfidenceGuardrails:
                 reason_primary=decision.reason_primary,
                 reason_secondary=decision.reason_secondary,
                 glm_response_time_ms=decision.glm_response_time_ms,
+                prompt_sent=decision.prompt_sent,
                 decision_timestamp=decision.decision_timestamp,
                 market_snapshot_timestamp=decision.market_snapshot_timestamp,
                 close_side=decision.close_side,
@@ -471,6 +502,7 @@ class ConfidenceGuardrails:
                 amount=0.0,
                 reasoning=f"{decision.reasoning} | Confidence guardrail zero amount",
                 leverage=decision.leverage,
+                prompt_sent=decision.prompt_sent,
                 decision_timestamp=decision.decision_timestamp,
                 market_snapshot_timestamp=decision.market_snapshot_timestamp,
             )
@@ -495,6 +527,7 @@ class ConfidenceGuardrails:
                 close_side=decision.close_side,
                 reason_secondary=decision.reason_secondary,
                 glm_response_time_ms=decision.glm_response_time_ms,
+                prompt_sent=decision.prompt_sent,
             )
 
         return decision

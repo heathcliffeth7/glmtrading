@@ -41,7 +41,7 @@ async def _get_shared_async_redis() -> aioredis.Redis:
         _shared_async_redis = aioredis.from_url(
             str(settings.redis.url),
             decode_responses=True,
-            max_connections=10  # Connection pool
+            max_connections=40  # Connection pool (increased for multiple pubsub subscribers)
         )
     return _shared_async_redis
 
@@ -131,17 +131,11 @@ async def server_heartbeat_task(websocket: WebSocket):
     Server-side heartbeat to keep connection alive through Cloudflare.
 
     Cloudflare can drop idle connections early (observed <15s in some cases).
-    Sending heartbeat every few seconds with an immediate first heartbeat.
+    First heartbeat is delayed to let client fully initialize.
     """
     try:
-        # Send immediate heartbeat to establish connection is alive
-        try:
-            await websocket.send_json({
-                "type": "heartbeat",
-                "timestamp": datetime.utcnow().isoformat()
-            })
-        except Exception:
-            return  # Connection already dead
+        # Brief wait before first heartbeat - client already received "connected"
+        await asyncio.sleep(0.2)
 
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
@@ -354,8 +348,13 @@ def _sync_get_latest_trade():
                 "close_price": trade.close_price,
                 "pnl": trade.pnl or 0.0,
                 "leverage": trade.leverage or 1.0,
+                "fees": trade.fees or 0.0,
                 "timestamp": trade.timestamp.isoformat() if trade.timestamp else None,
                 "close_time": trade.close_time.isoformat() if trade.close_time else None,
+                "entry_reasoning": trade.entry_reasoning,
+                "exit_reasoning": trade.exit_reasoning,
+                "entry_prompt": trade.entry_prompt,
+                "exit_prompt": trade.exit_prompt,
                 "is_partial_close": is_partial_close,
                 "action_label": action_label,
                 "remaining_amount": remaining_amount,
@@ -439,24 +438,27 @@ async def websocket_portfolio(websocket: WebSocket):
     # Start global price publisher task if not running (publishes to Redis)
     _ensure_price_publisher()
 
-    # Start per-connection tasks
-    signal_task = asyncio.create_task(signal_subscriber_task(websocket))
-    price_task = asyncio.create_task(price_subscriber_task(websocket))
-    heartbeat_task = asyncio.create_task(server_heartbeat_task(websocket))
-
-    # Start global trade broadcast task if not running
-    if _trade_task is None or _trade_task.done():
-        _trade_task = asyncio.create_task(trade_broadcast_task())
-        logger.info("Started trade broadcast task")
-
     try:
-        # Send initial connection confirmation
+        # Send initial connection confirmation FIRST (before any background tasks)
         await websocket.send_json({
             "type": "connected",
             "message": "Connected to Trading Dashboard WebSocket",
             "subscribed_symbols": SYMBOLS,
             "timestamp": datetime.utcnow().isoformat(),
         })
+
+        # Brief delay to let client process "connected" message
+        await asyncio.sleep(0.05)
+
+        # Start per-connection tasks
+        signal_task = asyncio.create_task(signal_subscriber_task(websocket))
+        price_task = asyncio.create_task(price_subscriber_task(websocket))
+        heartbeat_task = asyncio.create_task(server_heartbeat_task(websocket))
+
+        # Start global trade broadcast task if not running
+        if _trade_task is None or _trade_task.done():
+            _trade_task = asyncio.create_task(trade_broadcast_task())
+            logger.info("Started trade broadcast task")
 
         # Listen for client messages with timeout check
         while True:

@@ -4,12 +4,55 @@ Indicator Interpretation Module
 Context-aware interpretation of technical indicators.
 """
 
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 from app.utils.logging import get_logger
 
 
 logger = get_logger(__name__)
+
+
+def calculate_cvd_context(
+    cvd_values: List[float],
+    *,
+    price_start: float,
+    price_end: float,
+) -> Dict[str, str]:
+    """
+    Calculate high-level CVD/price context based on directional agreement.
+
+    Returns a dict with:
+      - context: TREND_CONFIRMED_BULLISH / TREND_CONFIRMED_BEARISH /
+                 BEARISH_DIVERGENCE / BULLISH_DIVERGENCE / NEUTRAL
+      - cvd_direction: UP / DOWN / FLAT
+      - price_direction: UP / DOWN / FLAT
+    """
+    if not cvd_values or len(cvd_values) < 2:
+        return {"context": "NEUTRAL", "cvd_direction": "FLAT", "price_direction": "FLAT"}
+
+    cvd_direction = "FLAT"
+    if cvd_values[-1] > cvd_values[0]:
+        cvd_direction = "UP"
+    elif cvd_values[-1] < cvd_values[0]:
+        cvd_direction = "DOWN"
+
+    price_direction = "FLAT"
+    if price_end > price_start:
+        price_direction = "UP"
+    elif price_end < price_start:
+        price_direction = "DOWN"
+
+    context = "NEUTRAL"
+    if cvd_direction == "UP" and price_direction == "UP":
+        context = "TREND_CONFIRMED_BULLISH"
+    elif cvd_direction == "DOWN" and price_direction == "DOWN":
+        context = "TREND_CONFIRMED_BEARISH"
+    elif cvd_direction == "DOWN" and price_direction == "UP":
+        context = "BEARISH_DIVERGENCE"
+    elif cvd_direction == "UP" and price_direction == "DOWN":
+        context = "BULLISH_DIVERGENCE"
+
+    return {"context": context, "cvd_direction": cvd_direction, "price_direction": price_direction}
 
 
 class IndicatorInterpreter:
@@ -66,71 +109,29 @@ class IndicatorInterpreter:
         ):
             return "NEUTRAL", "Insufficient data"
 
-        cvd_slope = self._calculate_slope(cvd_values, lookback)
-        price_slope = self._calculate_slope(closes, lookback)
+        window = min(lookback, len(cvd_values), len(closes))
+        cvd_window = cvd_values[-window:]
+        close_window = closes[-window:]
 
-        # Normalize to percentage
-        price_pct = (price_slope / closes[-1]) * 100 if closes[-1] > 0 else 0
+        res = calculate_cvd_context(
+            cvd_window,
+            price_start=close_window[0],
+            price_end=close_window[-1],
+        )
+        label = res["context"]
 
-        cvd_window = cvd_values[-lookback:] if len(cvd_values) >= lookback else cvd_values
-        cvd_range = max(cvd_window) - min(cvd_window) if cvd_window else abs(cvd_values[-1])
-        cvd_pct = (cvd_slope / cvd_range) * 100 if cvd_range > 0 else 0
-
-        flat_threshold = 0.1  # 0.1% is flat
-
-        # PASSIVE_ABSORPTION: Price stable/rising + CVD falling
-        if price_pct >= -flat_threshold and cvd_pct < -5.0:
-            if current_position == "SHORT":
-                return (
-                    "PASSIVE_ABSORPTION",
-                    "Hidden buying detected - SHORT position jump risk",
-                )
-            return (
-                "PASSIVE_ABSORPTION",
-                "Price stable, CVD falling - hidden buying (Bullish)",
-            )
-
-        # PASSIVE_DISTRIBUTION: Price stable/falling + CVD rising
-        if price_pct <= flat_threshold and cvd_pct > 5.0:
+        if label == "TREND_CONFIRMED_BULLISH":
+            return label, "CVD confirms bullish price direction"
+        if label == "TREND_CONFIRMED_BEARISH":
+            return label, "CVD confirms bearish price direction"
+        if label == "BEARISH_DIVERGENCE":
             if current_position == "LONG":
-                return (
-                    "PASSIVE_DISTRIBUTION",
-                    "Hidden selling detected - LONG position drop risk",
-                )
-            return (
-                "PASSIVE_DISTRIBUTION",
-                "Price stable, CVD rising - hidden selling (Bearish)",
-            )
-
-        # TREND_CONFIRMED: Same direction
-        if (price_pct > flat_threshold and cvd_pct > 3.0) or (
-            price_pct < -flat_threshold and cvd_pct < -3.0
-        ):
-            return "TREND_CONFIRMED", "CVD confirms price direction"
-
-        # BEARISH_DIVERGENCE: Price rising but CVD falling
-        if price_pct > flat_threshold and cvd_pct < -3.0:
-            if current_position == "LONG":
-                return (
-                    "BEARISH_DIVERGENCE",
-                    "Price rising but CVD falling - LONG position weakening risk",
-                )
-            return (
-                "BEARISH_DIVERGENCE",
-                "Price rising but CVD falling - weakening trend",
-            )
-
-        # BULLISH_DIVERGENCE: Price falling but CVD rising
-        if price_pct < -flat_threshold and cvd_pct > 3.0:
+                return label, "Price rising but CVD falling - LONG position weakening risk"
+            return label, "Price rising but CVD falling - weakening trend"
+        if label == "BULLISH_DIVERGENCE":
             if current_position == "SHORT":
-                return (
-                    "BULLISH_DIVERGENCE",
-                    "Price falling but CVD rising - SHORT position reversal risk",
-                )
-            return (
-                "BULLISH_DIVERGENCE",
-                "Price falling but CVD rising - potential reversal",
-            )
+                return label, "Price falling but CVD rising - SHORT position reversal risk"
+            return label, "Price falling but CVD rising - potential reversal"
 
         return "NEUTRAL", "No clear CVD pattern"
 

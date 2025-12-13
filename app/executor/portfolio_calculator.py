@@ -60,7 +60,7 @@ class PortfolioCalculator:
             Dictionary with portfolio metrics
         """
         with Session(engine) as session:
-            portfolio = get_synced_portfolio(session, self._symbol)
+            portfolio = get_synced_portfolio(session, self._symbol, force_sync=False)
             daily_pnl = get_daily_pnl(session)
 
             # Calculate margin from open trades

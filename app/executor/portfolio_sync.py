@@ -6,8 +6,10 @@ This should be called before each trade execution to ensure accurate position tr
 import logging
 import os
 import pickle
+import time
 from datetime import datetime
-from typing import Dict, Optional, Set
+from threading import Lock
+from typing import Dict, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -43,6 +45,11 @@ def _save_abnormal_cache(cache: Set[str]) -> None:
         logger.debug("Could not save abnormal trade cache: %s", e)
 
 _abnormal_trade_ids = _load_abnormal_cache()
+
+# In-memory portfolio cache for reducing DB load
+_portfolio_cache: Dict[str, Tuple[Portfolio, float]] = {}  # {symbol: (portfolio, timestamp)}
+_cache_lock = Lock()
+_CACHE_TTL = 15.0  # 15 seconds TTL (reduced DB load for concurrent access)
 
 # Constants for dynamic position limits
 MAX_POSITION_USD = 60000.0  # $3.000 margin × 20x leverage
@@ -301,15 +308,71 @@ def calculate_actual_position_from_trades(session: Session, symbol: str) -> Dict
         "last_trade_timestamp": last_trade_timestamp,
     }
 
+# Lock retry configuration - daha fazla deneme, daha hızlı başlangıç
+_MAX_LOCK_RETRIES = 5
+_INITIAL_RETRY_DELAY = 0.2  # 200ms (0.2, 0.4, 0.8, 1.6, 3.2s = toplam ~6s)
+
+
+def _get_advisory_lock_id(symbol: str) -> int:
+    """Generate a consistent positive 32-bit integer lock ID for a symbol"""
+    return abs(hash(symbol)) % (2**31)
+
+
+def _acquire_symbol_advisory_lock(session: Session, symbol: str) -> bool:
+    """
+    Try to acquire PostgreSQL advisory lock for symbol.
+    Returns True if lock acquired, False otherwise.
+    Advisory locks are session-level and released when session closes.
+    """
+    lock_id = _get_advisory_lock_id(symbol)
+    try:
+        result = session.execute(
+            text("SELECT pg_try_advisory_lock(:lock_id)"),
+            {"lock_id": lock_id}
+        ).scalar()
+        return bool(result)
+    except Exception as e:
+        logger.debug("Failed to acquire advisory lock for %s: %s", symbol, e)
+        return False
+
+
+def _release_symbol_advisory_lock(session: Session, symbol: str) -> None:
+    """Release PostgreSQL advisory lock for symbol"""
+    lock_id = _get_advisory_lock_id(symbol)
+    try:
+        session.execute(
+            text("SELECT pg_advisory_unlock(:lock_id)"),
+            {"lock_id": lock_id}
+        )
+    except Exception as e:
+        logger.debug("Failed to release advisory lock for %s: %s", symbol, e)
+
+
 def sync_portfolio_with_trades(session: Session, symbol: str) -> Portfolio:
     """
     Synchronize portfolio table with actual trades and return the correct portfolio state.
-    YENİ: Long/short pozisyonları ve last_trade bilgilerini günceller.
+    Uses advisory locks + row-level locks with retry logic for better concurrency.
     """
     def _fallback_portfolio() -> Portfolio:
-        existing = session.query(Portfolio).filter(Portfolio.symbol == symbol).first()
-        if existing:
-            return existing
+        # 1. First check in-memory cache for recent data
+        with _cache_lock:
+            if symbol in _portfolio_cache:
+                cached_portfolio, cached_time = _portfolio_cache[symbol]
+                age = time.time() - cached_time
+                if age < 30:  # 30 saniye - daha taze data tercih et
+                    logger.info("Using cached portfolio for %s (age: %.1fs) due to lock contention", symbol, age)
+                    return cached_portfolio
+
+        # 2. Try to read from DB without lock (read-only fallback)
+        try:
+            existing = session.query(Portfolio).filter(Portfolio.symbol == symbol).first()
+            if existing:
+                logger.debug("Using unlocked DB read for %s fallback", symbol)
+                return existing
+        except Exception:
+            pass
+
+        # 3. Return empty portfolio as last resort
         return Portfolio(
             symbol=symbol,
             position=0.0,
@@ -325,34 +388,48 @@ def sync_portfolio_with_trades(session: Session, symbol: str) -> Portfolio:
 
     # Keep lock waits bounded and give heavier work enough headroom.
     try:
-        session.execute(text("SET LOCAL lock_timeout = '5s'"))
-        session.execute(text("SET LOCAL statement_timeout = '60s'"))
+        session.execute(text("SET LOCAL lock_timeout = '10s'"))
+        session.execute(text("SET LOCAL statement_timeout = '30s'"))
     except Exception:
         logger.debug("Could not set local DB timeouts for portfolio sync")
 
-    # Serialize per-symbol syncs across workers/processes to avoid deadlocks and timeouts.
-    try:
-        session.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:symbol))"),
-            {"symbol": symbol},
-        )
-    except OperationalError as e:
-        session.rollback()
-        logger.info("Advisory lock busy, skipping sync for %s (normal during concurrent operations)", symbol)
-        return _fallback_portfolio()
-    except Exception as e:
-        session.rollback()
-        logger.warning("Advisory lock failed for %s: %s", symbol, e)
-        return _fallback_portfolio()
+    # Try to acquire advisory lock first (non-blocking coordination)
+    advisory_lock_acquired = _acquire_symbol_advisory_lock(session, symbol)
+    if not advisory_lock_acquired:
+        logger.debug("Advisory lock not available for %s, proceeding with row lock only", symbol)
 
+    # Use SKIP LOCKED with retry logic for better concurrency
+    portfolio = None
     try:
         query = session.query(Portfolio).filter(Portfolio.symbol == symbol)
-        try:
-            portfolio = query.with_for_update(nowait=True).first()
-        except OperationalError as e:
-            session.rollback()
-            logger.warning("Portfolio sync skipped (lock contention) for %s: %s", symbol, e)
-            return _fallback_portfolio()
+
+        for attempt in range(_MAX_LOCK_RETRIES):
+            try:
+                portfolio = query.with_for_update(skip_locked=True).first()
+                if portfolio:
+                    break  # Successfully acquired lock
+
+                # Row is locked by another worker, retry with backoff
+                if attempt < _MAX_LOCK_RETRIES - 1:
+                    delay = _INITIAL_RETRY_DELAY * (2 ** attempt)  # 0.5s, 1s, 2s
+                    logger.debug("Portfolio row locked for %s, retrying in %.1fs (attempt %d/%d)",
+                                symbol, delay, attempt + 1, _MAX_LOCK_RETRIES)
+                    time.sleep(delay)
+                else:
+                    logger.debug("Portfolio sync skipped after %d retries for %s", _MAX_LOCK_RETRIES, symbol)
+                    return _fallback_portfolio()
+
+            except OperationalError as e:
+                session.rollback()
+                if attempt < _MAX_LOCK_RETRIES - 1:
+                    delay = _INITIAL_RETRY_DELAY * (2 ** attempt)
+                    logger.debug("Lock contention for %s, retrying in %.1fs (attempt %d/%d): %s",
+                                symbol, delay, attempt + 1, _MAX_LOCK_RETRIES, e)
+                    time.sleep(delay)
+                else:
+                    logger.warning("Portfolio sync failed after %d retries for %s: %s",
+                                  _MAX_LOCK_RETRIES, symbol, e)
+                    return _fallback_portfolio()
 
         if not portfolio:
             portfolio = Portfolio(
@@ -423,13 +500,53 @@ def sync_portfolio_with_trades(session: Session, symbol: str) -> Portfolio:
         session.rollback()
         logger.warning("Portfolio sync error for %s, returning fallback: %s", symbol, e)
         return _fallback_portfolio()
+    finally:
+        # Always release advisory lock if we acquired it
+        if advisory_lock_acquired:
+            _release_symbol_advisory_lock(session, symbol)
 
-def get_synced_portfolio(session: Session, symbol: str) -> Portfolio:
+
+def get_synced_portfolio(session: Session, symbol: str, force_sync: bool = False) -> Portfolio:
     """
     Get portfolio with automatic synchronization.
-    This is the main entry point that should be used instead of direct get_portfolio calls.
+    Uses 15-second in-memory cache to reduce DB load.
+    
+    Args:
+        session: Database session
+        symbol: Trading symbol
+        force_sync: If True, bypass cache and force DB sync (use after trades)
+    
+    Returns:
+        Synced Portfolio object
     """
-    return sync_portfolio_with_trades(session, symbol)
+    now = time.time()
+    
+    # Check cache first (unless forced)
+    if not force_sync:
+        with _cache_lock:
+            if symbol in _portfolio_cache:
+                cached_portfolio, cached_time = _portfolio_cache[symbol]
+                if now - cached_time < _CACHE_TTL:
+                    logger.debug("Portfolio cache hit for %s (age: %.1fs)", symbol, now - cached_time)
+                    return cached_portfolio
+    
+    # Cache miss or expired - sync from DB
+    portfolio = sync_portfolio_with_trades(session, symbol)
+    
+    # Update cache
+    with _cache_lock:
+        _portfolio_cache[symbol] = (portfolio, now)
+    
+    return portfolio
+
+def get_cache_stats() -> Dict[str, any]:
+    """Return cache hit/miss statistics"""
+    with _cache_lock:
+        return {
+            "cached_symbols": list(_portfolio_cache.keys()),
+            "cache_size": len(_portfolio_cache),
+            "ttl_seconds": _CACHE_TTL,
+        }
 
 def calculate_correct_margin_usage(portfolio: Portfolio, current_price: float, leverage: float) -> float:
     """

@@ -1,10 +1,12 @@
 """Portfolio API Routes"""
+import json
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy.orm import Session
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_db
 from app.api.schemas.portfolio import PortfolioSummary, SymbolPosition, EquityCurveResponse, EquityCurvePoint
@@ -17,29 +19,117 @@ SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 INITIAL_CAPITAL_PER_SYMBOL = 10000.0  # Her sembol için ayrı başlangıç bakiyesi
 
 
-async def get_current_price(symbol: str) -> float:
-    """Get current price from Binance (async)"""
+def _read_cached_price(symbol: str, max_age_seconds: int = 60) -> Optional[float]:
     try:
-        import httpx
-        async with httpx.AsyncClient() as client:
+        from app.utils.price_cache import price_cache
+
+        cached = price_cache.get(symbol, max_age_seconds=max_age_seconds)
+        if cached is None:
+            return None
+
+        cached_price = float(cached)
+        return cached_price if cached_price > 0 else None
+    except Exception:
+        return None
+
+
+def _warm_price_cache(prices: dict[str, float]) -> None:
+    try:
+        from app.utils.price_cache import price_cache
+
+        for symbol, price in prices.items():
+            if price and price > 0:
+                price_cache.set(symbol, float(price), source="binance_rest")
+    except Exception:
+        return
+
+
+async def _fetch_binance_prices(
+    symbols: list[str],
+    timeout_seconds: float = 5.0,
+) -> dict[str, float]:
+    if not symbols:
+        return {}
+
+    symbols_upper = [s.upper() for s in symbols if s]
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             response = await client.get(
                 "https://api.binance.com/api/v3/ticker/price",
-                params={"symbol": symbol},
-                timeout=5.0
+                params={"symbols": json.dumps(symbols_upper)},
             )
-            return float(response.json()["price"])
+            response.raise_for_status()
+            payload = response.json()
+
+        if isinstance(payload, dict):
+            symbol = payload.get("symbol")
+            price = payload.get("price")
+            if symbol and price:
+                return {str(symbol).upper(): float(price)}
+            return {}
+
+        prices: dict[str, float] = {}
+        for item in payload or []:
+            try:
+                symbol = str(item.get("symbol", "")).upper()
+                price = float(item.get("price", 0))
+            except Exception:
+                continue
+            if symbol and price > 0:
+                prices[symbol] = price
+        return prices
     except Exception:
-        return 0.0
+        return {}
+
+
+async def get_current_prices(
+    symbols: list[str],
+    cache_max_age_seconds: int = 60,
+) -> dict[str, float]:
+    symbols_upper = [s.upper() for s in symbols if s]
+    prices: dict[str, float] = {}
+    missing: list[str] = []
+
+    for symbol in symbols_upper:
+        cached = _read_cached_price(symbol, max_age_seconds=cache_max_age_seconds)
+        if cached is not None:
+            prices[symbol] = cached
+        else:
+            missing.append(symbol)
+
+    if missing:
+        fetched = await _fetch_binance_prices(missing)
+        prices.update(fetched)
+        _warm_price_cache(fetched)
+
+    for symbol in symbols_upper:
+        prices.setdefault(symbol, 0.0)
+
+    return prices
+
+
+async def get_current_price(symbol: str) -> float:
+    """Get current price from Binance (async)"""
+    cached = _read_cached_price(symbol)
+    if cached is not None:
+        return cached
+
+    fetched = await _fetch_binance_prices([symbol])
+    price = float(fetched.get(symbol.upper(), 0.0))
+    if price > 0:
+        _warm_price_cache({symbol.upper(): price})
+    return price
 
 
 @router.get("", response_model=PortfolioSummary)
 async def get_portfolio_summary(db: Session = Depends(get_db)):
     """Get portfolio summary across all symbols"""
     symbol_data = []
+    current_prices = await get_current_prices(SYMBOLS)
 
     for symbol in SYMBOLS:
-        portfolio = get_synced_portfolio(db, symbol)
-        current_price = await get_current_price(symbol)
+        portfolio = get_synced_portfolio(db, symbol, force_sync=False)
+        current_price = current_prices.get(symbol, 0.0)
 
         # Bu sembol için realized PnL
         symbol_realized = db.query(func.sum(Trade.pnl)).filter(
@@ -178,7 +268,7 @@ async def get_equity_curve(
         total_unrealized = 0.0
         symbols_to_check = [symbol.upper()] if symbol else SYMBOLS
         for sym in symbols_to_check:
-            portfolio = get_synced_portfolio(db, sym)
+            portfolio = get_synced_portfolio(db, sym, force_sync=False)
             if abs(portfolio.position) > 0.0001:
                 current_price = await get_current_price(sym)
                 if current_price > 0:
@@ -218,7 +308,7 @@ async def get_portfolio_by_symbol(
     if symbol not in SYMBOLS:
         raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found")
 
-    portfolio = get_synced_portfolio(db, symbol)
+    portfolio = get_synced_portfolio(db, symbol, force_sync=False)
     current_price = await get_current_price(symbol)
 
     # Get open trades for this symbol
