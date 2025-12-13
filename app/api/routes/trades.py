@@ -107,6 +107,7 @@ def get_trades(
     status: str = Query("all", regex="^(open|closed|all)$", description="Trade status filter"),
     page: int = Query(1, ge=1, description="Page number"),
     per_page: int = Query(20, ge=1, le=100, description="Items per page"),
+    include_prompts: bool = Query(False, description="Include full prompts in response (large payload)"),
     db: Session = Depends(get_db)
 ):
     """Get paginated trade list"""
@@ -179,11 +180,11 @@ def get_trades(
             if matching_signal and matching_signal.get('reasoning'):
                 exit_plan['reasoning'] = matching_signal['reasoning']
 
-        # Exit prompt/reasoning fallback - log'dan ara
+        # Exit prompt/reasoning fallback - log'dan ara (sadece include_prompts=True ise)
         resolved_exit_prompt = t.exit_prompt
         resolved_exit_reasoning = t.exit_reasoning
 
-        if t.close_time and (t.exit_prompt is None or t.exit_reasoning is None):
+        if include_prompts and t.close_time and (t.exit_prompt is None or t.exit_reasoning is None):
             match, _, _ = find_best_entry_in_log_file(
                 Path(LOG_FILE_PATH),
                 max_bytes=50 * 1024 * 1024,  # 50MB
@@ -216,8 +217,8 @@ def get_trades(
             exit_plan=exit_plan,
             exit_reasoning=resolved_exit_reasoning,
             entry_reasoning=t.entry_reasoning,
-            entry_prompt=t.entry_prompt,
-            exit_prompt=resolved_exit_prompt,
+            entry_prompt=t.entry_prompt if include_prompts else None,
+            exit_prompt=resolved_exit_prompt if include_prompts else None,
             is_partial_close=is_partial_close,
             action_label=action_label,
             remaining_amount=remaining_amount,
