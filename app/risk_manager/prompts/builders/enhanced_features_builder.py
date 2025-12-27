@@ -9,6 +9,11 @@ Responsible for building enhanced analysis sections in GLM prompts:
 - Drawdown tracking
 - Correlation risk
 - Time-based position management summaries (TP/Hold)
+- Taker Buy/Sell Ratio (NEW)
+- Order Book Imbalance (NEW)
+- BTC Correlation (NEW)
+- Fibonacci Levels (NEW)
+- Candlestick Patterns (NEW)
 
 This module provides a clean interface for enhanced features while supporting
 graceful degradation when analyzers are unavailable.
@@ -23,6 +28,32 @@ from app.risk_manager.prompts.metrics_calculator import (
     calculate_slope,
     format_array,
 )
+
+# New analyzers
+try:
+    from app.indicators.correlation_analyzer import CorrelationAnalyzer
+except ImportError:
+    CorrelationAnalyzer = None
+
+try:
+    from app.indicators.fibonacci_analyzer import FibonacciAnalyzer
+except ImportError:
+    FibonacciAnalyzer = None
+
+try:
+    from app.indicators.candlestick_analyzer import CandlestickAnalyzer
+except ImportError:
+    CandlestickAnalyzer = None
+
+try:
+    from app.indicators.orderbook_analyzer import OrderBookAnalyzer
+except ImportError:
+    OrderBookAnalyzer = None
+
+try:
+    from app.indicators.liquidation_heatmap import LiquidationHeatmapAnalyzer
+except ImportError:
+    LiquidationHeatmapAnalyzer = None
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +85,7 @@ class EnhancedFeaturesBuilder:
     ):
         """
         Initialize the enhanced features builder.
-        
+
         Args:
             settings: App settings (required)
             primary_tf: Primary timeframe (required)
@@ -75,7 +106,7 @@ class EnhancedFeaturesBuilder:
         self._primary_tf = primary_tf
         self._indicator_interpreter = indicator_interpreter
         self._enhanced_features_enabled = enhanced_features_enabled
-        
+
         # Optional analyzers - support graceful degradation
         self._volume_analyzer = volume_analyzer
         self._funding_analyzer = funding_analyzer
@@ -89,6 +120,24 @@ class EnhancedFeaturesBuilder:
         self._logic_gates_builder = logic_gates_builder
         self._partial_tp_manager = None  # Will be set if available
 
+        # Initialize new analyzers
+        self._btc_correlation_analyzer = (
+            CorrelationAnalyzer(window=20) if CorrelationAnalyzer else None
+        )
+        self._fibonacci_analyzer = (
+            FibonacciAnalyzer(swing_lookback=20) if FibonacciAnalyzer else None
+        )
+        self._candlestick_analyzer = (
+            CandlestickAnalyzer() if CandlestickAnalyzer else None
+        )
+        self._orderbook_analyzer = (
+            OrderBookAnalyzer(depth=20) if OrderBookAnalyzer else None
+        )
+        self._liquidation_heatmap_analyzer = (
+            LiquidationHeatmapAnalyzer(lookback_hours=24, num_zones=5)
+            if LiquidationHeatmapAnalyzer else None
+        )
+
     def build(
         self,
         symbol: str,
@@ -99,20 +148,24 @@ class EnhancedFeaturesBuilder:
         portfolio_metrics: Dict,
         regime: str,
         active_glossary_contexts: List[str],
+        btc_prices: Optional[List[float]] = None,
+        orderbook_data: Optional[Dict] = None,
     ) -> str:
         """
         Build enhanced features section including volume, funding, ADX, time filter, etc.
-        
+
         Args:
             symbol: Trading symbol (e.g., "BTCUSDT")
             current_price: Current market price
             current_snapshots: Current market snapshots by timeframe
             historical_arrays: Historical data arrays by timeframe
-            futures_data: Futures market data (funding, OI, etc.)
+            futures_data: Futures market data (funding, OI, taker ratio, etc.)
             portfolio_metrics: Current portfolio metrics
             regime: Current volatility regime
             active_glossary_contexts: Mutable list to track active contexts for dynamic glossary
-            
+            btc_prices: BTC prices for correlation analysis (optional)
+            orderbook_data: Order book data {"bids": [...], "asks": [...]} (optional)
+
         Returns:
             Formatted enhanced features section string
         """
@@ -206,14 +259,14 @@ class EnhancedFeaturesBuilder:
                             bias_1d = "BULLISH" if dist_1d > 0 else "BEARISH"
                             lines.append(f"  [1D] VWAP: {v1d:,.2f} | Price: {dist_1d:+.2f}% | Bias: {bias_1d}")
 
-                    # Volume Spike detection
+                    # Volume Spike detection (vs 20-bar average)
                     is_spike, vol_ratio = self._volume_analyzer.detect_volume_spike(volumes)
                     if is_spike:
-                        lines.append(f"  🔥 Volume Spike: {vol_ratio:.1f}x ortalama - yüksek aktivite")
-                    elif vol_ratio < 0.1:
-                        lines.append(f"  ⚠️ Volume Ratio: {vol_ratio:.2f}x - ÇOK DÜŞÜK HACİM (sahte kırılma riski)")
+                        lines.append(f"  🔥 Volume Spike: {vol_ratio:.1f}x (vs 20-bar avg) - yüksek aktivite")
+                    elif vol_ratio < 0.3:
+                        lines.append(f"  ⚠️ Volume Ratio: {vol_ratio:.2f}x (vs 20-bar avg) - DÜŞÜK HACİM")
                     else:
-                        lines.append(f"  Volume Ratio: {vol_ratio:.1f}x ortalama")
+                        lines.append(f"  Volume Ratio: {vol_ratio:.1f}x (vs 20-bar avg)")
 
                     # OBV Divergence check
                     _, obv_divergence = self._volume_analyzer.calculate_obv(closes, volumes)
@@ -397,6 +450,201 @@ class EnhancedFeaturesBuilder:
                 if tp_hold_summary:
                     lines.append(tp_hold_summary)
                     lines.append("")
+
+            # 9. Taker Buy/Sell Ratio (NEW - from futures_data)
+            if futures_data and futures_data.get("current"):
+                taker_ratio = futures_data["current"].get("taker_buy_sell_ratio", 0)
+                taker_buy = futures_data["current"].get("taker_buy_volume", 0)
+                taker_sell = futures_data["current"].get("taker_sell_volume", 0)
+                if taker_ratio > 0:
+                    if taker_ratio > 1.2:
+                        bias = "BUYERS DOMINANT"
+                        emoji = "🟢"
+                    elif taker_ratio < 0.8:
+                        bias = "SELLERS DOMINANT"
+                        emoji = "🔴"
+                    else:
+                        bias = "BALANCED"
+                        emoji = "⚪"
+                    lines.extend([
+                        "TAKER BUY/SELL RATIO:",
+                        f"  {emoji} Ratio: {taker_ratio:.2f}x ({bias})",
+                        f"  Buy Vol: {taker_buy:,.0f} | Sell Vol: {taker_sell:,.0f}",
+                    ])
+                    lines.append("")
+
+            # 10. Order Book Imbalance (NEW)
+            if self._orderbook_analyzer and orderbook_data:
+                bids = orderbook_data.get("bids", [])
+                asks = orderbook_data.get("asks", [])
+                if bids and asks:
+                    ob_section = self._orderbook_analyzer.get_prompt_section(
+                        symbol=symbol, bids=bids, asks=asks
+                    )
+                    if ob_section:
+                        lines.append(ob_section)
+                        lines.append("")
+
+            # 11. BTC Correlation (NEW - only for altcoins)
+            if (self._btc_correlation_analyzer and
+                btc_prices and
+                not symbol.upper().startswith("BTC")):
+                symbol_prices = hist_primary.get("close", [])
+                if symbol_prices and len(symbol_prices) >= 21:
+                    corr_section = self._btc_correlation_analyzer.get_prompt_section(
+                        symbol, symbol_prices, btc_prices
+                    )
+                    if corr_section:
+                        lines.append(corr_section)
+                        lines.append("")
+
+            # 12. Fibonacci Levels (NEW)
+            if self._fibonacci_analyzer and hist_primary.get("high") and hist_primary.get("low"):
+                highs = hist_primary["high"]
+                lows = hist_primary["low"]
+                closes = hist_primary.get("close", [])
+                if len(highs) >= 20 and len(lows) >= 20:
+                    fib_section = self._fibonacci_analyzer.get_prompt_section(
+                        highs, lows, closes, current_price
+                    )
+                    if fib_section:
+                        lines.append(fib_section)
+                        lines.append("")
+
+            # 13. Candlestick Patterns (NEW)
+            if self._candlestick_analyzer and hist_primary.get("open"):
+                raw_opens = hist_primary["open"]
+                raw_highs = hist_primary.get("high", [])
+                raw_lows = hist_primary.get("low", [])
+                raw_closes = hist_primary.get("close", [])
+
+                # Filter out None values - only use indices where ALL OHLC values exist
+                min_len = min(len(raw_opens), len(raw_highs), len(raw_lows), len(raw_closes))
+                valid_candles = []
+                for i in range(min_len):
+                    o, h, l, c = raw_opens[i], raw_highs[i], raw_lows[i], raw_closes[i]
+                    if o is not None and h is not None and l is not None and c is not None:
+                        valid_candles.append((float(o), float(h), float(l), float(c)))
+
+                if len(valid_candles) >= 3:
+                    opens = [v[0] for v in valid_candles]
+                    highs = [v[1] for v in valid_candles]
+                    lows = [v[2] for v in valid_candles]
+                    closes = [v[3] for v in valid_candles]
+                    candle_section = self._candlestick_analyzer.get_prompt_section(
+                        opens, highs, lows, closes, self._primary_tf.upper()
+                    )
+                    if candle_section:
+                        lines.append(candle_section)
+                        lines.append("")
+
+            # 14. Liquidation Heatmap (NEW)
+            if self._liquidation_heatmap_analyzer and futures_data and futures_data.get("current"):
+                current_futures = futures_data["current"]
+                oi = current_futures.get("open_interest", 0)
+                funding = current_futures.get("funding_rate", 0)
+                ls_ratio = current_futures.get("long_short_ratio", 1.0)
+
+                # Get price range from historical data
+                recent_high = current_price * 1.03
+                recent_low = current_price * 0.97
+                if hist_primary.get("high") and hist_primary.get("low"):
+                    recent_high = max(hist_primary["high"][-20:]) if len(hist_primary["high"]) >= 20 else max(hist_primary["high"])
+                    recent_low = min(hist_primary["low"][-20:]) if len(hist_primary["low"]) >= 20 else min(hist_primary["low"])
+
+                if oi > 0:
+                    heatmap_result = self._liquidation_heatmap_analyzer.estimate_liquidation_zones(
+                        symbol=symbol,
+                        current_price=current_price,
+                        open_interest=oi,
+                        funding_rate=funding,
+                        long_short_ratio=ls_ratio,
+                        recent_high=recent_high,
+                        recent_low=recent_low
+                    )
+                    heatmap_section = self._liquidation_heatmap_analyzer.get_prompt_section(heatmap_result)
+                    if heatmap_section:
+                        lines.append(heatmap_section)
+                        lines.append("")
+
+            # 15. ENTRY CHECKLIST SUMMARY (Pre-calculated confidence adjustments)
+            checklist_parts = []
+            net_conf_adj = 0
+
+            # MTF Alignment (calculate from snapshots)
+            data_1d = current_snapshots.get("1d", {})
+            data_4h = current_snapshots.get("4h", {})
+            data_1h = current_snapshots.get("1h", {})
+
+            def _get_trend(close, ema20, ema50=None):
+                if not close or not ema20:
+                    return "N/A"
+                if close > ema20:
+                    return "BULL"
+                elif close < ema20:
+                    return "BEAR"
+                return "NEUT"
+
+            trends = {
+                "1D": _get_trend(data_1d.get("close"), data_1d.get("ema_20"), data_1d.get("ema_50")),
+                "4H": _get_trend(data_4h.get("close"), data_4h.get("ema_20"), data_4h.get("ema_50")),
+                "1H": _get_trend(data_1h.get("close"), data_1h.get("ema_20")),
+            }
+            bullish = sum(1 for t in trends.values() if t == "BULL")
+            bearish = sum(1 for t in trends.values() if t == "BEAR")
+            aligned = max(bullish, bearish)
+
+            if aligned == 3:
+                tf_adj = "+10"
+                net_conf_adj += 10
+            elif aligned == 2:
+                tf_adj = "0"
+            else:
+                tf_adj = "-20"
+                net_conf_adj -= 20
+            checklist_parts.append(f"TF:{aligned}/3({tf_adj})")
+
+            # Volume Ratio (from earlier calculation if available)
+            if hist_primary.get("volume") and self._volume_analyzer:
+                _, vol_ratio = self._volume_analyzer.detect_volume_spike(hist_primary["volume"])
+                if vol_ratio > 0.7:
+                    vol_adj = "+5"
+                    net_conf_adj += 5
+                elif vol_ratio < 0.3:
+                    vol_adj = "-10"
+                    net_conf_adj -= 10
+                else:
+                    vol_adj = "0"
+                checklist_parts.append(f"Vol:{vol_ratio:.1f}x({vol_adj})")
+
+            # S/R Distance
+            if self._entry_analyzer:
+                sr = self._entry_analyzer.calculate_sr_distances(historical_arrays, current_price)
+                sr_dist = min(sr.get("support_dist_pct", 100), sr.get("resistance_dist_pct", 100))
+                if sr_dist > 1.0:
+                    sr_adj = "OK"
+                elif sr_dist > 0.5:
+                    sr_adj = "-5"
+                    net_conf_adj -= 5
+                else:
+                    sr_adj = "-10"
+                    net_conf_adj -= 10
+                checklist_parts.append(f"S/R:{sr_dist:.1f}%({sr_adj})")
+
+            # ADX Cap
+            adx_val = data_4h.get("adx_14", 25)
+            if adx_val < 15:
+                adx_note = "cap50"
+            elif adx_val < 20:
+                adx_note = "cap70"
+            else:
+                adx_note = "OK"
+            checklist_parts.append(f"ADX:{adx_val:.0f}({adx_note})")
+
+            # Net adjustment
+            net_str = f"+{net_conf_adj}" if net_conf_adj >= 0 else str(net_conf_adj)
+            lines.append(f"ENTRY CHECKLIST: {' | '.join(checklist_parts)} → Net: {net_str} conf")
+            lines.append("")
 
         except Exception as e:
             logger.warning("Error building enhanced features section: %s", e)

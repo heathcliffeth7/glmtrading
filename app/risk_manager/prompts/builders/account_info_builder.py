@@ -350,10 +350,6 @@ class AccountInfoBuilder:
             f"Sonuç: {wins}W/{losses}L | Streak: {streak}{streak_type} | Ort: {avg_pnl:+.1f}%",
         ]
 
-        # Loss streak is informational only (no direct confidence penalty).
-        if streak >= 2 and streak_type == "L":
-            lines.append(f"ℹ️ Not: {streak} ardışık kayıp var; bu tek başına HOLD/veto sebebi değildir.")
-
         # Show last trade direction for bias consideration
         if trades:
             last_side = trades[0].get("side", "")

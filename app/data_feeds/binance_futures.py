@@ -21,6 +21,9 @@ class FuturesSnapshot:
     long_short_ratio: float
     open_interest: float
     funding_rate: float
+    taker_buy_sell_ratio: float = 1.0  # Taker buy volume / Taker sell volume
+    taker_buy_volume: float = 0.0
+    taker_sell_volume: float = 0.0
 
 
 class BinanceFuturesClient:
@@ -34,11 +37,28 @@ class BinanceFuturesClient:
         long_short_ratio = await self._fetch_indicator("futures/data/globalLongShortAccountRatio", base_params)
         open_interest = await self._fetch_indicator("futures/data/openInterestHist", base_params)
         funding_rate = await self._fetch_indicator("fapi/v1/fundingRate", {"symbol": symbol.upper(), "limit": 1})
+
+        # Taker Buy/Sell Ratio (1h period for day trade)
+        taker_ratio_params = {"symbol": symbol.upper(), "period": "1h", "limit": 1}
+        try:
+            taker_data = await self._fetch_indicator("futures/data/takerlongshortRatio", taker_ratio_params)
+            taker_buy_sell_ratio = float(taker_data[0]["buySellRatio"])
+            taker_buy_volume = float(taker_data[0]["buyVol"])
+            taker_sell_volume = float(taker_data[0]["sellVol"])
+        except Exception as e:
+            logger.warning(f"Failed to fetch taker ratio for {symbol}: {e}")
+            taker_buy_sell_ratio = 1.0
+            taker_buy_volume = 0.0
+            taker_sell_volume = 0.0
+
         return FuturesSnapshot(
             symbol=symbol,
             long_short_ratio=float(long_short_ratio[0]["longShortRatio"]),
             open_interest=float(open_interest[0]["sumOpenInterestValue"]),
             funding_rate=float(funding_rate[0]["fundingRate"]),
+            taker_buy_sell_ratio=taker_buy_sell_ratio,
+            taker_buy_volume=taker_buy_volume,
+            taker_sell_volume=taker_sell_volume,
         )
 
     async def _fetch_indicator(self, path: str, params: Dict[str, str]) -> list[dict]:

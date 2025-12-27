@@ -1757,6 +1757,81 @@ function handleNewTrade(trade) {
     fetchPortfolio().catch(err => console.error('Portfolio refresh failed after trade:', err));
 }
 
+// Build penalty breakdown HTML for signals
+function buildPenaltyBreakdownHTML(signal) {
+    const originalConfidence = signal.original_confidence || 0;
+    const originalAction = signal.original_action || '';
+    const originalReasoning = signal.original_reasoning || '';
+    const penaltyBreakdown = signal.penalty_breakdown || {};
+    const totalPenalty = signal.total_penalty || 0;
+    const finalConfidence = signal.confidence || 0;
+    const finalAction = signal.action || 'HOLD';
+
+    // Only show penalty breakdown if there was a penalty applied
+    const hasPenalty = totalPenalty !== 0 && Object.keys(penaltyBreakdown).length > 0;
+    // Confidence was forced to HOLD
+    const wasForcedToHold = originalAction && originalAction !== 'HOLD' && finalAction === 'HOLD';
+
+    if (!hasPenalty && !wasForcedToHold) {
+        return '';
+    }
+
+    // Build penalty items
+    let penaltyItems = '';
+    if (hasPenalty) {
+        penaltyItems = Object.entries(penaltyBreakdown).map(([name, value]) => {
+            const sign = value >= 0 ? '+' : '';
+            return `<div class="flex justify-between text-xs">
+                <span class="text-text-secondary">${name}</span>
+                <span class="${value < 0 ? 'text-loss' : 'text-profit'}">${sign}${value.toFixed(0)}%</span>
+            </div>`;
+        }).join('');
+    }
+
+    // Original action colors
+    const origActionColors = {
+        'BUY': 'text-profit',
+        'SELL': 'text-loss',
+        'HOLD': 'text-text-secondary',
+        'CLOSE': 'text-primary'
+    };
+    const origActionClass = origActionColors[originalAction] || 'text-text-secondary';
+
+    return `
+        <div class="mt-3 pt-3 border-t border-border-dark/50">
+            <!-- Original Decision -->
+            <div class="flex items-center gap-2 mb-2">
+                <span class="text-[10px] uppercase text-text-secondary">Qwen Kararı:</span>
+                <span class="text-xs font-semibold ${origActionClass}">${originalAction || 'N/A'}</span>
+                <span class="text-xs text-text-light">@ ${originalConfidence.toFixed(0)}%</span>
+            </div>
+
+            ${originalReasoning ? `
+            <p class="text-xs text-text-secondary/80 mb-2 italic line-clamp-2">"${originalReasoning.substring(0, 150)}${originalReasoning.length > 150 ? '...' : ''}"</p>
+            ` : ''}
+
+            ${hasPenalty ? `
+            <!-- Penalty Breakdown -->
+            <div class="bg-background-dark/80 rounded-lg p-2 mb-2">
+                <div class="text-[10px] uppercase text-text-secondary mb-1">Penaltyler:</div>
+                ${penaltyItems}
+                <div class="flex justify-between text-xs font-semibold mt-1 pt-1 border-t border-border-dark/30">
+                    <span class="text-text-secondary">Toplam</span>
+                    <span class="${totalPenalty < 0 ? 'text-loss' : 'text-profit'}">${totalPenalty >= 0 ? '+' : ''}${totalPenalty.toFixed(0)}%</span>
+                </div>
+            </div>
+            ` : ''}
+
+            <!-- Final Result -->
+            <div class="flex items-center gap-2">
+                <span class="text-[10px] uppercase text-text-secondary">Final:</span>
+                <span class="text-xs ${finalConfidence < 80 ? 'text-loss' : 'text-profit'}">${finalConfidence.toFixed(0)}%</span>
+                ${finalConfidence < 80 ? `<span class="text-[10px] text-loss">< 80% eşik → HOLD</span>` : ''}
+            </div>
+        </div>
+    `;
+}
+
 // Update AI Insights UI with GLM signals
 function updateAIInsightsUI(signals) {
     const container = document.getElementById('ai-insights-container');
@@ -1784,16 +1859,21 @@ function updateAIInsightsUI(signals) {
         // Use reasoning field, fallback to reason_primary
         const reasoning = signal.reasoning || signal.reason_primary || 'Gerekçe mevcut değil';
 
+        // Build penalty breakdown section for HOLD decisions
+        const penaltyBreakdownHTML = buildPenaltyBreakdownHTML(signal);
+
         return `
             <div class="flex flex-col gap-3 p-5 rounded-xl border border-border-dark bg-background-dark/50 hover:bg-background-dark transition-colors">
                 <div class="flex items-center justify-between">
                     <div class="flex items-center gap-3">
                         <span class="text-xs font-semibold uppercase px-2.5 py-1 rounded-md ${actionClass}">${signal.action || 'HOLD'}</span>
                         <span class="text-sm font-semibold text-text-light">${(signal.symbol || '').replace('USDT', '/USD')}</span>
+                        ${signal.confidence ? `<span class="text-xs text-text-secondary">${signal.confidence.toFixed(0)}%</span>` : ''}
                     </div>
                     <span class="text-xs text-text-secondary">${signalTime}</span>
                 </div>
                 <p class="text-sm text-text-secondary leading-relaxed">${reasoning}</p>
+                ${penaltyBreakdownHTML}
             </div>
         `;
     }).join('');

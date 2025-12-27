@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional
 
 from app.agents.base import AgentSignal
+from app.config.settings import get_settings
 from app.risk_manager.decision_models import RiskDecision
 from app.risk_manager.fallback_handler import FallbackHandler
 from app.risk_manager.glm_communicator import GLMCommunicator
@@ -496,10 +497,35 @@ class Evaluator:
                 threshold
             )
 
+            # Build detailed reasoning with penalty breakdown
+            reasoning_parts = []
+
+            # Original decision info
+            orig_action = decision.original_action or decision.action
+            orig_conf = decision.original_confidence or decision.glm_confidence
+            reasoning_parts.append(f"Qwen Kararı: {orig_action} @ {orig_conf:.0f}%")
+
+            # Original reasoning (truncated)
+            orig_reasoning = decision.original_reasoning or decision.reasoning
+            if orig_reasoning:
+                truncated = orig_reasoning[:200] + "..." if len(orig_reasoning) > 200 else orig_reasoning
+                reasoning_parts.append(f'Gerekçe: "{truncated}"')
+
+            # Penalty breakdown
+            if decision.penalty_breakdown:
+                penalty_lines = [f"  • {name}: {val:+.0f}%" for name, val in decision.penalty_breakdown.items()]
+                reasoning_parts.append("Penaltyler:\n" + "\n".join(penalty_lines))
+                reasoning_parts.append(f"Toplam Penalty: {decision.total_penalty:+.0f}%")
+
+            # Final result
+            reasoning_parts.append(f"Final: {decision.glm_confidence:.0f}% < {threshold:.0f}% eşik → HOLD")
+
+            detailed_reasoning = "\n".join(reasoning_parts)
+
             return RiskDecision(
                 action="HOLD",
                 amount=0.0,
-                reasoning=f"GLM confidence ({decision.glm_confidence:.1f}%) below {threshold:.0f}% threshold - forced to HOLD for risk management",
+                reasoning=detailed_reasoning,
                 leverage=decision.leverage,
                 glm_confidence=decision.glm_confidence,
                 reason_primary=decision.reason_primary,
@@ -514,6 +540,12 @@ class Evaluator:
                 context_atr_ratio=decision.context_atr_ratio,
                 thought_process=decision.thought_process,
                 volatility_regime=decision.volatility_regime,
+                # Preserve penalty tracking for frontend
+                original_confidence=decision.original_confidence,
+                original_action=decision.original_action,
+                original_reasoning=decision.original_reasoning,
+                penalty_breakdown=decision.penalty_breakdown,
+                total_penalty=decision.total_penalty,
             )
         
         return decision
@@ -597,7 +629,10 @@ class Evaluator:
         if decision.action not in ['BUY', 'SELL']:
             return decision
 
+        # Store original values BEFORE any modifications
         original_confidence = decision.glm_confidence
+        original_action = decision.action
+        original_reasoning = decision.reasoning
         penalties = []
 
         adx = market_data.get('adx', 25.0)
@@ -651,6 +686,13 @@ class Evaluator:
         # Apply penalties
         total_penalty = sum(p[1] for p in penalties)
         new_confidence = max(0.0, original_confidence + total_penalty)
+
+        # Always store original values for transparency (even if no penalty)
+        decision.original_confidence = original_confidence
+        decision.original_action = original_action
+        decision.original_reasoning = original_reasoning
+        decision.total_penalty = total_penalty
+        decision.penalty_breakdown = {name: val for name, val in penalties} if penalties else {}
 
         if penalties:
             penalty_str = ", ".join(f"{name}={val}" for name, val in penalties)
@@ -746,10 +788,14 @@ class Evaluator:
         metadata = signals[0].metadata or {}
         raw_market_data = metadata.get('raw_market_data', {})
         current_snapshots = raw_market_data.get('current_snapshots', {})
-        snapshot_4h = current_snapshots.get('4h', {})
+
+        # Use primary timeframe from settings (day trade: 1h)
+        settings = get_settings()
+        primary_tf = getattr(settings, 'day_trade_primary_timeframe', '1h')
+        snapshot_primary = current_snapshots.get(primary_tf, {})
 
         # ADX - handle both list and single float values
-        adx_values = snapshot_4h.get('adx_14', [])
+        adx_values = snapshot_primary.get('adx_14', [])
         if isinstance(adx_values, (list, tuple)) and len(adx_values) > 0:
             market_data['adx'] = float(adx_values[-1])
         elif isinstance(adx_values, (int, float)):

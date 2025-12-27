@@ -46,15 +46,19 @@ async def write_derivatives_to_influx(symbol: str, futures_data: Dict[str, Any],
                 'funding_rate': float(futures_data.get('funding_rate', 0.0)),
                 'open_interest': float(futures_data.get('open_interest', 0.0)),
                 'long_short_ratio': float(futures_data.get('long_short_ratio', 0.0)),
+                'taker_buy_sell_ratio': float(futures_data.get('taker_buy_sell_ratio', 1.0)),
+                'taker_buy_volume': float(futures_data.get('taker_buy_volume', 0.0)),
+                'taker_sell_volume': float(futures_data.get('taker_sell_volume', 0.0)),
             },
             timestamp=timestamp,
         )
         logger.debug(
-            "✅ Wrote derivatives: symbol=%s fr=%.8f oi=%.2f lsr=%.4f",
+            "✅ Wrote derivatives: symbol=%s fr=%.8f oi=%.2f lsr=%.4f taker=%.4f",
             symbol,
             futures_data.get('funding_rate', 0),
             futures_data.get('open_interest', 0),
             futures_data.get('long_short_ratio', 0),
+            futures_data.get('taker_buy_sell_ratio', 1.0),
         )
     except Exception as e:
         logger.warning("Failed to write derivatives measurement: %s", e)
@@ -146,6 +150,7 @@ def calculate_indicators_from_klines(klines: List[Dict]) -> Dict[str, Any]:
             return {}
         
         # Extract OHLC data as numpy arrays for TechnicalAnalyzer
+        open_prices = np.array([float(k['open']) for k in klines])
         close_prices = np.array([float(k['close']) for k in klines])
         high_prices = np.array([float(k['high']) for k in klines])
         low_prices = np.array([float(k['low']) for k in klines])
@@ -155,6 +160,7 @@ def calculate_indicators_from_klines(klines: List[Dict]) -> Dict[str, Any]:
         indicators = {}
 
         # Latest bar data - ALWAYS include basic OHLCV regardless of kline count
+        indicators['open'] = float(open_prices[-1])
         indicators['close'] = float(close_prices[-1])
         indicators['high'] = float(high_prices[-1])
         indicators['low'] = float(low_prices[-1])
@@ -226,6 +232,7 @@ def calculate_indicators_from_klines(klines: List[Dict]) -> Dict[str, Any]:
                 df = pd.DataFrame(klines)
                 latest = df.iloc[-1]
                 return {
+                    'open': float(latest['open']),
                     'close': float(latest['close']),
                     'high': float(latest['high']),
                     'low': float(latest['low']),
@@ -364,7 +371,7 @@ async def aggregate_enriched_data(
             )
             return enriched, klines
     
-    # 2. Get Binance Futures metrics (L/S ratio, Open Interest, Funding Rate)
+    # 2. Get Binance Futures metrics (L/S ratio, Open Interest, Funding Rate, Taker Ratio)
     try:
         futures_client = BinanceFuturesClient()
         futures_snapshot = await futures_client.fetch_metrics(symbol)
@@ -372,6 +379,9 @@ async def aggregate_enriched_data(
             'long_short_ratio': futures_snapshot.long_short_ratio,
             'open_interest': futures_snapshot.open_interest,
             'funding_rate': futures_snapshot.funding_rate,
+            'taker_buy_sell_ratio': futures_snapshot.taker_buy_sell_ratio,
+            'taker_buy_volume': futures_snapshot.taker_buy_volume,
+            'taker_sell_volume': futures_snapshot.taker_sell_volume,
         })
 
         # Write to separate derivatives measurement for direct querying
@@ -381,6 +391,7 @@ async def aggregate_enriched_data(
             'funding_rate': futures_snapshot.funding_rate,
             'open_interest': futures_snapshot.open_interest,
             'long_short_ratio': futures_snapshot.long_short_ratio,
+            'taker_buy_sell_ratio': futures_snapshot.taker_buy_sell_ratio,
         }, interval=normalized_interval)
     except Exception as exc:
         logger.warning("Could not fetch futures metrics: %s", exc)

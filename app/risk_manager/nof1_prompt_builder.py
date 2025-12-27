@@ -2,7 +2,7 @@
 NOF1.AI Style Prompt Builder for GLM
 Builds prompts in the exact format used by professional trading systems
 
-Supports both SCALP and SWING trading modes via settings.swing_trade_mode
+Supports DAY TRADE mode (1H primary) via settings.day_trade_mode
 
 Enhanced Features (v2.0):
 - Volume Analysis (CVD, OBV, VWAP)
@@ -171,18 +171,18 @@ class Nof1PromptBuilder:
         # Settings reference
         self._settings = get_settings()
 
-        # Primary timeframe - 4H for stability (no swing/scalp modes anymore)
-        self._primary_tf = "4h"
+        # Primary timeframe - from settings (day trade: 1h, swing: 4h)
+        self._primary_tf = getattr(self._settings, 'day_trade_primary_timeframe', '1h')
 
-        # MTF alignment weights - HTF dominant for direction
+        # MTF alignment weights - Day Trade mode (1H primary)
         self._mtf_weights = {
-            "1d": 4.0,    # Dominant - big picture trend
-            "4h": 3.0,    # Primary TF
-            "1h": 1.5,    # Secondary confirmation
-            "30m": 0.0,   # ZERO - noise, ignore
-            "15m": 0.0,   # ZERO - noise, ignore
-            "5m": 0.0,    # ZERO - ignore
-            "1m": 0.0,    # ZERO - ignore
+            "1d": 2.0,    # Background trend (less weight for day trade)
+            "4h": 4.0,    # Trend confirmation (dominant for direction)
+            "1h": 3.0,    # PRIMARY TF - main signal
+            "30m": 1.0,   # Entry timing support
+            "15m": 1.5,   # Entry timing (more weight)
+            "5m": 0.0,    # ZERO - noise, ignore
+            "1m": 0.0,    # ZERO - noise, ignore
         }
 
         # FAZA 3: Modüler helper sınıflar
@@ -586,7 +586,10 @@ class Nof1PromptBuilder:
             atr_pct=volatility_state["atr_pct"]
         )
 
-        # Enhanced features
+        # Enhanced features - with new data sources
+        btc_prices = raw_market_data.get("btc_prices", None)  # For correlation analysis
+        orderbook_data = raw_market_data.get("orderbook_data", None)  # For order book imbalance
+
         enhanced_features = self._enhanced_features_builder.build(
             symbol=symbol,
             current_price=current_price,
@@ -595,7 +598,9 @@ class Nof1PromptBuilder:
             futures_data=futures_data,
             portfolio_metrics=portfolio_metrics,
             regime=regime,
-            active_glossary_contexts=self._active_glossary_contexts
+            active_glossary_contexts=self._active_glossary_contexts,
+            btc_prices=btc_prices,
+            orderbook_data=orderbook_data,
         )
 
         # Pozisyon durumunu belirle (instructions için)

@@ -14,6 +14,7 @@ from app.executor.executor import Executor, ExecutionResult
 from app.executor.ledger import engine
 from app.risk_manager.manager import RiskDecision, RiskManager
 from app.risk_manager.qwen_client import QwenClient
+from app.services.playwright_qwen import PlaywrightQwenClientSync
 from app.risk_manager.partial_tp_manager import PartialTakeProfitManager
 from app.utils.logging import configure_logging, get_logger
 from app.utils.telegram import format_markdown, telegram_client
@@ -57,11 +58,11 @@ class AutomatedRunner:
             
         self._interval = interval
 
-        # nof1.ai style aktifse 3 dakikalık döngü kullan
+        # Day trade mode: 2 dakikalık döngü (daha hızlı tepki)
         settings = get_settings()
-        if settings.use_nof1_style:
-            self._cycle = 180  # 3 dakika (180 saniye) - nof1.ai style için
-            logger.info("nof1.ai style enabled: Using 3-minute cycle (180 seconds)")
+        if settings.day_trade_mode:
+            self._cycle = 120  # 2 dakika (120 saniye) - day trade için
+            logger.info("DAY TRADE mode enabled: Using 2-minute cycle (120 seconds)")
         else:
             self._cycle = cycle_seconds
         
@@ -76,11 +77,15 @@ class AutomatedRunner:
         self._agents = {}
         self._glm_clients = {}
 
-        # Create separate QwenClient for each symbol to avoid chat_id conflicts
-        # Note: All clients share same cookies/auth but have separate chat sessions
+        # Create a SINGLE shared PlaywrightQwenClientSync for all symbols
+        # Playwright browser is heavy, so we share one instance
+        # Note: Sequential symbol processing avoids concurrent browser issues
+        self._shared_playwright_client = PlaywrightQwenClientSync()
+        logger.info("🌐 Created shared PlaywrightQwenClientSync (stealth browser)")
+
         for sym in self._symbols:
-            self._glm_clients[sym] = QwenClient()
-            logger.info("🔑 Created QwenClient for %s (cookie-based)", sym)
+            self._glm_clients[sym] = self._shared_playwright_client
+            logger.info("🔑 Assigned PlaywrightQwenClientSync for %s", sym)
 
             # Use passed components if single symbol and matches, otherwise create new
             if sym == symbol and risk_manager:

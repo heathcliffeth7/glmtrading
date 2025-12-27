@@ -174,23 +174,14 @@ class MarketStateBuilder:
             "RELATIVE VOLATILITY CONTEXT (asset-agnostic):",
             f"• Realized Vol (50 bars): {realized_vol_pct:.2f}%",
             f"• Median Realized Vol: {median_realized_vol_pct:.2f}%",
-            f"• Vol Ratio (current/median): {vol_ratio:.2f}x",
+            f"• Volatility Ratio (current/median): {vol_ratio:.2f}x",
             f"• ATR Ratio (proxy): {atr_ratio:.2f}x",
             f"• Relative Intensity (max ratio): {rel:.2f}x",
             f"• Regime Key: {regime_key.upper()}",
             "",
         ])
 
-        # Volatilite Risk Etkisi Rehberi
-        lines.extend([
-            "VOLATILITE RISK ETKISI:",
-            "• LOW regime: Dar SL kabul edilebilir, R:R hedefi yukselt (2:1+)",
-            "• MEDIUM regime: Standart SL/TP mesafeleri uygula",
-            "• HIGH regime: Pozisyon boyutu %50 azalt, SL mesafesi 1.2x genis tut",
-            "• EXTREME regime: Confidence -15, pozisyon boyutu %75 azalt veya HOLD",
-            "• Dusuk hacim (Vol Ratio < 0.3) + HIGH vol = Sahte kirilma riski yuksek",
-            "",
-        ])
+        # Volatilite Risk Etkisi - system message'daki confidence penalty kurallarinda
 
         # Optional HTF S/R injection
         if htf_analysis:
@@ -267,9 +258,6 @@ class MarketStateBuilder:
                 f"Trend Direction: {trend_direction} ({trend_strength})",
                 f"Market Structure (pivot-based): {market_structure}",
                 f"Current Price: {current_price:.2f}",
-                f"EMA 20: {ema20:.2f} (Distance: {ema20_dist:+.2f}%)",
-                f"EMA 50: {ema50:.2f} (Distance: {ema50_dist:+.2f}%)",
-                f"RSI (14): {rsi:.2f}",
                 "",
             ])
 
@@ -298,10 +286,7 @@ class MarketStateBuilder:
             lines.extend([
                 f"SERIES SUMMARIES ({primary_tf} tail stats):",
                 summarize_series(hist_primary.get("close", []), 2, "Close"),
-                summarize_series(hist_primary.get("ema_20", []), 2, "EMA20"),
-                summarize_series(hist_primary.get("ema_50", []), 2, "EMA50"),
                 summarize_series(hist_primary.get("macd", []), 2, "MACD"),
-                summarize_series(hist_primary.get("rsi_14", []), 2, "RSI14"),
                 "",
             ])
 
@@ -332,20 +317,9 @@ class MarketStateBuilder:
                 "",
             ])
 
-            # Futures Yorum Rehberi
-            lines.extend([
-                "FUTURES YORUM REHBERI:",
-                "- OI azaliyor + Fiyat dusuyor = Long Liquidation (bearish devam)",
-                "- OI artiyor + Fiyat dusuyor = Aggressive Shorting (short squeeze riski)",
-                "- OI azaliyor + Fiyat yukseliyor = Short Liquidation (bullish devam)",
-                "- OI artiyor + Fiyat yukseliyor = New Longs (bullish momentum)",
-                "- L/S > 3.0 + Destek yakin = Long squeeze potansiyeli",
-                "- Funding > 0.01% = Crowded long, contrarian short sinyali",
-                "- Funding < -0.01% = Crowded short, contrarian long sinyali",
-                "",
-            ])
+            # Futures Yorum Rehberi - system message'a tasindi
 
-        # Intraday 1m summary
+        # Intraday 1m summary (RSI removed - too granular for 4H analysis)
         hist_1m = historical_arrays.get("1m", {})
         if hist_1m and "close" in hist_1m:
             lines.extend([
@@ -353,7 +327,6 @@ class MarketStateBuilder:
                 "=" * 80,
                 "INTRADAY (1-minute) SUMMARY:",
                 summarize_series(hist_1m.get("close", []), 2, "1m Close"),
-                summarize_series(hist_1m.get("rsi_14", []), 2, "1m RSI14"),
                 summarize_series(hist_1m.get("macd", []), 2, "1m MACD"),
                 "",
             ])
@@ -393,56 +366,17 @@ class MarketStateBuilder:
             "",
         ]
 
-        # A. MTF Structure (Sadece veri, yorum yok)
-        data_4h = current_snapshots.get("4h", {})
-        data_1d = current_snapshots.get("1d", {})
-        data_1h = current_snapshots.get("1h", {})
-
-        lines.append("A. MULTI-TIMEFRAME STRUCTURE:")
-        d1_close = data_1d.get("close", 0)
-        d1_ema20 = data_1d.get("ema_20", 0)
-        d1_ema50 = data_1d.get("ema_50", 0)
-        d1_rsi = data_1d.get("rsi_14", 50)
-        lines.append(f"  [1D] Price: {d1_close:.2f} | EMA20: {d1_ema20:.2f} | EMA50: {d1_ema50:.2f} | RSI: {d1_rsi:.1f}")
-
-        h4_close = data_4h.get("close", 0)
-        h4_ema20 = data_4h.get("ema_20", 0)
-        h4_ema50 = data_4h.get("ema_50", 0)
-        h4_rsi = data_4h.get("rsi_14", 50)
-        # OBV trend for 4H
-        hist_4h = historical_arrays.get("4h", {})
-        h4_obv = "N/A"
-        if self._volume_analyzer and hist_4h.get("close") and hist_4h.get("volume"):
-            h4_obv = self._volume_analyzer.get_obv_trend(hist_4h["close"], hist_4h["volume"])
-        lines.append(f"  [4H] Price: {h4_close:.2f} | EMA20: {h4_ema20:.2f} | EMA50: {h4_ema50:.2f} | RSI: {h4_rsi:.1f} | OBV: {h4_obv}")
-
-        h1_close = data_1h.get("close", 0)
-        h1_ema20 = data_1h.get("ema_20", 0)
-        h1_rsi = data_1h.get("rsi_14", 50)
-        lines.append(f"  [1H] Price: {h1_close:.2f} | EMA20: {h1_ema20:.2f} | RSI: {h1_rsi:.1f}")
+        # A. Unified Indicators Matrix (consolidated EMA/RSI data)
+        lines.append("A. " + self._build_indicators_matrix(current_snapshots, historical_arrays))
         lines.append("")
 
-        # MTF Sentez Rehberi
-        lines.extend([
-            "  MTF SENTEZ KURALI:",
-            "  - 3/3 TF ayni yonde (Price vs EMA) = GUCLU sinyal",
-            "  - 2/3 TF ayni yonde = ORTA sinyal",
-            "  - TF'ler farkli yonde = ZAYIF/CATISMA",
-            "  - HTF (1D) > LTF (1H) onceligi - 1D trend yonu belirleyici",
-            "",
-        ])
-
-        # B. Momentum Vectors (Son 8 bar dizisi - GLM egilimi gorebilsin)
+        # B. Momentum Vectors (MACD Hist only - RSI now in matrix)
         hist_4h = historical_arrays.get("4h", {})
-        lines.append("B. MOMENTUM VECTORS (Last 8 bars):")
+        lines.append("B. MOMENTUM VECTORS:")
         if hist_4h:
-            rsi_series = hist_4h.get("rsi_14", [])[-8:]
-            if rsi_series:
-                lines.append(f"                  RSI Sequence: {format_array(rsi_series, 1)}")
-
             macd_hist_series = hist_4h.get("macd_hist", [])[-8:]
             if macd_hist_series:
-                lines.append(f"                  MACD Hist Seq: {format_array(macd_hist_series, 4)}")
+                lines.append(f"   MACD Hist Seq: {format_array(macd_hist_series, 4)}")
         else:
             lines.append("  (No historical data available)")
         lines.append("")
@@ -466,6 +400,8 @@ class MarketStateBuilder:
         lines.append("  [15M] Support: N/A | Resistance: N/A | Position: UNKNOWN")
 
         # EMA Uzakligi (Mean Reversion potansiyeli icin)
+        data_4h = current_snapshots.get("4h", {})
+        h4_ema20 = data_4h.get("ema_20", 0)
         if h4_ema20 > 0 and current_price > 0:
             ema_dist = (current_price - h4_ema20) / h4_ema20 * 100
             lines.append(f"  Extension from 4H EMA20: {ema_dist:+.2f}%")
@@ -486,7 +422,7 @@ class MarketStateBuilder:
         """
         Generate contextual narrative (v4.0: Contextual Data Points).
 
-        Sadece ham veri, yorum GLM'e birakilir.
+        RSI ve EMA artik INDICATORS MATRIX'te. Sadece ADX burada.
 
         Args:
             data_primary: Primary timeframe current snapshot
@@ -494,24 +430,127 @@ class MarketStateBuilder:
         Returns:
             str: Formatted narrative section
         """
-        rsi = data_primary.get("rsi_14", 50)
         adx = data_primary.get("adx_14", 0)
-        close = data_primary.get("close", 0)
-        ema20 = data_primary.get("ema_20", 0)
-
-        # EMA mesafesi hesapla (yorum yok)
-        ema_dist_pct = ((close - ema20) / ema20 * 100) if ema20 > 0 else 0
 
         return f"""
 CONTEXTUAL METRICS:
-• RSI Level: {rsi:.1f} (Reference: <30 oversold, >70 overbought)
 • ADX Strength: {adx:.1f} (Reference: >25 trending, <20 ranging)
-• Price vs EMA20: {ema_dist_pct:+.2f}%
 """
 
     # -------------------------------------------------------------------------
     # Private Helper Methods
     # -------------------------------------------------------------------------
+
+    def _build_indicators_matrix(
+        self,
+        current_snapshots: Dict,
+        historical_arrays: Dict,
+    ) -> str:
+        """
+        Build unified indicator matrix for all timeframes.
+
+        Consolidates EMA/RSI data from 1D/4H/1H into a single compact matrix
+        to reduce token usage in prompts.
+
+        Args:
+            current_snapshots: Dict of current indicator values by timeframe
+            historical_arrays: Dict of historical arrays by timeframe
+
+        Returns:
+            str: Formatted indicator matrix section
+        """
+        data_1d = current_snapshots.get("1d", {})
+        data_4h = current_snapshots.get("4h", {})
+        data_1h = current_snapshots.get("1h", {})
+        hist_4h = historical_arrays.get("4h", {})
+
+        def get_trend(close: float, ema20: float, ema50: float = None) -> str:
+            """Determine trend direction from price/EMA relationship."""
+            if not close or not ema20:
+                return "N/A"
+            if close > ema20:
+                return "BULL" if (not ema50 or ema20 > ema50) else "WEAK↑"
+            elif close < ema20:
+                return "BEAR" if (not ema50 or ema20 < ema50) else "WEAK↓"
+            return "NEUT"
+
+        lines = [
+            "INDICATORS MATRIX:",
+            "      | Price    | EMA20   | EMA50   | RSI  | Trend",
+            "------+-------------------------------------------------",
+        ]
+
+        # 1D row
+        d1_close = data_1d.get("close", 0)
+        d1_ema20 = data_1d.get("ema_20", 0)
+        d1_ema50 = data_1d.get("ema_50", 0)
+        d1_rsi = data_1d.get("rsi_14", 50)
+        d1_trend = get_trend(d1_close, d1_ema20, d1_ema50)
+        lines.append(
+            f"[1D]  | {d1_close:8.2f} | {d1_ema20:7.2f} | {d1_ema50:7.2f} | {d1_rsi:4.1f} | {d1_trend}"
+        )
+
+        # 4H row
+        h4_close = data_4h.get("close", 0)
+        h4_ema20 = data_4h.get("ema_20", 0)
+        h4_ema50 = data_4h.get("ema_50", 0)
+        h4_rsi = data_4h.get("rsi_14", 50)
+        h4_trend = get_trend(h4_close, h4_ema20, h4_ema50)
+        # OBV trend for 4H
+        h4_obv = "N/A"
+        if self._volume_analyzer and hist_4h.get("close") and hist_4h.get("volume"):
+            h4_obv = self._volume_analyzer.get_obv_trend(
+                hist_4h["close"], hist_4h["volume"]
+            )
+        lines.append(
+            f"[4H]  | {h4_close:8.2f} | {h4_ema20:7.2f} | {h4_ema50:7.2f} | {h4_rsi:4.1f} | {h4_trend} | OBV:{h4_obv}"
+        )
+
+        # 1H row (no EMA50)
+        h1_close = data_1h.get("close", 0)
+        h1_ema20 = data_1h.get("ema_20", 0)
+        h1_rsi = data_1h.get("rsi_14", 50)
+        h1_trend = get_trend(h1_close, h1_ema20)
+        lines.append(
+            f"[1H]  | {h1_close:8.2f} | {h1_ema20:7.2f} |    -    | {h1_rsi:4.1f} | {h1_trend}"
+        )
+
+        # 4H Momentum (compact RSI + MACD sequence)
+        rsi_seq = hist_4h.get("rsi_14", [])[-6:]
+        macd_seq = hist_4h.get("macd", [])[-6:]
+        if rsi_seq and len(rsi_seq) >= 2 and macd_seq and len(macd_seq) >= 2:
+            rsi_str = f"[{rsi_seq[0]:.1f}→{rsi_seq[-1]:.1f}]"
+            macd_str = f"[{macd_seq[0]:.1f}→{macd_seq[-1]:.1f}]"
+            lines.append(f"\n4H Momentum: RSI {rsi_str}, MACD {macd_str}")
+
+        # MTF ALIGNMENT EXPLICIT (pre-calculated for GLM)
+        trends = {"1D": d1_trend, "4H": h4_trend, "1H": h1_trend}
+        bullish_count = sum(1 for t in trends.values() if t in ["BULL", "WEAK↑"])
+        bearish_count = sum(1 for t in trends.values() if t in ["BEAR", "WEAK↓"])
+
+        if bullish_count >= 2:
+            alignment_dir = "BULLISH"
+            alignment_count = bullish_count
+        elif bearish_count >= 2:
+            alignment_dir = "BEARISH"
+            alignment_count = bearish_count
+        else:
+            alignment_dir = "MIXED"
+            alignment_count = 0
+
+        # Signal strength based on alignment
+        if alignment_count == 3:
+            signal_strength = "STRONG (+10 conf)"
+        elif alignment_count == 2:
+            signal_strength = "MODERATE (0 conf)"
+        else:
+            signal_strength = "WEAK/CONFLICT (-20 conf)"
+
+        tf_details = " | ".join([f"{tf}:{t}" for tf, t in trends.items()])
+        lines.append(f"\nMTF ALIGNMENT: {alignment_count}/3 {alignment_dir} ({tf_details})")
+        lines.append(f"→ Signal Strength: {signal_strength}")
+
+        return "\n".join(lines)
 
     def _analyze_market_structure(
         self,

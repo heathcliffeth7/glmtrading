@@ -8,9 +8,9 @@ This module contains the data structures used for risk decisions:
 - Utility functions: clamp, json_serializer
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 
 
 __all__ = [
@@ -77,6 +77,13 @@ class RiskDecision:
 
     # Volatility regime for dynamic threshold
     volatility_regime: str = "medium"
+
+    # Penalty tracking (for detailed reasoning display)
+    original_confidence: float = 0.0                          # Qwen'den gelen orijinal confidence
+    original_action: str = ""                                 # Qwen'in orijinal kararı (BUY/SELL)
+    original_reasoning: str = ""                              # Qwen'in orijinal gerekçesi
+    penalty_breakdown: Optional[Dict[str, float]] = None      # {"ADX < 25": -15, "MODERATE trend": -10}
+    total_penalty: float = 0.0                                # Toplam penalty (-25 gibi)
 
     def is_stale(self, max_age_seconds: int = 60) -> bool:
         """

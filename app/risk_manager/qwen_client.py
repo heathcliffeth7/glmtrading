@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
+from curl_cffi.requests import Session as CurlSession
+from curl_cffi.requests import RequestsError as CurlError
 
 from app.config.settings import get_settings
 from app.utils.logging import get_logger
@@ -41,6 +43,9 @@ REDIS_KEYS = {
     "chat_id_prefix": "qwen:chat_id:",  # + symbol
     "metrics_success_prefix": "qwen:metrics:",  # + symbol + :success_count
     "metrics_failure_prefix": "qwen:metrics:",  # + symbol + :failure_count
+    "auth_token": "qwen:auth_token",
+    "bx_v": "qwen:bx_v",
+    "version": "qwen:version",
 }
 
 
@@ -115,18 +120,56 @@ class QwenClient:
             max_requests=10,  # 10 requests per minute
         )
 
-        # HTTP client - use http2 like bash script, fallback to http1.1 if h2 not available
+        # Build timeout configuration from settings
+        timeout_config = httpx.Timeout(
+            timeout=settings.qwen.pool_timeout_sec,
+            connect=settings.qwen.connect_timeout_sec,
+            read=settings.qwen.read_timeout_sec,
+            write=settings.qwen.write_timeout_sec,
+        )
+
+        # Determine HTTP protocol version
+        use_http2 = not settings.qwen.force_http1
+        self._use_http2 = use_http2  # Track protocol for logging
+
+        # Primary: curl_cffi with Chrome fingerprint (WAF bypass)
+        # Fallback: httpx (kept for compatibility)
+        self._curl_client: Optional[CurlSession] = None
+        self._use_curl_cffi = True  # Use curl_cffi by default for WAF bypass
+
+        try:
+            # curl_cffi with Chrome TLS fingerprint
+            self._curl_client = CurlSession(
+                impersonate="chrome124",
+                timeout=settings.qwen.read_timeout_sec,
+            )
+            logger.info(
+                "✅ Qwen client: curl_cffi (Chrome fingerprint), timeout=%ds",
+                settings.qwen.read_timeout_sec,
+            )
+        except Exception as e:
+            logger.warning("⚠️ curl_cffi init failed: %s, falling back to httpx", e)
+            self._use_curl_cffi = False
+
+        # Fallback httpx client
         try:
             self._client = httpx.Client(
-                timeout=httpx.Timeout(120.0, connect=15.0, read=90.0),
-                http2=True,  # Enable HTTP/2 like bash script
+                timeout=timeout_config,
+                http2=use_http2,
                 follow_redirects=True,
             )
-            logger.debug("HTTP/2 client initialized")
+            if not self._use_curl_cffi:
+                protocol_version = "HTTP/2" if use_http2 else "HTTP/1.1"
+                logger.info(
+                    "Qwen client fallback: httpx %s, timeouts: connect=%ds, read=%ds",
+                    protocol_version,
+                    settings.qwen.connect_timeout_sec,
+                    settings.qwen.read_timeout_sec,
+                )
         except ImportError:
             logger.warning("⚠️ h2 paketi yok, HTTP/1.1 kullanılıyor")
             self._client = httpx.Client(
-                timeout=httpx.Timeout(120.0, connect=15.0, read=90.0),
+                timeout=timeout_config,
                 http2=False,
                 follow_redirects=True,
             )
@@ -134,11 +177,11 @@ class QwenClient:
         # Redis client for WAF tokens
         self._redis = get_redis_client()
 
-        # Validate credentials
+        # Validate credentials (only warn if Redis cookies disabled)
         if not self._auth_token or self._auth_token == "changeme":
-            logger.warning("⚠️ QWEN_AUTH_TOKEN not configured!")
-        if not self._cookie or self._cookie == "changeme":
-            logger.warning("⚠️ QWEN_COOKIE not configured!")
+            logger.debug("QWEN_AUTH_TOKEN not in env (may use Redis)")
+        if (not self._cookie or self._cookie == "changeme") and not self._use_redis_cookies:
+            logger.warning("⚠️ QWEN_COOKIE not configured and Redis disabled!")
 
         # Check WAF token status
         waf_status = self._get_waf_status()
@@ -226,8 +269,15 @@ class QwenClient:
             return "ERROR"
 
     def _get_waf_tokens(self) -> Dict[str, Optional[str]]:
-        """Get WAF tokens (bx-ua, bx-umidtoken) from Redis."""
-        tokens = {"bx_ua": None, "bx_umidtoken": None, "cookies": None}
+        """Get WAF tokens (bx-ua, bx-umidtoken, auth_token, bx-v, version) from Redis."""
+        tokens = {
+            "bx_ua": None, 
+            "bx_umidtoken": None, 
+            "cookies": None, 
+            "auth_token": None,
+            "bx_v": None,
+            "version": None
+        }
         try:
             for key_name, redis_key in REDIS_KEYS.items():
                 if key_name in tokens:
@@ -257,11 +307,18 @@ class QwenClient:
 
     def _build_headers(self, include_waf: bool = True) -> Dict[str, str]:
         """Build request headers for Qwen API."""
+        from datetime import datetime
+
+        # Generate timezone string like browser does
+        tz_str = datetime.now().strftime("%a %b %d %Y %H:%M:%S GMT+0000")
+
+        # Get WAF tokens and cookies from Redis (required for API access)
+        waf_tokens = self._get_waf_tokens()
+
         headers = {
-            "accept": "text/event-stream",
-            # Brotli/zstd decoding is flaky in httpx without extra deps and was producing
-            # binary SSE bodies; force gzip/deflate only to keep streamed text parseable.
-            "accept-encoding": "gzip, deflate",
+            "accept": "application/json",
+            # curl_cffi handles brotli/zstd automatically (like real Chrome)
+            "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": "en-US,en;q=0.9",
             "content-type": "application/json",
             "origin": self.BASE_URL,
@@ -270,22 +327,21 @@ class QwenClient:
             "user-agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/142.0.0.0 Safari/537.36"
+                "Chrome/131.0.0.0 Safari/537.36"
             ),
             # Security headers (required by browser)
-            "sec-ch-ua": '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+            "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"macOS"',
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
-            # Qwen specific headers
-            "bx-v": "2.5.31",
-            "version": "0.1.15",
+            # Qwen specific headers (from working request)
+            "bx-v": waf_tokens.get("bx_v") or "2.5.31",
+            "version": waf_tokens.get("version") or "0.1.22",
+            "timezone": tz_str,
         }
 
-        # Get WAF tokens and cookies from Redis (required for API access)
-        waf_tokens = self._get_waf_tokens()
         cookie_header = None
         cookie_source = "none"
 
@@ -298,47 +354,29 @@ class QwenClient:
             cookie_header = waf_tokens["cookies"]
             cookie_source = "redis"
 
-        cookie_map = self._parse_cookie_header(cookie_header)
+        # WAF tokenları Redis'ten al (cookie parse etmeden)
+        # Shell script gibi cookie'yi direkt gönder, parse/rebuild yapma
+        bx_ua_token = waf_tokens.get("bx_ua")
+        bx_umid_token = waf_tokens.get("bx_umidtoken")
 
-        # WAF tokenları cookie'den ya da Redis'ten yakala
-        bx_ua_token = (
-            waf_tokens.get("bx_ua")
-            or cookie_map.get("bx-ua")
-            or cookie_map.get("bx_ua")
-        )
-        bx_umid_token = (
-            waf_tokens.get("bx_umidtoken")
-            or cookie_map.get("bx-umidtoken")
-            or cookie_map.get("bx_umidtoken")
-        )
-
-        # Cookie'de yoksa ekle (Redis'ten geldiyse header ve cookie'ye sok)
-        if bx_ua_token and "bx-ua" not in cookie_map and "bx_ua" not in cookie_map:
-            cookie_map["bx-ua"] = bx_ua_token
-        if (
-            bx_umid_token
-            and "bx-umidtoken" not in cookie_map
-            and "bx_umidtoken" not in cookie_map
-        ):
-            cookie_map["bx-umidtoken"] = bx_umid_token
-
-        if cookie_map:
-            headers["cookie"] = self._build_cookie_header(cookie_map)
-        elif cookie_header:
+        # Cookie'yi shell script gibi direkt gönder (parse etme!)
+        # qwen_chat_template.sh: -H "cookie: ${COOKIE_HEADER}"
+        if cookie_header:
             headers["cookie"] = cookie_header
 
-        # Auth token opsiyonel (curl davranışına yaklaşmak için kapatılabilir)
-        if (
-            self._use_auth_header
-            and self._auth_token
-            and self._auth_token != "changeme"
-        ):
-            headers["Authorization"] = f"Bearer {self._auth_token}"
+        # Auth token - Shell script'te YOK, WAF'ı tetikleyebilir
+        # NOT: qwen_chat_template.sh Authorization header göndermez
+        # Bu yüzden default olarak kapalı tutuyoruz
+        # if self._use_auth_header:
+        #     if waf_tokens.get("auth_token"):
+        #         headers["Authorization"] = f"Bearer {waf_tokens['auth_token']}"
+        #     elif self._auth_token and self._auth_token != "changeme":
+        #         headers["Authorization"] = f"Bearer {self._auth_token}"
 
         # Debug: hangi cookie kaynağının kullanıldığını sakla
         self._last_cookie_source = cookie_source
 
-        # Add WAF tokens (critical for bypassing Alibaba WAF)
+        # WAF bypass requires bx-ua and bx-umidtoken headers (from Redis)
         if include_waf:
             if bx_ua_token:
                 headers["bx-ua"] = bx_ua_token
@@ -359,6 +397,7 @@ class QwenClient:
             )
             response.raise_for_status()
             result = response.json()
+            logger.info("New chat response: %s", result)
             # Response format: {"success": true, "data": {"id": "..."}}
             data = result.get("data", {})
             chat_id = data.get("id") or result.get("id") or result.get("chat_id")
@@ -681,7 +720,7 @@ class QwenClient:
                         # Detect specific errors that need chat ID invalidation
                         if error_code == "unauthorized" or "session has expired" in error_details.lower():
                             error_detected = "unauthorized"
-                        elif error_code == "bad_request" and "chat" in error_details.lower() and "not exist" in error_details.lower():
+                        elif (error_code == "bad_request" and "chat" in error_details.lower() and "not exist" in error_details.lower()) or error_code == "not found":
                             error_detected = "chat_not_exist"
                         elif error_code:
                             error_detected = f"error:{error_code}"
@@ -695,17 +734,23 @@ class QwenClient:
                     continue
 
         if not done_received:
-            # Only warn if no content received, otherwise it's just Qwen API behavior
+            # Partial/interrupted stream - but we may have useful content
             if not full_content:
                 snippet = raw_content[:400].replace("\n", "\\n")
                 logger.warning(
-                    "SSE stream ended without [DONE] and no content after %d lines; raw_len=%d; snippet=%s",
+                    "⚠️ SSE stream incomplete: no [DONE] signal, no content | lines=%d, bytes=%d | snippet=%s",
                     line_count,
                     len(raw_content),
                     snippet,
                 )
             else:
-                logger.debug("SSE stream ended without [DONE] signal after %d lines (content received)", line_count)
+                # Content received despite missing [DONE] - this is normal for Qwen API
+                # Qwen often doesn't send [DONE] terminator, but response is complete
+                logger.debug(
+                    "SSE stream ended without [DONE] signal, %d chars recovered | lines=%d",
+                    len(full_content),
+                    line_count,
+                )
 
         # Recover content if SSE aggregation failed
         if not full_content:
@@ -751,7 +796,7 @@ class QwenClient:
             )
 
         # Build response in GLMClient-compatible format
-        return {
+        response_dict = {
             "choices": [{
                 "message": {
                     "role": "assistant",
@@ -765,7 +810,10 @@ class QwenClient:
                 "total_tokens": len(full_content) // 4,
             }),
             "model": self._model,
+            "_partial_response": not done_received,  # Flag for monitoring
         }
+
+        return response_dict
 
     def request(
         self,
@@ -811,15 +859,12 @@ class QwenClient:
             role = msg.get("role", "user")
             content = msg.get("content", "")
 
-            # Generate unique fid for each message
-            fid = f"{i:08d}-0000-0000-0000-000000000001"
-
             qwen_messages.append({
-                "fid": fid,
+                "fid": f"00000000-0000-0000-0000-{i+1:012d}",
                 "parentId": None,
                 "childrenIds": [],
                 "role": role,
-                "content": content,  # Simple string format like bash script
+                "content": content,  # String format (not array)
                 "user_action": "chat",
                 "files": [],
                 "timestamp": timestamp,
@@ -828,15 +873,11 @@ class QwenClient:
                 "feature_config": {
                     "thinking_enabled": False,
                     "output_schema": "phase",
-                    "research_mode": "normal",
+                    "research_mode": "normal"
                 },
-                "extra": {
-                    "meta": {
-                        "subChatType": "t2t",
-                    },
-                },
+                "extra": {"meta": {"subChatType": "t2t"}},
                 "sub_chat_type": "t2t",
-                "parent_id": None,
+                "parent_id": None
             })
 
         payload = {
@@ -853,12 +894,17 @@ class QwenClient:
         # Log payload stats
         total_content = sum(len(m.get("content", "")) for m in messages)
         symbol_info = f" [{symbol}]" if symbol else ""
+        
+        # Enhanced logging with protocol and timeout info
+        protocol_info = "HTTP/1.1" if settings.qwen.force_http1 else "HTTP/2"
         logger.info(
-            "📤 Qwen Request%s: %d messages, %d total chars, model=%s",
+            "📤 Qwen Request%s: %d messages, %d chars, model=%s, protocol=%s, read_timeout=%ds",
             symbol_info,
             len(messages),
             total_content,
             self._model,
+            protocol_info,
+            settings.qwen.read_timeout_sec,
         )
         logger.info(
             "Using chat_id=%s%s",
@@ -876,6 +922,10 @@ class QwenClient:
         http1_fallback_used = False
         http1_client: Optional[httpx.Client] = None
 
+        # Track protocol errors separately for extended retry
+        protocol_error_count = 0
+        max_protocol_errors = settings.qwen.max_protocol_error_retries
+
         endpoint = f"{self.BASE_URL}/api/v2/chat/completions?chat_id={chat_id_to_use}"
 
         try:
@@ -883,7 +933,7 @@ class QwenClient:
                 try:
                     # Reset refresh flag for each attempt
                     self._refresh_attempted = False
-                    
+
                     start_time = time.time()
                     logger.info(
                         "🚀 Qwen Request Attempt %d/%d (http2=%s)",
@@ -902,64 +952,189 @@ class QwenClient:
                     # Optional WAF trigger (lightweight GET) before POST
                     self._trigger_waf(request_headers)
 
-                    # Choose client (http2 default, optional http1 fallback)
-                    client = self._client
-                    if http1_fallback_used:
-                        if http1_client is None:
-                            http1_client = httpx.Client(
-                                timeout=self._client.timeout,
-                                http2=False,
-                                follow_redirects=True,
-                            )
-                        client = http1_client
+                    # Use curl_cffi for WAF bypass (Chrome TLS fingerprint)
+                    raw_bytes = bytearray()
+                    chunks_received = 0
+                    bytes_received = 0
+                    response = None
 
-                    # Stream POST - read content inside context manager
-                    with client.stream(
-                        "POST",
-                        endpoint,
-                        json=payload,
-                        headers=request_headers,
-                    ) as response:
-                        logger.debug("Qwen response status: %s", response.status_code)
-                        
-                        # CRITICAL: Read entire response content INSIDE context manager
-                        # For streaming responses, must call .read() first, then decode
+                    if self._use_curl_cffi and self._curl_client:
+                        logger.debug("Using curl_cffi (Chrome fingerprint)")
                         try:
-                            raw_bytes = response.read()
-                            raw_content = raw_bytes.decode('utf-8')
-                        except UnicodeDecodeError:
-                            # Fallback for encoding issues
-                            logger.warning("UTF-8 decode error, using replace mode")
-                            raw_content = raw_bytes.decode('utf-8', errors='replace')
-                        except Exception as e:
-                            logger.error("Failed to read response content: %s", e)
-                            raise RuntimeError(f"Failed to read Qwen response: {e}") from e
-                        
-                        # Now check status and content type (safe, we already read)
-                        if response.status_code != 200:
-                            logger.warning("Qwen non-200 response: %s - %s", response.status_code, raw_content[:500])
-                        response.raise_for_status()
-
-                        content_type = response.headers.get("content-type", "")
-                        if "text/html" in content_type:
-                            snippet = raw_content[:500]
+                            # Proxy configuration
+                            proxies = {
+                                "http": "http://xxlzmhjx:1t5v00u6ihru@151.245.206.16:8011",
+                                "https": "http://xxlzmhjx:1t5v00u6ihru@151.245.206.16:8011"
+                            }
                             
-                            # Try auto-refresh on WAF block
-                            if self._auto_refresh_enabled and self._retry_after_refresh and not self._refresh_attempted:
-                                logger.warning("⚠️ WAF HTML block - otomatik cookie yenileme deneniyor...")
-                                self._refresh_attempted = True
-                                
-                                if self._refresh_cookies_from_service():
-                                    logger.info("🔄 Cookie yenilendi, request tekrar deneniyor...")
-                                    time.sleep(3)
-                                    continue
-                            
-                            self._last_error = f"WAF HTML response: {snippet}"
-                            logger.error("Qwen returned HTML (likely WAF). Snippet: %s", snippet)
-                            raise RuntimeError(
-                                "Qwen WAF engellemesi: HTML döndü. Çerez/WAF tokenlarını yenileyin. "
-                                f"Snippet: {snippet[:200]}"
+                            response = self._curl_client.post(
+                                endpoint,
+                                json=payload,
+                                headers=request_headers,
+                                stream=True,
+                                proxies=proxies,
                             )
+                            logger.debug("Qwen response status: %s", response.status_code)
+
+                            # Check status
+                            if response.status_code != 200:
+                                try:
+                                    error_snippet = response.text[:500]
+                                except Exception:
+                                    error_snippet = "<unreadable>"
+                                logger.warning("Qwen non-200: %s - %s", response.status_code, error_snippet)
+                                response.raise_for_status()
+
+                            # Stream read
+                            for chunk in response.iter_content():
+                                if chunk:
+                                    raw_bytes.extend(chunk)
+                                    chunks_received += 1
+                                    bytes_received += len(chunk)
+
+                            logger.debug("Stream complete: %d chunks, %d bytes", chunks_received, bytes_received)
+
+                            try:
+                                raw_content = raw_bytes.decode('utf-8')
+                            except UnicodeDecodeError:
+                                raw_content = raw_bytes.decode('utf-8', errors='replace')
+
+                        except CurlError as e:
+                            bytes_received = len(raw_bytes)
+                            logger.warning("⚠️ curl_cffi error after %d bytes: %s", bytes_received, str(e)[:100])
+                            if bytes_received > 0:
+                                raw_content = raw_bytes.decode('utf-8', errors='replace')
+                                logger.info("💾 Recovered %d bytes", bytes_received)
+                            else:
+                                raise RuntimeError(f"curl_cffi request failed: {e}") from e
+
+                    else:
+                        # Fallback: httpx client
+                        logger.debug("Using httpx fallback")
+                        client = self._client
+                        if http1_fallback_used:
+                            if http1_client is None:
+                                http1_client = httpx.Client(
+                                    timeout=self._client.timeout,
+                                    http2=False,
+                                    follow_redirects=True,
+                                )
+                            client = http1_client
+
+                        with client.stream(
+                            "POST",
+                            endpoint,
+                            json=payload,
+                            headers=request_headers,
+                        ) as response:
+                            logger.debug("Qwen response status: %s", response.status_code)
+
+                            if response.status_code != 200:
+                                try:
+                                    error_snippet = response.read().decode('utf-8', errors='replace')[:500]
+                                except Exception:
+                                    error_snippet = "<unreadable>"
+                                logger.warning("Qwen non-200: %s - %s", response.status_code, error_snippet)
+                            response.raise_for_status()
+
+                            try:
+                                for chunk in response.iter_bytes(chunk_size=8192):
+                                    raw_bytes.extend(chunk)
+                                    chunks_received += 1
+                                    bytes_received += len(chunk)
+
+                                logger.debug("Stream complete: %d chunks, %d bytes", chunks_received, bytes_received)
+
+                                try:
+                                    raw_content = raw_bytes.decode('utf-8')
+                                except UnicodeDecodeError:
+                                    raw_content = raw_bytes.decode('utf-8', errors='replace')
+
+                            except (httpx.ReadTimeout, httpx.RemoteProtocolError) as stream_error:
+                                bytes_received = len(raw_bytes)
+                                logger.warning("⚠️ Stream interrupted after %d bytes: %s", bytes_received, str(stream_error)[:100])
+                                if bytes_received > 0:
+                                    raw_content = raw_bytes.decode('utf-8', errors='replace')
+                                    logger.info("💾 Recovered %d bytes", bytes_received)
+                                else:
+                                    raise RuntimeError(f"Failed to read Qwen response: {stream_error}") from stream_error
+
+                            except Exception as e:
+                                logger.error("Failed to read response: %s", e)
+                                raise RuntimeError(f"Failed to read Qwen response: {e}") from e
+
+                    # Common code for both curl_cffi and httpx
+                    content_type = response.headers.get("content-type", "") if response else ""
+
+                    # Check for WAF HTML block - prioritize actual content over header
+                    raw_stripped = raw_content.strip().lower()
+                    is_html_content_type = "text/html" in content_type
+
+                    # Aliyun WAF specific markers
+                    is_aliyun_waf = "aliyun_waf" in raw_content or "aliyun_waf_aa" in raw_content
+
+                    content_looks_like_html = (
+                        raw_stripped.startswith("<!doctype") or
+                        raw_stripped.startswith("<html") or
+                        "<head>" in raw_content[:500] or
+                        "<meta" in raw_content[:200]
+                    )
+                    content_looks_like_json = (
+                        raw_stripped.startswith("data:") or
+                        raw_stripped.startswith("{") or
+                        '"choices"' in raw_content
+                    )
+
+                    # WAF block: Either Aliyun WAF marker OR (HTML content without JSON markers)
+                    is_waf_block = is_aliyun_waf or (
+                        (is_html_content_type or content_looks_like_html) and
+                        not content_looks_like_json
+                    )
+
+                    if is_waf_block:
+                        snippet = raw_content[:500]
+                        logger.warning("🚨 WAF block detected! aliyun_waf=%s, html_type=%s, html_content=%s",
+                                      is_aliyun_waf, is_html_content_type, content_looks_like_html)
+
+                        # Try auto-refresh on WAF block
+                        if self._auto_refresh_enabled and self._retry_after_refresh and not self._refresh_attempted:
+                            logger.warning("⚠️ WAF HTML block detected - otomatik cookie yenileme deneniyor...")
+                            self._refresh_attempted = True
+
+                            if self._refresh_cookies_from_service():
+                                logger.info("🔄 Cookie yenilendi, request tekrar deneniyor...")
+                                time.sleep(3)
+                                continue
+
+                        # Try stealth browser client as last resort for WAF bypass
+                        if not getattr(self, '_browser_fallback_attempted', False):
+                            self._browser_fallback_attempted = True
+                            logger.warning("🌐 WAF block - trying stealth browser fallback (chat_id=%s)...", chat_id_to_use)
+                            try:
+                                from app.services.stealth_qwen_client import QwenStealthClientSync
+                                # Stealth client uses session file, not headers
+                                stealth_client = QwenStealthClientSync(
+                                    model=self._model,
+                                    timeout_sec=settings.qwen.read_timeout_sec,
+                                    headless=False,  # WAF requires headed browser
+                                )
+                                try:
+                                    result = stealth_client.request(messages)
+                                finally:
+                                    stealth_client.close()
+                                logger.info("✅ Stealth browser fallback succeeded!")
+                                return result
+                            except Exception as browser_err:
+                                logger.error("❌ Stealth browser fallback failed: %s", browser_err)
+                                # Reset for next request
+                                self._browser_fallback_attempted = False
+
+                        self._last_error = f"WAF HTML response: {snippet}"
+                        logger.error("Qwen returned HTML (likely WAF). Snippet: %s", snippet)
+                        raise RuntimeError(
+                            "Qwen WAF engellemesi: HTML döndü. Çerez/WAF tokenlarını yenileyin. "
+                            f"Snippet: {snippet[:200]}"
+                        )
 
                     # Parse response OUTSIDE context manager (safe now, we have raw content)
                     result = self._parse_sse_response(raw_content)
@@ -970,11 +1145,20 @@ class QwenClient:
                     # Log response
                     content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                     symbol_info = f" [{symbol}]" if symbol else ""
+                    
+                    # Check if response was partial
+                    partial_flag = result.get("_partial_response", False)
+                    partial_marker = " [PARTIAL]" if partial_flag else ""
+
+                    protocol_used = "HTTP/1.1" if http1_fallback_used else ("HTTP/1.1" if settings.qwen.force_http1 else "HTTP/2")
+
                     logger.info(
-                        "📥 Qwen Response%s: %d chars in %.1fms",
+                        "📥 Qwen Response%s%s: %d chars in %.1fms (%s)",
                         symbol_info,
+                        partial_marker,
                         len(content),
                         latency_ms,
+                        protocol_used,
                     )
 
                     # Record usage
@@ -1116,32 +1300,61 @@ class QwenClient:
                     raise RuntimeError("Qwen API timeout") from exc
 
                 except httpx.RemoteProtocolError as exc:
+                    protocol_error_count += 1
                     # Connection closed unexpectedly during streaming
                     self._last_error = f"protocol_error: {str(exc)[:200]}"
+                    
+                    # Record failure metrics
+                    if symbol:
+                        self._record_request_metrics(symbol, success=False)
 
-                    # Try a one-off HTTP/1.1 fallback once
-                    if not http1_fallback_used:
+                    # Automatic HTTP/1.1 fallback on first protocol error
+                    if not http1_fallback_used and settings.qwen.enable_http2_fallback:
                         http1_fallback_used = True
                         logger.warning(
-                            "⚠️ Qwen protocol error (attempt %d/%d); retrying once with HTTP/1.1: %s",
+                            "⚠️ RemoteProtocolError #%d (attempt %d/%d) - switching to HTTP/1.1: %s",
+                            protocol_error_count,
                             attempt + 1,
                             max_retries,
                             str(exc)[:120],
                         )
+                        # Immediate retry with HTTP/1.1, no delay
                         continue
 
-                    if attempt < max_retries - 1:
-                        delay = base_delay * (2 ** attempt)
+                    # Already using HTTP/1.1 - retry with backoff
+                    # Allow extra retries for protocol errors (up to max_protocol_error_retries)
+                    total_attempts_allowed = max_retries + max_protocol_errors
+                    
+                    if attempt < total_attempts_allowed - 1:
+                        delay = settings.qwen.protocol_error_retry_delay * (1.5 ** (protocol_error_count - 1))
+                        delay = min(delay, 30)  # Cap at 30 seconds
+                        
+                        protocol_info = "HTTP/1.1" if http1_fallback_used else "HTTP/2"
                         logger.warning(
-                            "⚠️ Qwen connection closed unexpectedly, retrying in %.1fs: %s",
+                            "⚠️ RemoteProtocolError #%d (%s, attempt %d/%d), retry in %.1fs: %s",
+                            protocol_error_count,
+                            protocol_info,
+                            attempt + 1,
+                            total_attempts_allowed,
                             delay,
                             str(exc)[:100],
                         )
                         time.sleep(delay)
                         continue
 
-                    logger.error("❌ Qwen connection error after %d attempts: %s", max_retries, exc)
-                    raise RuntimeError(f"Qwen API connection error: {exc}") from exc
+                    # All retries exhausted
+                    protocol_info = "HTTP/1.1" if http1_fallback_used else "HTTP/2"
+                    logger.error(
+                        "❌ RemoteProtocolError after %d attempts (%s, %d protocol errors): %s",
+                        attempt + 1,
+                        protocol_info,
+                        protocol_error_count,
+                        exc
+                    )
+                    raise RuntimeError(
+                        f"Qwen connection failed after {attempt + 1} attempts "
+                        f"({protocol_error_count} protocol errors, {protocol_info}): {exc}"
+                    ) from exc
 
             raise RuntimeError("Qwen API failed after all retries")
         finally:

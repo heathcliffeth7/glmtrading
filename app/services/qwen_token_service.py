@@ -27,6 +27,9 @@ from app.services.captcha_solver import get_captcha_solver
 
 logger = get_logger(__name__)
 
+# Session storage path
+SESSION_STATE_FILE = Path("/root/trading/qwen_session.json")
+
 
 class QwenTokenService:
     """Background service for refreshing Qwen WAF tokens."""
@@ -45,6 +48,9 @@ class QwenTokenService:
         "status": "qwen:token_status",
         "error": "qwen:error_message",
         "force_refresh": "qwen:force_refresh",  # Trigger key for immediate refresh
+        "auth_token": "qwen:auth_token",        # JWT token
+        "bx_v": "qwen:bx_v",                    # bx-v version
+        "app_version": "qwen:version",          # app version
     }
 
     def __init__(self):
@@ -132,28 +138,271 @@ class QwenTokenService:
             return False
 
     async def _refresh_with_retry(self):
-        """Refresh tokens with retry logic."""
+        """
+        Refresh tokens with retry logic and proper status management.
+
+        Status transitions:
+        - Start: REFRESHING
+        - Success: VALID
+        - All retries failed: ERROR
+        - Interrupted: Handled by finally block
+        """
         self._set_status("REFRESHING")
+        refresh_succeeded = False
 
-        for attempt in range(self.MAX_RETRIES):
-            try:
-                logger.info("Token refresh attempt %d/%d", attempt + 1, self.MAX_RETRIES)
-                await self._refresh_tokens()
-                self._set_status("VALID")
-                logger.info("Token refresh successful!")
-                return
+        try:
+            for attempt in range(self.MAX_RETRIES):
+                try:
+                    logger.info("Token refresh attempt %d/%d", attempt + 1, self.MAX_RETRIES)
+                    await self._refresh_tokens()
 
-            except Exception as e:
-                logger.error("Token refresh failed (attempt %d): %s", attempt + 1, e)
-                if attempt < self.MAX_RETRIES - 1:
-                    delay = 5 * (attempt + 1)
-                    logger.info("Retrying in %ds...", delay)
-                    await asyncio.sleep(delay)
+                    # Check if we actually captured tokens
+                    if self._captured_tokens.get("bx_ua"):
+                        self._set_status("VALID")
+                        logger.info("✅ Token refresh successful!")
+                        refresh_succeeded = True
+                        return
+                    else:
+                        logger.warning("Refresh completed but no WAF tokens captured")
+                        # Don't set VALID if no tokens captured
+                        if attempt < self.MAX_RETRIES - 1:
+                            delay = 5 * (attempt + 1)
+                            logger.info("Retrying in %ds...", delay)
+                            await asyncio.sleep(delay)
 
-        # All retries failed
-        self._set_status("ERROR")
-        self._set_error("All refresh attempts failed")
-        logger.critical("Token refresh failed after %d attempts", self.MAX_RETRIES)
+                except Exception as e:
+                    logger.error("Token refresh failed (attempt %d): %s", attempt + 1, e)
+                    if attempt < self.MAX_RETRIES - 1:
+                        delay = 5 * (attempt + 1)
+                        logger.info("Retrying in %ds...", delay)
+                        await asyncio.sleep(delay)
+
+            # All retries exhausted
+            if not refresh_succeeded:
+                self._set_status("ERROR")
+                self._set_error("All refresh attempts failed")
+                logger.critical("Token refresh failed after %d attempts", self.MAX_RETRIES)
+
+                # Don't delete session file on failure - keep it for next attempt
+                # The refresh_token cookie might still be valid for getting new access
+                if SESSION_STATE_FILE.exists():
+                    logger.warning("⚠️ Session file exists but refresh failed - will retry with existing session")
+                else:
+                    logger.warning("⚠️ No session file - manual login may be required at https://chat.qwen.ai")
+
+        except asyncio.CancelledError:
+            logger.warning("⚠️ Refresh cancelled (service shutdown?)")
+            self._set_status("ERROR")
+            self._set_error("Refresh cancelled")
+            raise
+        except Exception as e:
+            logger.error("❌ Unexpected error in refresh: %s", e)
+            self._set_status("ERROR")
+            self._set_error(str(e))
+
+    async def _check_login_status(self, page) -> bool:
+        """
+        Check if user is logged in with robust error handling.
+
+        Checks in order of reliability:
+        1. localStorage token (most reliable)
+        2. Avatar/user menu element
+        3. Session file existence (fallback)
+
+        Returns:
+            True if logged in, False otherwise
+        """
+        try:
+            result = await page.evaluate("""
+                () => {
+                    try {
+                        // Priority 1: Check localStorage for auth token (most reliable)
+                        const token = localStorage.getItem('token');
+                        if (token && token.length > 10) {
+                            return { isLoggedIn: true, reason: 'localStorage_token' };
+                        }
+
+                        // Priority 2: Check for access_token
+                        const accessToken = localStorage.getItem('access_token');
+                        if (accessToken && accessToken.length > 10) {
+                            return { isLoggedIn: true, reason: 'access_token' };
+                        }
+
+                        // Priority 3: Check for user avatar element
+                        const avatar = document.querySelector('[class*="avatar"]');
+                        if (avatar) {
+                            return { isLoggedIn: true, reason: 'avatar_element' };
+                        }
+
+                        // Priority 4: Check for user menu
+                        const userMenu = document.querySelector('[class*="user-menu"]') ||
+                                        document.querySelector('[class*="profile"]');
+                        if (userMenu) {
+                            return { isLoggedIn: true, reason: 'user_menu' };
+                        }
+
+                        return { isLoggedIn: false, reason: 'no_auth_indicators' };
+                    } catch (e) {
+                        return { isLoggedIn: false, reason: 'js_error', error: e.message };
+                    }
+                }
+            """)
+
+            logger.info("Login check result: %s", result)
+
+            if result.get('isLoggedIn'):
+                logger.info("✅ User is logged in (reason: %s)", result.get('reason'))
+                return True
+            else:
+                # Fallback: If session file exists with token, assume logged in
+                if SESSION_STATE_FILE.exists():
+                    logger.info("📁 Session file exists, assuming logged in")
+                    return True
+
+                logger.warning("⚠️ Not logged in: %s", result.get('reason'))
+                logger.warning("Manual login required - please login at https://chat.qwen.ai")
+                return False
+
+        except Exception as e:
+            logger.warning("Login check error: %s", e)
+            # Fallback: If session file exists, assume logged in
+            if SESSION_STATE_FILE.exists():
+                logger.info("📁 Session file exists, continuing despite check error")
+                return True
+            return False
+
+    async def _validate_with_post(self, page) -> dict:
+        """
+        POST request ile tokenları validate et.
+
+        Browser context'inde fetch API kullanarak POST yapar.
+        WAF block gelirse captcha gerektiğini bildirir.
+
+        Returns:
+            dict: {success: bool, waf_block: bool, error: str}
+        """
+        try:
+            result = await page.evaluate('''async () => {
+                try {
+                    const chatId = 'test-' + Math.random().toString(36).substring(7);
+                    
+                    // Use a simple fetch with a shorter timeout
+                    const fetchPromise = fetch('/api/v2/chat/completions?chat_id=' + chatId, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            model: 'qwen-max',
+                            stream: false,
+                            messages: [{role: 'user', content: 'hi'}]
+                        })
+                    });
+
+                    // 20 second timeout for the fetch itself
+                    const timeoutPromise = new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('Fetch timeout')), 20000)
+                    );
+
+                    const response = await Promise.race([fetchPromise, timeoutPromise]);
+                    const text = await response.text();
+                    const isWaf = text.includes('aliyun_waf') || text.includes('captcha') || response.status === 403;
+
+                    return {
+                        success: response.ok && !isWaf,
+                        status: response.status,
+                        waf_block: isWaf,
+                        text_preview: text.substring(0, 100)
+                    };
+                } catch (e) {
+                    return {
+                        success: false,
+                        error: e.message,
+                        waf_block: e.message.includes('waf') || e.message.includes('403')
+                    };
+                }
+            }''')
+
+            logger.info("POST validation result: success=%s, waf_block=%s",
+                       result.get('success'), result.get('waf_block'))
+
+            if result.get('waf_block'):
+                logger.warning("⚠️ WAF block detected in POST response")
+
+            return result
+
+        except Exception as e:
+            logger.error("POST validation error: %s", e)
+            return {'success': False, 'error': str(e), 'waf_block': False}
+
+    async def _trigger_api_for_waf_tokens(self, page, max_attempts: int = 3) -> bool:
+        """
+        Trigger API calls to capture WAF tokens (bx-ua, bx-umidtoken).
+
+        Tries multiple endpoints to ensure token capture:
+        1. GET /api/v2/chats - chat list
+        2. POST /api/v2/chats/new - new chat
+        3. GET /api/v2/models - model list
+
+        Args:
+            page: Playwright page object
+            max_attempts: Max retry attempts
+
+        Returns:
+            True if tokens captured, False otherwise
+        """
+        endpoints = [
+            ("GET", "/api/v2/chats?page=1&size=10"),
+            ("POST", "/api/v2/chats/new"),
+            ("GET", "/api/v2/models"),
+            ("GET", "/api/v2/user/info"),
+        ]
+
+        for attempt in range(max_attempts):
+            logger.info("WAF token capture attempt %d/%d", attempt + 1, max_attempts)
+
+            for method, endpoint in endpoints:
+                try:
+                    if method == "GET":
+                        await page.evaluate(f"""
+                            fetch('{endpoint}', {{
+                                method: 'GET',
+                                headers: {{'Accept': 'application/json'}}
+                            }}).catch(e => console.log('fetch error:', e));
+                        """)
+                    else:
+                        await page.evaluate(f"""
+                            fetch('{endpoint}', {{
+                                method: 'POST',
+                                headers: {{
+                                    'Content-Type': 'application/json',
+                                    'Accept': 'application/json'
+                                }},
+                                body: '{{}}'
+                            }}).catch(e => console.log('fetch error:', e));
+                        """)
+
+                    await page.wait_for_timeout(1500)
+
+                    # Check if tokens captured
+                    if self._captured_tokens.get("bx_ua"):
+                        logger.info("✅ WAF tokens captured via %s %s", method, endpoint)
+                        return True
+
+                except Exception as e:
+                    logger.warning("API call %s %s failed: %s", method, endpoint, e)
+
+            if not self._captured_tokens.get("bx_ua"):
+                logger.warning("No tokens captured in attempt %d, waiting...", attempt + 1)
+                await page.wait_for_timeout(2000)
+
+        if self._captured_tokens.get("bx_ua"):
+            logger.info("✅ WAF tokens captured successfully!")
+            return True
+        else:
+            logger.warning("⚠️ Could not capture WAF tokens after %d attempts", max_attempts)
+            return False
 
     async def _detect_captcha(self, page) -> bool:
         """Check if CAPTCHA is visible on page."""
@@ -166,6 +415,11 @@ class QwenTokenService:
             ".drag",
             '[class*="captcha"] .slider',
             '[class*="verify"] .slider',
+            # Aliyun WAF specific
+            "#captcha-element",
+            "#h5_captcha-element",
+            '[id*="aliyunCaptcha"]',
+            ".aliyun-captcha",
         ]
         for sel in selectors:
             try:
@@ -177,7 +431,7 @@ class QwenTokenService:
                 pass
 
         # Text-based detection
-        captcha_texts = ["滑动验证", "Drag", "slide", "verify", "验证"]
+        captcha_texts = ["滑动验证", "Drag", "slide", "verify", "验证", "Access Verification"]
         for text in captcha_texts:
             try:
                 if await page.get_by_text(text, exact=False).first.is_visible(timeout=500):
@@ -185,6 +439,15 @@ class QwenTokenService:
                     return True
             except Exception:
                 pass
+
+        # Check page content for WAF markers
+        try:
+            content = await page.content()
+            if "aliyun_waf" in content or "aliyunCaptcha" in content:
+                logger.info("CAPTCHA detected by page content (Aliyun WAF)")
+                return True
+        except Exception:
+            pass
 
         return False
 
@@ -238,18 +501,27 @@ class QwenTokenService:
         logger.info("Drag completed: %d px in %d steps", distance, steps)
 
     async def _solve_captcha(self, page, max_attempts: int = 3) -> bool:
-        """Detect and solve CAPTCHA if present."""
+        """Detect and solve CAPTCHA if present (supports Aliyun WAF)."""
         if not await self._detect_captcha(page):
             return True  # No CAPTCHA
 
         logger.warning("CAPTCHA detected, attempting to solve...")
 
+        # Aliyun WAF captcha'sı için slider'ın yüklenmesini bekle
+        await page.wait_for_timeout(3000)
+
         for attempt in range(max_attempts):
             try:
-                # Try to find CAPTCHA container
+                # Try to find CAPTCHA container (Aliyun WAF öncelikli)
                 container_selectors = [
-                    '[class*="captcha"]',
+                    # Aliyun WAF specific
+                    '#captcha-element',
+                    '#h5_captcha-element',
+                    '[id*="aliyunCaptcha"]',
+                    '.aliyun-captcha',
                     '.nc-container',
+                    # Generic
+                    '[class*="captcha"]',
                     '.nc_wrapper',
                     '.geetest_holder',
                     '.geetest_panel',
@@ -260,7 +532,7 @@ class QwenTokenService:
                 for sel in container_selectors:
                     try:
                         container = page.locator(sel).first
-                        if await container.is_visible(timeout=500):
+                        if await container.is_visible(timeout=1000):
                             screenshot = await container.screenshot()
                             logger.info("CAPTCHA screenshot from: %s", sel)
                             break
@@ -271,23 +543,24 @@ class QwenTokenService:
                     logger.warning("No container found, using full page screenshot")
                     screenshot = await page.screenshot()
 
-                # Solve with Sider
+                # Solve with Sider captcha solver
                 solver = get_captcha_solver()
                 distance = solver.solve(screenshot)
 
                 if not distance:
                     logger.error("CAPTCHA solve returned None (attempt %d)", attempt + 1)
-                    await page.wait_for_timeout(1000)
+                    # Aliyun WAF için slider'ın yeniden yüklenmesini bekle
+                    await page.wait_for_timeout(2000)
                     continue
 
-                # Perform drag
-                await self._human_drag(page, distance)
+                # Perform drag with Aliyun WAF specific selectors
+                await self._human_drag_aliyun(page, distance)
 
-                # Wait and verify
-                await page.wait_for_timeout(2000)
+                # Wait for verification (Aliyun WAF daha uzun sürebilir)
+                await page.wait_for_timeout(3000)
 
                 if not await self._detect_captcha(page):
-                    logger.info("CAPTCHA solved successfully!")
+                    logger.info("✅ CAPTCHA solved successfully!")
                     return True
 
                 logger.warning("CAPTCHA still present after solve attempt %d", attempt + 1)
@@ -295,10 +568,79 @@ class QwenTokenService:
             except Exception as e:
                 logger.error("CAPTCHA solve error (attempt %d): %s", attempt + 1, e)
 
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(2000)
 
-        logger.error("Failed to solve CAPTCHA after %d attempts", max_attempts)
+        logger.error("❌ Failed to solve CAPTCHA after %d attempts", max_attempts)
         return False
+
+    async def _human_drag_aliyun(self, page, distance: int):
+        """Perform human-like slider drag for Aliyun WAF captcha."""
+        # Aliyun WAF slider selectors
+        slider_selectors = [
+            '#aliyunCaptcha-sliding-slider',
+            '.aliyun-captcha-slider',
+            '[class*="aliyunCaptcha"] .slider',
+            '.nc-lang-cnt .btn_slide',
+            ".nc_scale .btn_slide",
+            ".nc_iconfont.btn_slide",
+            ".geetest_slider_button",
+            ".slider",
+            ".handler",
+        ]
+
+        slider = None
+        for sel in slider_selectors:
+            try:
+                locator = page.locator(sel).first
+                if await locator.is_visible(timeout=1000):
+                    slider = locator
+                    logger.info("Found slider with selector: %s", sel)
+                    break
+            except Exception:
+                pass
+
+        if not slider:
+            # Fallback: try to find by text
+            try:
+                slider = page.get_by_role("slider").first
+                if await slider.is_visible(timeout=500):
+                    logger.info("Found slider by role")
+            except Exception:
+                pass
+
+        if not slider:
+            raise Exception("Slider element not found for Aliyun WAF")
+
+        box = await slider.bounding_box()
+        if not box:
+            raise Exception("Slider bounding box not available")
+
+        start_x = box['x'] + box['width'] / 2
+        start_y = box['y'] + box['height'] / 2
+
+        await page.mouse.move(start_x, start_y)
+        await page.wait_for_timeout(random.randint(100, 300))
+        await page.mouse.down()
+
+        # Human-like movement with acceleration/deceleration
+        steps = max(20, min(40, distance // 3))
+        moved = 0.0
+
+        for i in range(steps):
+            remaining = distance - moved
+            # Easing function: faster at start, slower at end
+            progress = i / steps
+            ease = 1 - (1 - progress) ** 2  # Quadratic ease out
+            step = remaining / (steps - i) * (0.7 + random.random() * 0.4)
+
+            moved += step
+            jitter_y = (random.random() - 0.5) * 3
+            await page.mouse.move(start_x + moved, start_y + jitter_y)
+            await page.wait_for_timeout(10 + random.randint(0, 15))
+
+        await page.wait_for_timeout(random.randint(50, 150))
+        await page.mouse.up()
+        logger.info("Aliyun WAF drag completed: %d px in %d steps", distance, steps)
 
     async def _refresh_tokens(self):
         """Core refresh logic using Playwright."""
@@ -307,28 +649,44 @@ class QwenTokenService:
 
         settings = get_settings()
         self._captured_tokens = {}
+        
+        cookie_dict = {}  # Initialize to avoid UnboundLocalError
 
         async with async_playwright() as p:
             logger.info("Launching Chromium browser...")
 
             browser = await p.chromium.launch(
-                headless=True,
+                headless=False,  # Xvfb ile çalışır, Alibaba WAF'ı headless algıladığı için False olmalı
                 args=[
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-blink-features=AutomationControlled',
                 ]
             )
+            
+            cookie_dict = {}  # Initialize to avoid UnboundLocalError
 
-            context = await browser.new_context(
-                user_agent=(
+            # Check if session file exists
+            context_options = {
+                "user_agent": (
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/142.0.0.0 Safari/537.36"
+                    "Chrome/131.0.0.0 Safari/537.36"
                 ),
-                viewport={"width": 1920, "height": 1080},
-                locale="en-US",
-            )
+                "viewport": {"width": 1920, "height": 1080},
+                "locale": "en-US",
+            }
+
+            # Load saved session if exists
+            if SESSION_STATE_FILE.exists():
+                logger.info("Loading saved session from %s", SESSION_STATE_FILE)
+                try:
+                    context_options["storage_state"] = str(SESSION_STATE_FILE)
+                    logger.info("Session file loaded successfully")
+                except Exception as e:
+                    logger.warning("Could not load session file: %s", e)
+
+            context = await browser.new_context(**context_options)
 
             # Load existing cookies from settings
             if settings.qwen.cookie and settings.qwen.cookie != "changeme":
@@ -356,13 +714,33 @@ class QwenTokenService:
 
                 # Capture bx-ua and bx-umidtoken from any API request
                 if "chat.qwen.ai/api" in url or "qwen.ai" in url:
+                    updated = False
                     if "bx-ua" in headers:
                         self._captured_tokens["bx_ua"] = headers["bx-ua"]
                         logger.info("Captured bx-ua: %s...", headers["bx-ua"][:50])
+                        updated = True
 
                     if "bx-umidtoken" in headers:
                         self._captured_tokens["bx_umidtoken"] = headers["bx-umidtoken"]
                         logger.info("Captured bx-umidtoken: %s...", headers["bx-umidtoken"][:30])
+                        updated = True
+                    
+                    if "bx-v" in headers:
+                        self._captured_tokens["bx_v"] = headers["bx-v"]
+                        logger.info("Captured bx-v: %s", headers["bx-v"])
+                        updated = True
+                    
+                    if "version" in headers:
+                        self._captured_tokens["version"] = headers["version"]
+                        logger.info("Captured version: %s", headers["version"])
+                        updated = True
+                    
+                    if updated:
+                        # Aggressively save to Redis whenever captured
+                        try:
+                            self._save_tokens(cookie_dict)
+                        except Exception:
+                            pass
 
             page.on("request", capture_request)
 
@@ -375,56 +753,109 @@ class QwenTokenService:
                 logger.info("Waiting for page to stabilize...")
                 await page.wait_for_timeout(5000)
 
-                # Check and solve CAPTCHA if present
+                # Check if user is logged in (robust check with fallbacks)
+                is_logged_in = await self._check_login_status(page)
+
+                # Check and solve CAPTCHA if present on login page
                 if not await self._solve_captcha(page):
                     raise Exception("CAPTCHA could not be solved")
 
-                # Trigger a lightweight API call to capture WAF tokens
-                # We'll fetch the chat list instead of sending a message
-                try:
-                    logger.info("Triggering lightweight API call...")
+                # Trigger API calls to capture WAF tokens (bx-ua, bx-umidtoken)
+                await self._trigger_api_for_waf_tokens(page)
 
-                    # Method 1: Execute fetch to trigger WAF token generation
-                    await page.evaluate("""
-                        fetch('/api/v2/chats?page=1&size=10', {
-                            method: 'GET',
-                            headers: {'Accept': 'application/json'}
-                        }).catch(e => console.log('fetch error:', e));
-                    """)
-                    await page.wait_for_timeout(2000)
-
-                    # Check if we captured tokens
-                    if not self._captured_tokens.get("bx_ua"):
-                        logger.info("No tokens yet, trying new chat endpoint...")
-                        # Method 2: Create a new chat (doesn't send message)
-                        await page.evaluate("""
-                            fetch('/api/v2/chats/new', {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'Accept': 'application/json'
-                                },
-                                body: '{}'
-                            }).catch(e => console.log('fetch error:', e));
-                        """)
-                        await page.wait_for_timeout(2000)
-
-                    # Check tokens captured
-                    if self._captured_tokens.get("bx_ua"):
-                        logger.info("WAF tokens captured successfully!")
-                    else:
-                        logger.warning("Could not capture WAF tokens from API calls")
-
-                except Exception as e:
-                    logger.warning("API trigger failed: %s", e)
-
-                # Extract cookies
+                # Extract cookies and prepare cookie_dict
                 cookies = await context.cookies()
                 cookie_dict = {c["name"]: c["value"] for c in cookies}
                 logger.info("Captured %d cookies", len(cookie_dict))
 
+                # Save tokens to Redis (before validation)
+                self._save_tokens(cookie_dict)
+
+                # POST validation - test if tokens work for chat completions
+                logger.info("🔍 Validating tokens with POST request...")
+                for validation_attempt in range(3):
+                    try:
+                        # Add Python-side timeout to prevent hanging
+                        post_result = await asyncio.wait_for(
+                            self._validate_with_post(page),
+                            timeout=40.0
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("POST validation timed out (Python side)")
+                        post_result = {'success': False, 'error': 'timeout'}
+                    except Exception as e:
+                        logger.error("POST validation error: %s", e)
+                        post_result = {'success': False, 'error': str(e)}
+
+                    if post_result.get('success'):
+                        logger.info("✅ POST validation successful!")
+                        break
+
+                    if post_result.get('waf_block'):
+                        logger.warning("⚠️ WAF block on POST (attempt %d/3), solving captcha...",
+                                      validation_attempt + 1)
+                        # WAF sayfasına git ve captcha çöz
+                        await page.reload(wait_until="networkidle", timeout=30000)
+                        await page.wait_for_timeout(3000)
+
+                        if not await self._solve_captcha(page):
+                            logger.error("Failed to solve WAF captcha")
+                            continue
+
+                        # Captcha sonrası tokenları yeniden al
+                        await self._trigger_api_for_waf_tokens(page)
+                        
+                        # Update cookie_dict after captcha
+                        cookies = await context.cookies()
+                        cookie_dict = {c["name"]: c["value"] for c in cookies}
+                        self._save_tokens(cookie_dict)
+
+                # Extract JWT token from localStorage (critical for auth)
+                jwt_token = None
+                try:
+                    jwt_token = await page.evaluate("""
+                        () => localStorage.getItem('token')
+                    """)
+                    if jwt_token:
+                        cookie_dict["token"] = jwt_token
+                        logger.info("✅ Captured JWT token from localStorage: %s...", jwt_token[:50])
+                    else:
+                        logger.warning("⚠️ No JWT token found in localStorage")
+                except Exception as e:
+                    logger.warning("Failed to extract JWT from localStorage: %s", e)
+
+                # Fallback: Read JWT from session file if not captured from browser
+                if not jwt_token and SESSION_STATE_FILE.exists():
+                    try:
+                        import json
+                        with open(SESSION_STATE_FILE, 'r') as f:
+                            session_data = json.load(f)
+                        for origin in session_data.get('origins', []):
+                            if 'qwen.ai' in origin.get('origin', ''):
+                                for item in origin.get('localStorage', []):
+                                    if item.get('name') == 'token':
+                                        jwt_token = item.get('value')
+                                        if jwt_token:
+                                            cookie_dict["token"] = jwt_token
+                                            logger.info("✅ Captured JWT token from session file: %s...", jwt_token[:50])
+                                        break
+                    except Exception as e:
+                        logger.warning("Failed to read JWT from session file: %s", e)
+
                 # Save tokens to Redis
                 self._save_tokens(cookie_dict)
+
+                # Save session state to disk for future use
+                try:
+                    logger.info("Saving session state to %s", SESSION_STATE_FILE)
+                    await context.storage_state(path=str(SESSION_STATE_FILE))
+                    logger.info("✅ Session state saved successfully")
+                    
+                    # Set file permissions (read/write for owner only)
+                    SESSION_STATE_FILE.chmod(0o600)
+                    
+                except Exception as e:
+                    logger.error("Failed to save session state: %s", e)
 
             finally:
                 await browser.close()
@@ -432,16 +863,22 @@ class QwenTokenService:
 
     def _save_tokens(self, cookies: Dict[str, str]):
         """Save tokens to Redis with TTL."""
-        redis = get_redis_client()
+        try:
+            redis = get_redis_client()
+            logger.info("Saving tokens to Redis... (bx_ua present: %s, cookies present: %s)", 
+                        bool(self._captured_tokens.get("bx_ua")), bool(cookies))
 
-        # Save bx-ua
-        if self._captured_tokens.get("bx_ua"):
-            redis.setex(
-                self.REDIS_KEYS["bx_ua"],
-                self.TOKEN_TTL,
-                self._captured_tokens["bx_ua"]
-            )
-            logger.info("Saved bx_ua to Redis (TTL=%ds)", self.TOKEN_TTL)
+            # Save bx-ua
+            if self._captured_tokens.get("bx_ua"):
+                redis.setex(
+                    self.REDIS_KEYS["bx_ua"],
+                    self.TOKEN_TTL,
+                    self._captured_tokens["bx_ua"]
+                )
+                logger.info("Saved bx_ua to Redis (TTL=%ds)", self.TOKEN_TTL)
+        except Exception as e:
+            logger.error("Error in _save_tokens: %s", e)
+            return
 
         # Save bx-umidtoken
         if self._captured_tokens.get("bx_umidtoken"):
@@ -452,11 +889,34 @@ class QwenTokenService:
             )
             logger.info("Saved bx_umidtoken to Redis (TTL=%ds)", self.TOKEN_TTL)
 
+        # Save bx-v
+        if self._captured_tokens.get("bx_v"):
+            redis.setex(
+                self.REDIS_KEYS["bx_v"],
+                self.TOKEN_TTL,
+                self._captured_tokens["bx_v"]
+            )
+            logger.info("Saved bx_v to Redis: %s", self._captured_tokens["bx_v"])
+
+        # Save version
+        if self._captured_tokens.get("version"):
+            redis.setex(
+                self.REDIS_KEYS["app_version"],
+                self.TOKEN_TTL,
+                self._captured_tokens["version"]
+            )
+            logger.info("Saved version to Redis: %s", self._captured_tokens["version"])
+
         # Save cookies as JSON string
         if cookies:
             cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
             redis.setex(self.REDIS_KEYS["cookies"], self.TOKEN_TTL, cookie_str)
             logger.info("Saved cookies to Redis (TTL=%ds)", self.TOKEN_TTL)
+            
+            # Save auth_token separately if present in cookies
+            if "token" in cookies:
+                redis.setex(self.REDIS_KEYS["auth_token"], self.TOKEN_TTL, cookies["token"])
+                logger.info("Saved auth_token to Redis (TTL=%ds)", self.TOKEN_TTL)
 
         # Save last refresh timestamp
         redis.setex(
@@ -484,6 +944,9 @@ class QwenTokenService:
 
 async def main():
     """Entry point for the service."""
+    from app.utils.logging import configure_logging
+    configure_logging(level="INFO")
+    
     service = QwenTokenService()
 
     # Handle graceful shutdown
@@ -501,3 +964,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

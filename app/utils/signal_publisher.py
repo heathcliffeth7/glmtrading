@@ -27,6 +27,12 @@ def publish_signal(
     composite_bias: float = 0.0,
     interval: str = "",
     trace_id: str = "",
+    # Penalty tracking fields
+    original_confidence: float = 0.0,
+    original_action: str = "",
+    original_reasoning: str = "",
+    penalty_breakdown: Optional[Dict[str, float]] = None,
+    total_penalty: float = 0.0,
 ) -> bool:
     """
     Publish trading signal to Redis for real-time WebSocket broadcast.
@@ -46,6 +52,11 @@ def publish_signal(
         composite_bias: Composite bias score
         interval: Timeframe interval
         trace_id: Trace ID for debugging
+        original_confidence: Qwen's original confidence before penalties
+        original_action: Qwen's original action before forcing HOLD
+        original_reasoning: Qwen's original reasoning
+        penalty_breakdown: Dict of penalty names and values
+        total_penalty: Sum of all penalties applied
 
     Returns:
         True if published successfully, False otherwise
@@ -65,6 +76,12 @@ def publish_signal(
                 "composite_bias": composite_bias,
                 "interval": interval,
                 "trace_id": trace_id,
+                # Penalty tracking for detailed reasoning display
+                "original_confidence": original_confidence,
+                "original_action": original_action,
+                "original_reasoning": original_reasoning,
+                "penalty_breakdown": penalty_breakdown or {},
+                "total_penalty": total_penalty,
             },
             "timestamp": datetime.utcnow().isoformat(),
             "source": "orchestrator",

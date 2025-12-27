@@ -18,6 +18,79 @@ logger = get_logger(__name__)
 # Backfill state to prevent repeated backfills in same session
 _backfill_completed: set = set()  # Set of "symbol_interval" keys
 
+# Interval to seconds mapping for deduplication
+_INTERVAL_SECONDS = {
+    "1m": 60, "3m": 180, "5m": 300, "15m": 900, "15min": 900,
+    "30m": 1800, "30min": 1800, "1h": 3600, "4h": 14400, "1d": 86400,
+}
+
+
+def _dedup_snapshots_by_interval(
+    snapshots: List[Dict[str, Any]],
+    interval: str
+) -> List[Dict[str, Any]]:
+    """
+    Remove duplicate snapshots that fall within the same candle interval.
+
+    When multiple services write to the same measurement, we may get
+    duplicate records for the same candle. This function keeps only
+    the last record for each interval bucket.
+
+    Args:
+        snapshots: List of snapshot dicts with 'timestamp' key
+        interval: Candle interval (e.g., '4h', '1h', '1d')
+
+    Returns:
+        Deduplicated list of snapshots, oldest to newest
+    """
+    if not snapshots or len(snapshots) <= 1:
+        return snapshots
+
+    interval_seconds = _INTERVAL_SECONDS.get(interval, 3600)
+
+    # Group snapshots by truncated timestamp (interval bucket)
+    buckets: Dict[int, Dict[str, Any]] = {}
+
+    for snapshot in snapshots:
+        ts_str = snapshot.get("timestamp", "")
+        if not ts_str:
+            continue
+
+        try:
+            # Parse ISO timestamp
+            if "." in ts_str:
+                ts_str = ts_str.split(".")[0]  # Remove microseconds
+            if ts_str.endswith("Z"):
+                ts_str = ts_str[:-1]
+            dt = datetime.fromisoformat(ts_str)
+
+            # Truncate to interval bucket
+            epoch = int(dt.timestamp())
+            bucket_key = epoch // interval_seconds
+
+            # Keep record for each bucket, preferring records with 'open' field
+            existing = buckets.get(bucket_key)
+            if existing is None:
+                buckets[bucket_key] = snapshot
+            else:
+                # Prefer records with 'open' field (for candlestick analysis)
+                existing_has_open = existing.get("open") is not None
+                new_has_open = snapshot.get("open") is not None
+                if new_has_open and not existing_has_open:
+                    # New record has open, existing doesn't - use new
+                    buckets[bucket_key] = snapshot
+                elif not existing_has_open and not new_has_open:
+                    # Neither has open - keep last (newest)
+                    buckets[bucket_key] = snapshot
+                # If existing has open, keep it regardless of new
+
+        except (ValueError, TypeError):
+            continue
+
+    # Sort by bucket key and return
+    sorted_buckets = sorted(buckets.items(), key=lambda x: x[0])
+    return [snapshot for _, snapshot in sorted_buckets]
+
 
 _client: InfluxDBClient | None = None
 _write_api = None
@@ -387,7 +460,14 @@ def query_historical_snapshots(
                         symbol, interval, len(snapshots)
                     )
 
-        return snapshots
+        # Deduplicate snapshots that fall within the same candle interval
+        deduped = _dedup_snapshots_by_interval(snapshots, interval)
+        if len(deduped) < len(snapshots):
+            logger.debug(
+                "🧹 Dedup: %s %s removed %d duplicates (%d → %d)",
+                symbol, interval, len(snapshots) - len(deduped), len(snapshots), len(deduped)
+            )
+        return deduped
 
     except Exception as exc:
         logger.warning("Failed to fetch historical snapshots: %s", exc)

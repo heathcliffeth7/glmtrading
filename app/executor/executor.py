@@ -56,15 +56,15 @@ class Executor:
         self._max_daily_loss = max_daily_loss
         self._min_leverage = min_leverage
 
-        # SWING TRADE MODE: Apply hard leverage cap from settings
+        # DAY TRADE MODE: Apply hard leverage cap from settings
         from app.config.settings import get_settings
         settings = get_settings()
-        self._swing_mode = getattr(settings, 'swing_trade_mode', False)
-        if self._swing_mode:
-            swing_max_lev = getattr(settings, 'swing_max_leverage', 7)
-            self._max_leverage = min(max_leverage, swing_max_lev)
+        self._day_trade_mode = getattr(settings, 'day_trade_mode', False)
+        if self._day_trade_mode:
+            day_trade_max_lev = getattr(settings, 'day_trade_max_leverage', 7)
+            self._max_leverage = min(max_leverage, day_trade_max_lev)
             logger.info(
-                "📊 Executor [%s]: SWING MODE enabled - max leverage capped at %dx",
+                "📊 Executor [%s]: DAY TRADE MODE enabled - max leverage capped at %dx",
                 symbol, self._max_leverage
             )
         else:

@@ -125,12 +125,12 @@ class PerformanceState:
     performance_history: Tuple[int, ...] = field(default_factory=tuple)
 
 
-# Volatility parameters for different regimes
+# Volatility parameters for different regimes (Day Trade - tighter stops)
 VOLATILITY_PARAMS = {
-    "low": {"sl_mult": 0.8, "tp_rr": 2.0, "max_lev": 10},
-    "medium": {"sl_mult": 1.0, "tp_rr": 1.8, "max_lev": 8},
-    "high": {"sl_mult": 1.2, "tp_rr": 1.5, "max_lev": 6},
-    "extreme": {"sl_mult": 1.5, "tp_rr": 1.3, "max_lev": 4},
+    "low": {"sl_mult": 0.6, "tp_rr": 2.0, "max_lev": 7},
+    "medium": {"sl_mult": 0.8, "tp_rr": 1.8, "max_lev": 6},
+    "high": {"sl_mult": 1.0, "tp_rr": 1.5, "max_lev": 5},
+    "extreme": {"sl_mult": 1.2, "tp_rr": 1.3, "max_lev": 3},
 }
 
 

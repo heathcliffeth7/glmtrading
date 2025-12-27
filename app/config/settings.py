@@ -228,7 +228,7 @@ class QwenSettings(BaseSettings):
     # Browser'dan alınan cookie string
     cookie: str = Field("changeme", alias="QWEN_COOKIE")
     # Kullanılacak model
-    model: str = Field("qwen-max-latest", alias="QWEN_MODEL")
+    model: str = Field("qwen3-max-2025-10-30", alias="QWEN_MODEL")
     # İsteğe bağlı sabit chat_id (verilmezse her çağrıda yeni oluşturulur)
     chat_id: Optional[str] = Field(None, alias="QWEN_CHAT_ID")
     # WAF tetiklemek için opsiyonel GET path'i (örn: /api/v2/models)
@@ -240,7 +240,7 @@ class QwenSettings(BaseSettings):
     # Qwen'i aktif et (True ise GLM yerine Qwen kullanılır)
     enabled: bool = Field(False, alias="QWEN_ENABLED")
     # Redis'ten gelen cookie'yi kullan (varsayılan: devre dışı, sadece WAF headerları alınır)
-    use_redis_cookies: bool = Field(False, alias="QWEN_USE_REDIS_COOKIES")
+    use_redis_cookies: bool = Field(True, alias="QWEN_USE_REDIS_COOKIES")
     
     # Auto-refresh settings
     auto_refresh_enabled: bool = Field(
@@ -281,6 +281,52 @@ class QwenSettings(BaseSettings):
         2,
         alias="QWEN_RETRY_DELAY_SECONDS",
         description="Base delay between retries (seconds)"
+    )
+    
+    # Timeout Configuration
+    connect_timeout_sec: int = Field(
+        30,
+        alias="QWEN_CONNECT_TIMEOUT_SEC",
+        description="Connection timeout in seconds"
+    )
+    read_timeout_sec: int = Field(
+        300,
+        alias="QWEN_READ_TIMEOUT_SEC",
+        description="Read timeout for streaming responses (5 minutes for long prompts)"
+    )
+    write_timeout_sec: int = Field(
+        30,
+        alias="QWEN_WRITE_TIMEOUT_SEC",
+        description="Write timeout in seconds"
+    )
+    pool_timeout_sec: int = Field(
+        30,
+        alias="QWEN_POOL_TIMEOUT_SEC",
+        description="Connection pool timeout in seconds"
+    )
+    
+    # Protocol Settings
+    force_http1: bool = Field(
+        False,
+        alias="QWEN_FORCE_HTTP1",
+        description="Force HTTP/1.1 instead of HTTP/2 (for stability)"
+    )
+    enable_http2_fallback: bool = Field(
+        True,
+        alias="QWEN_ENABLE_HTTP2_FALLBACK",
+        description="Auto-fallback to HTTP/1.1 on protocol errors"
+    )
+    
+    # Advanced Retry Configuration
+    max_protocol_error_retries: int = Field(
+        5,
+        alias="QWEN_MAX_PROTOCOL_ERROR_RETRIES",
+        description="Extra retries specifically for RemoteProtocolError (beyond normal max_retry_attempts)"
+    )
+    protocol_error_retry_delay: int = Field(
+        1,
+        alias="QWEN_PROTOCOL_ERROR_RETRY_DELAY",
+        description="Base delay for protocol error retries (seconds)"
     )
 
 
@@ -335,11 +381,11 @@ class AppSettings(BaseSettings):
     position_monitor_check_invalidation: bool = Field(True, alias="POSITION_MONITOR_CHECK_INVALIDATION")
 
     # =========================================================================
-    # SWING TRADE SETTINGS
+    # DAY TRADE SETTINGS (1H primary, daha hizli feedback loop)
     # =========================================================================
-    swing_trade_mode: bool = Field(True, alias="SWING_TRADE_MODE")
-    swing_max_leverage: int = Field(10, alias="SWING_MAX_LEVERAGE")
-    swing_primary_timeframe: str = Field("4h", alias="SWING_PRIMARY_TIMEFRAME")
+    day_trade_mode: bool = Field(True, alias="DAY_TRADE_MODE")
+    day_trade_max_leverage: int = Field(7, alias="DAY_TRADE_MAX_LEVERAGE")
+    day_trade_primary_timeframe: str = Field("1h", alias="DAY_TRADE_PRIMARY_TIMEFRAME")
 
     # Performance Tracking Override
     override_consecutive_losses: bool = Field(False, alias="OVERRIDE_CONSECUTIVE_LOSSES")

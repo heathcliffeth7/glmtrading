@@ -107,7 +107,7 @@ CIKTI FORMATI (JSON):
       "adx_interpretation": "ADX degeri ve trend gucu yorumu",
       "volume_assessment": "Volume Ratio degerlendirmesi",
       "funding_view": "Funding rate yorumu",
-      "timeframe_alignment": "1D/4H/1H trend uyumu sentezi (ornek: 'Tum TF bearish hizali')",
+      "timeframe_alignment": "4H/1H/15m trend uyumu sentezi (ornek: 'Tum TF bearish hizali')",
       "futures_deep_analysis": "OI degisimi + Funding + L/S ratio birlikte yorumu",
       "volatility_impact": "Volatilite rejiminin pozisyon boyutu ve SL uzerindeki etkisi"
     }},
@@ -136,7 +136,7 @@ CIKTI FORMATI (JSON):
 
 ONEMLI KURALLAR:
 - "data_analysis" alani MUTLAKA doldurulmali (ADX, Volume, Funding yorumu)
-- "timeframe_alignment" alani MUTLAKA doldurulmali (1D/4H/1H sentezi)
+- "timeframe_alignment" alani MUTLAKA doldurulmali (4H/1H/15m sentezi)
 - "futures_deep_analysis" alani OI+Funding+L/S birlikte yorumlanmali
 - "volatility_impact" alani HIGH/EXTREME rejimlerde pozisyon uzerindeki etkiyi icermeli
 - "reasoning" alani MUTLAKA TURKCE yazilmalidir
@@ -175,10 +175,10 @@ ANALIZ WORKFLOW (Thesis/Antithesis/Synthesis):
 4. SYNTHESIS: Thesis vs Antithesis tart, risk yuksekse confidence dusur, nihai karar ver
 
 ZORUNLU GIRIS KONTROL LISTESI (BUY/SELL icin):
-- Zaman dilimleri net hizali mi? (1D/4H/1H)
-- Hacim kalitesi yeterli mi? (Volume Ratio)
-- Destek/direnc cok yakin mi? (yakinsa teyit bekle)
-- Futures akisi mantikli mi? (OI + Funding + L/S)
+- TF Alignment: 3/3 hizali = +10, 2/3 hizali = 0, 1/3 veya catisma = -20 confidence
+- Volume Ratio: >0.7x = +5, 0.4-0.7x = 0, <0.4x = -15 confidence
+- S/R Distance: >1% = OK, 0.5-1% = -5, <0.5% = -10 veya bekle
+- Futures: OI trend uyumlu + Funding < 0.01% = OK, crowded trade = -10
 
 CONFIDENCE SKORU (0–100):
 - 0-50: Catisma var veya trend yok → HOLD
@@ -194,7 +194,7 @@ CIKTI FORMATI (JSON):
       "adx_interpretation": "ADX degeri ve trend gucu yorumu (ornek: ADX 24.7 = orta trend)",
       "volume_assessment": "Volume Ratio degerlendirmesi (ornek: 0.1x = dusuk hacim riski)",
       "funding_view": "Funding rate yorumu (ornek: 0.006% = notr)",
-      "timeframe_alignment": "1D/4H/1H trend uyumu sentezi (ornek: 'Tum TF bearish hizali' veya '1D notr, 4H/1H bearish = zayif sinyal')",
+      "timeframe_alignment": "4H/1H/15m trend uyumu sentezi (ornek: 'Tum TF bearish hizali' veya '4H notr, 1H/15m bearish = zayif sinyal')",
       "futures_deep_analysis": "OI degisimi + Funding + L/S ratio birlikte yorumu (ornek: 'OI -1.6% + L/S 3.37 = crowded long, liquidation riski')",
       "volatility_impact": "Volatilite rejiminin pozisyon boyutu ve SL uzerindeki etkisi (ornek: 'HIGH vol = kucuk pozisyon, genis SL')"
     }},
@@ -212,17 +212,29 @@ CIKTI FORMATI (JSON):
 
 ONEMLI KURALLAR:
 - "data_analysis" alani MUTLAKA doldurulmali (ADX, Volume, Funding yorumu)
-- "timeframe_alignment" alani MUTLAKA doldurulmali (1D/4H/1H sentezi)
+- "timeframe_alignment" alani MUTLAKA doldurulmali (4H/1H/15m sentezi)
 - "futures_deep_analysis" alani OI+Funding+L/S birlikte yorumlanmali
 - "volatility_impact" alani HIGH/EXTREME rejimlerde pozisyon boyutu onerisini icermeli
 - "reasoning" alani MUTLAKA TURKCE yazilmalidir
 - "thought_process" tum alanlarini MUTLAKA doldur (thesis, antithesis, synthesis_verdict)
 - stop_loss, take_profit, invalidation_condition YAZMA - bunlar sistem tarafindan hesaplanir
 - Thesis sinyal yonuyle uyumlu olmali (BUY sinyali icin bullish thesis, SELL icin bearish thesis)
-- Dusuk hacim (Volume Ratio < 0.3) varsa confidence -10 dusur
-- ADX < 25 ise RSI oversold/overbought kurallarini dikkate al
-- HIGH/EXTREME volatilite rejiminde confidence -15 dusur
-- Fiyat destek/dirence %0.5'ten yakinsa (Distance < 0.5%) kirilma/bounce teyidi bekle veya confidence -10 uygula
+ADX HARD CAP (oncelikli - diger kurallardan once uygula):
+- ADX < 15 = confidence MAKSIMUM 50 (range market, BUY/SELL imkansiz)
+- ADX 15-20 = confidence MAKSIMUM 70 (zayif trend, BUY/SELL zor)
+- ADX >= 20 = normal (cap yok)
+
+CONFIDENCE PENALTY:
+- Dusuk hacim (Volume Ratio < 0.3) = confidence -10
+- HIGH/EXTREME volatilite rejimi = confidence -15
+- Fiyat destek/dirence < 0.5% yakinsa = confidence -10 veya bekle
+
+CASCADE RISK KURALLARI (Liquidation Heatmap):
+- CASCADE RISK: EXTREME + fiyat liq zone'a < 1% = confidence MAX 40, HOLD zorunlu
+- CASCADE RISK: HIGH + pozisyon dominant side ile ayni = confidence -20
+- Liq zone < 0.5% mesafede = HOLD, giris yapma (cascade tetiklenebilir)
+- LONG_HEAVY dominant + BUY sinyali = dikkat, long squeeze riski
+- SHORT_HEAVY dominant + SELL sinyali = dikkat, short squeeze riski
 
 {glossary_section}
 """

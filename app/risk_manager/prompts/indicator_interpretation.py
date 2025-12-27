@@ -19,21 +19,25 @@ def calculate_cvd_context(
     price_end: float,
 ) -> Dict[str, str]:
     """
-    Calculate high-level CVD/price context based on directional agreement.
+    Calculate high-level CVD/price context based on absolute values AND direction.
 
     Returns a dict with:
-      - context: TREND_CONFIRMED_BULLISH / TREND_CONFIRMED_BEARISH /
-                 BEARISH_DIVERGENCE / BULLISH_DIVERGENCE / NEUTRAL
+      - context: Pressure-based terminology (BUYING_PRESSURE_INCREASING, etc.)
       - cvd_direction: UP / DOWN / FLAT
       - price_direction: UP / DOWN / FLAT
+      - cvd_bias: BUYING_PRESSURE / SELLING_PRESSURE / NEUTRAL
     """
     if not cvd_values or len(cvd_values) < 2:
-        return {"context": "NEUTRAL", "cvd_direction": "FLAT", "price_direction": "FLAT"}
+        return {"context": "NEUTRAL", "cvd_direction": "FLAT", "price_direction": "FLAT", "cvd_bias": "NEUTRAL"}
+
+    cvd_first = cvd_values[0]
+    cvd_last = cvd_values[-1]
+    cvd_improving = cvd_last > cvd_first  # CVD yukseliyor mu?
 
     cvd_direction = "FLAT"
-    if cvd_values[-1] > cvd_values[0]:
+    if cvd_improving:
         cvd_direction = "UP"
-    elif cvd_values[-1] < cvd_values[0]:
+    elif cvd_last < cvd_first:
         cvd_direction = "DOWN"
 
     price_direction = "FLAT"
@@ -42,17 +46,25 @@ def calculate_cvd_context(
     elif price_end < price_start:
         price_direction = "DOWN"
 
-    context = "NEUTRAL"
-    if cvd_direction == "UP" and price_direction == "UP":
-        context = "TREND_CONFIRMED_BULLISH"
-    elif cvd_direction == "DOWN" and price_direction == "DOWN":
-        context = "TREND_CONFIRMED_BEARISH"
-    elif cvd_direction == "DOWN" and price_direction == "UP":
-        context = "BEARISH_DIVERGENCE"
-    elif cvd_direction == "UP" and price_direction == "DOWN":
-        context = "BULLISH_DIVERGENCE"
+    # Yeni terminoloji: Absolute CVD degerine gore baski yonu
+    # Negatif CVD = satis baskisi hakim, Pozitif CVD = alis baskisi hakim
+    if cvd_last < -100:  # Negatif CVD = satis baskisi
+        cvd_bias = "SELLING_PRESSURE"
+        if cvd_improving:
+            context = "SELLING_PRESSURE_EASING"      # Satis azaliyor
+        else:
+            context = "SELLING_PRESSURE_INCREASING"  # Satis artiyor
+    elif cvd_last > 100:  # Pozitif CVD = alis baskisi
+        cvd_bias = "BUYING_PRESSURE"
+        if cvd_improving:
+            context = "BUYING_PRESSURE_INCREASING"   # Alis artiyor
+        else:
+            context = "BUYING_PRESSURE_EASING"       # Alis azaliyor
+    else:  # CVD ~0 = notr
+        cvd_bias = "NEUTRAL"
+        context = "NEUTRAL"
 
-    return {"context": context, "cvd_direction": cvd_direction, "price_direction": price_direction}
+    return {"context": context, "cvd_direction": cvd_direction, "price_direction": price_direction, "cvd_bias": cvd_bias}
 
 
 class IndicatorInterpreter:
@@ -119,21 +131,23 @@ class IndicatorInterpreter:
             price_end=close_window[-1],
         )
         label = res["context"]
+        cvd_bias = res.get("cvd_bias", "NEUTRAL")
 
-        if label == "TREND_CONFIRMED_BULLISH":
-            return label, "CVD confirms bullish price direction"
-        if label == "TREND_CONFIRMED_BEARISH":
-            return label, "CVD confirms bearish price direction"
-        if label == "BEARISH_DIVERGENCE":
+        # Yeni pressure-based terminoloji
+        if label == "BUYING_PRESSURE_INCREASING":
+            return label, "Alis baskisi artiyor - bullish momentum"
+        if label == "BUYING_PRESSURE_EASING":
             if current_position == "LONG":
-                return label, "Price rising but CVD falling - LONG position weakening risk"
-            return label, "Price rising but CVD falling - weakening trend"
-        if label == "BULLISH_DIVERGENCE":
+                return label, "Alis baskisi azaliyor - LONG zayifliyor"
+            return label, "Alis baskisi azaliyor - momentum kaybediyor"
+        if label == "SELLING_PRESSURE_INCREASING":
+            return label, "Satis baskisi artiyor - bearish momentum"
+        if label == "SELLING_PRESSURE_EASING":
             if current_position == "SHORT":
-                return label, "Price falling but CVD rising - SHORT position reversal risk"
-            return label, "Price falling but CVD rising - potential reversal"
+                return label, "Satis baskisi azaliyor - SHORT zayifliyor"
+            return label, "Satis baskisi azaliyor - dip olusabilir"
 
-        return "NEUTRAL", "No clear CVD pattern"
+        return "NEUTRAL", "CVD notr bolge"
 
     def interpret_rsi_context(
         self, rsi: float, adx: float, price_slope: float = 0.0

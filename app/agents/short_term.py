@@ -2,6 +2,8 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import httpx
+
 from app.agents.base import Agent, AgentSignal
 from app.utils.influx import query_latest_snapshot, query_historical_snapshots, detect_htf_support_resistance
 from app.utils.logging import get_logger
@@ -132,6 +134,14 @@ class PureDataCollector(Agent):
             results.get("futures_hist") or []
         )
 
+        # BTC prices for altcoin correlation analysis (ETH, SOL)
+        btc_prices = None
+        if not self._symbol.upper().startswith("BTC"):
+            btc_prices = self._fetch_btc_prices_for_correlation()
+
+        # Order book data for imbalance analysis
+        orderbook_data = self._fetch_orderbook_data()
+
         return {
             "symbol": self._symbol,
             "current_snapshots": {
@@ -153,6 +163,8 @@ class PureDataCollector(Agent):
                 "1d": self._format_historical_arrays(results.get("hist_1d") or []),
             },
             "futures_data": futures_data,
+            "btc_prices": btc_prices,  # For altcoin correlation analysis
+            "orderbook_data": orderbook_data,  # For order book imbalance analysis
         }
 
     def _build_futures_data_from_results(
@@ -162,6 +174,9 @@ class PureDataCollector(Agent):
         current_funding_rate = futures_snapshot.get("funding_rate", 0)
         current_open_interest = futures_snapshot.get("open_interest", 0)
         current_long_short_ratio = futures_snapshot.get("long_short_ratio", 0)
+        current_taker_ratio = futures_snapshot.get("taker_buy_sell_ratio", 1.0)
+        current_taker_buy = futures_snapshot.get("taker_buy_volume", 0)
+        current_taker_sell = futures_snapshot.get("taker_sell_volume", 0)
 
         avg_funding_rate = 0
         avg_open_interest = 0
@@ -184,6 +199,9 @@ class PureDataCollector(Agent):
                 "funding_rate": current_funding_rate,
                 "open_interest": current_open_interest,
                 "long_short_ratio": current_long_short_ratio,
+                "taker_buy_sell_ratio": current_taker_ratio,
+                "taker_buy_volume": current_taker_buy,
+                "taker_sell_volume": current_taker_sell,
             },
             "averages": {
                 "funding_rate_avg": avg_funding_rate,
@@ -197,15 +215,15 @@ class PureDataCollector(Agent):
         """Format historical snapshots into raw arrays for GLM analysis"""
         if not snapshots:
             return {}
-        
+
         # Extract ALL available indicators into arrays
         result = {}
         all_keys = set()
-        
+
         # Collect all possible keys from all snapshots
         for snapshot in snapshots:
             all_keys.update(snapshot.keys())
-        
+
         # Create arrays for each key
         for key in sorted(all_keys):
             values = []
@@ -214,6 +232,70 @@ class PureDataCollector(Agent):
                     values.append(snapshot[key])
             if values:
                 result[key] = values
-        
+
         return result
-    
+
+    def _fetch_btc_prices_for_correlation(self) -> Optional[List[float]]:
+        """
+        Fetch BTCUSDT close prices for correlation analysis with altcoins.
+        Uses 1h timeframe to match primary trading timeframe.
+
+        Returns:
+            List of BTC close prices or None if unavailable
+        """
+        try:
+            # Fetch BTCUSDT historical data from 1h timeframe (matches primary TF)
+            btc_historical = query_historical_snapshots("enriched_1h", "BTCUSDT", "1h", limit=50)
+
+            if not btc_historical:
+                logger.warning("No BTCUSDT historical data for correlation")
+                return None
+
+            # Extract close prices
+            btc_closes = []
+            for snapshot in btc_historical:
+                close_price = snapshot.get("close")
+                if close_price is not None:
+                    btc_closes.append(float(close_price))
+
+            if len(btc_closes) < 21:
+                logger.warning(f"Not enough BTC data for correlation: {len(btc_closes)} (need 21+)")
+                return None
+
+            logger.debug(f"✅ Fetched {len(btc_closes)} BTC prices for correlation analysis")
+            return btc_closes
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch BTC prices for correlation: {e}")
+            return None
+
+    def _fetch_orderbook_data(self) -> Optional[Dict]:
+        """
+        Fetch order book data from Binance API for imbalance analysis.
+
+        Returns:
+            Dict with 'bids' and 'asks' lists, or None if unavailable
+        """
+        try:
+            url = "https://api.binance.com/api/v3/depth"
+            params = {"symbol": self._symbol.upper(), "limit": 20}
+
+            with httpx.Client(timeout=5.0) as client:
+                response = client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+
+            bids = data.get("bids", [])
+            asks = data.get("asks", [])
+
+            if not bids or not asks:
+                logger.warning(f"Empty orderbook for {self._symbol}")
+                return None
+
+            logger.debug(f"✅ Fetched orderbook: {len(bids)} bids, {len(asks)} asks")
+            return {"bids": bids, "asks": asks}
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch orderbook for {self._symbol}: {e}")
+            return None
+

@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Union
 
 from app.agents.base import AgentSignal
 from app.config.settings import get_settings
@@ -6,6 +6,7 @@ from app.risk_manager.decision_models import RiskDecision
 from app.risk_manager.fallback_handler import FallbackHandler
 from app.risk_manager.qwen_client import QwenClient
 from app.risk_manager.glm_communicator import GLMCommunicator
+from app.services.playwright_qwen import PlaywrightQwenClientSync
 from app.risk_manager.manager_modules.evaluator import Evaluator
 from app.risk_manager.manager_modules.metrics_calculator import MetricsCalculator
 from app.risk_manager.manager_modules.prompt_builder import PromptBuilder
@@ -37,18 +38,23 @@ class RiskManager:
     Refactored from 1,557 lines → ~150 lines (90% reduction)
     """
     
-    def __init__(self, glm_client: QwenClient | None = None, symbol: str = "BTCUSDT") -> None:
+    def __init__(
+        self,
+        glm_client: Union[QwenClient, PlaywrightQwenClientSync, None] = None,
+        symbol: str = "BTCUSDT",
+    ) -> None:
         """
         Initialize RiskManager.
 
         Args:
-            glm_client: Optional QwenClient instance. If not provided, creates default.
+            glm_client: Optional client instance. If not provided, creates PlaywrightQwenClientSync.
                         Use this to inject custom clients with different configs
                         for parallel processing across symbols.
             symbol: Trading symbol (e.g., BTCUSDT, ETHUSDT, SOLUSDT)
         """
         self._symbol = symbol
-        self._glm = glm_client if glm_client else QwenClient()
+        # Use Playwright Stealth client by default
+        self._glm = glm_client if glm_client else PlaywrightQwenClientSync()
         self._communicator = GLMCommunicator(self._glm)
         self._settings = get_settings()
         self._runtime_tracker = RuntimeTracker.get_instance()

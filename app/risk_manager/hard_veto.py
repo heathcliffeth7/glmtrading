@@ -1,6 +1,24 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Any, Dict, List, Tuple
+
+
+def check_market_conditions_veto(market_data: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Check market conditions for hard veto.
+
+    Args:
+        market_data: Market data dict containing snapshots and other info
+
+    Returns:
+        Tuple of (should_veto: bool, reason: str)
+    """
+    # Extract snapshots from market_data
+    current_snapshots = market_data.get("current_snapshots", {})
+
+    # For now, return no veto - this is a placeholder
+    # The actual veto logic uses evaluate_hard_veto with action context
+    return (False, "")
 
 
 def evaluate_hard_veto(action: str, current_snapshots: Dict[str, Dict]) -> List[str]:

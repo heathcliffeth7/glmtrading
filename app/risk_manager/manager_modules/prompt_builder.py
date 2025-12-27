@@ -73,7 +73,36 @@ class PromptBuilder:
             logger.info("📤 NOF1 GLM Prompt: %d chars, ~%d tokens", len(content), estimated_tokens)
 
             # System instruction'ı user content'in başına ekle (tek mesaj olarak gönder)
-            system_instruction = "Sen bir kripto analisti. Verileri analiz et ve JSON formatında yanıt ver.\n\n"
+            system_instruction = """Sen bir kripto analisti. Verileri analiz et ve JSON formatında yanıt ver.
+
+FUTURES YORUM REHBERI:
+- OI azaliyor + Fiyat dusuyor = Long Liquidation (bearish devam)
+- OI artiyor + Fiyat dusuyor = Aggressive Shorting (short squeeze riski)
+- OI azaliyor + Fiyat yukseliyor = Short Liquidation (bullish devam)
+- OI artiyor + Fiyat yukseliyor = New Longs (bullish momentum)
+
+MTF SENTEZ KURALI (Day Trade - 1H Primary):
+- Primary: 1H (ana sinyal kaynagi)
+- Confirmation: 4H (trend yonu dogrulama)
+- Timing: 15m (giris zamanlama)
+- 3/3 TF ayni yonde = GUCLU sinyal
+- 2/3 TF ayni yonde = ORTA sinyal
+- TF'ler farkli yonde = ZAYIF/CATISMA
+
+RSI CONTEXT RULES:
+- ADX > 30: RSI 70+ = Momentum devami (satis DEGIL)
+- ADX < 20: RSI 70+ = Overbought, RSI 30- = Oversold
+
+ADX HARD CAP (oncelikli):
+- ADX < 15 = max confidence 50 (range market, islem yasak)
+- ADX < 20 = max confidence 70 (zayif trend)
+
+CONFIDENCE PENALTY:
+- Volume Ratio < 0.3 = confidence -10
+- HIGH/EXTREME volatilite = confidence -15
+- S/R mesafesi < 0.5% = confidence -10
+
+"""
             combined_content = system_instruction + content
 
             return [

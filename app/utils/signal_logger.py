@@ -108,6 +108,13 @@ class SignalLog:
     dynamic_threshold_used: float = 80.0
     volatility_regime_label: str = "medium"  # low, medium, high, extreme
 
+    # Penalty tracking (for detailed reasoning display)
+    original_confidence: float = 0.0           # Qwen'den gelen orijinal confidence
+    original_action: str = ""                  # Qwen'in orijinal kararı (BUY/SELL)
+    original_reasoning: str = ""               # Qwen'in orijinal gerekçesi
+    penalty_breakdown: Dict[str, float] = field(default_factory=dict)  # {"ADX < 25": -15, ...}
+    total_penalty: float = 0.0                 # Toplam penalty
+
     # Additional context
     metadata: Dict[str, Any] = field(default_factory=dict)
     
@@ -317,6 +324,12 @@ class SignalLogger:
                 composite_bias=signal_log.composite_bias,
                 interval=signal_log.interval,
                 trace_id=signal_log.trace_id or "",
+                # Penalty tracking fields
+                original_confidence=signal_log.original_confidence,
+                original_action=signal_log.original_action,
+                original_reasoning=signal_log.original_reasoning,
+                penalty_breakdown=signal_log.penalty_breakdown,
+                total_penalty=signal_log.total_penalty,
             )
 
         except Exception as e:
@@ -463,13 +476,20 @@ class SignalLogger:
             # Latency
             latency_total_ms=latency.get('total_e2e', 0.0) * 1000,
             latency_signal_generation_ms=metadata.get('signal_generation_latency_ms', 0.0),
-            
+
             # Metadata
             trace_id=metadata.get('trace_id'),
             signal_source=metadata.get('signal_source', 'derivatives_agent'),
             metadata=metadata,
+
+            # Penalty tracking from RiskDecision
+            original_confidence=getattr(decision, 'original_confidence', 0.0),
+            original_action=getattr(decision, 'original_action', ''),
+            original_reasoning=getattr(decision, 'original_reasoning', ''),
+            penalty_breakdown=getattr(decision, 'penalty_breakdown', {}) or {},
+            total_penalty=getattr(decision, 'total_penalty', 0.0),
         )
-        
+
         return signal_log
 
 
