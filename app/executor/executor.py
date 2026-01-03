@@ -14,7 +14,7 @@ from app.executor.ledger import (
     trigger_stop_loss_order, create_stop_loss_notification, get_recent_notifications,
     StopLossOrder, StopLossNotification
 )
-from app.executor.portfolio_sync import get_synced_portfolio, calculate_correct_margin_usage
+from app.executor.portfolio_sync import get_synced_portfolio, calculate_correct_margin_usage, invalidate_portfolio_cache
 from app.risk_manager.manager import RiskDecision
 from app.risk_manager.dynamic_risk_manager import DynamicRiskManager
 from app.risk_manager.advanced_parser import AdvancedInvalidationParser
@@ -139,17 +139,17 @@ class Executor:
         )
         self._trade_notifier = TradeNotifier(symbol=self._symbol)
 
-    def get_current_position_id(self, session: Session, symbol: str) -> Optional[str]:
+    def get_current_position_id(self, session: Session) -> Optional[str]:
         """DEPRECATED: Delegate to PositionManager."""
-        return self._position_manager.get_current_position_id(session, symbol)
+        return self._position_manager.get_current_position_id(session)
 
-    def get_position_id_by_side(self, session: Session, symbol: str, position_side: str) -> Optional[str]:
+    def get_position_id_by_side(self, session: Session, position_side: str) -> Optional[str]:
         """Delegate to PositionManager."""
-        return self._position_manager.get_position_id_by_side(session, symbol, position_side)
+        return self._position_manager.get_position_id_by_side(session, position_side)
 
-    def get_all_open_position_ids(self, session: Session, symbol: str) -> Dict[str, str]:
+    def get_all_open_position_ids(self, session: Session) -> Dict[str, str]:
         """Delegate to PositionManager."""
-        return self._position_manager.get_all_open_position_ids(session, symbol)
+        return self._position_manager.get_all_open_position_ids(session)
 
 
 
@@ -227,6 +227,7 @@ class Executor:
             
             # Price change threshold: Only block extreme moves (>5%)
             with Session(engine) as check_session:
+                # Price change check - informational only, no blocking
                 from app.executor.ledger import Trade
                 last_trade = (
                     check_session.query(Trade)
@@ -236,20 +237,10 @@ class Executor:
                 )
                 if last_trade and last_trade.price:
                     price_change_pct = abs((price - last_trade.price) / last_trade.price) * 100
-                    if price_change_pct > 10.0:
-                        logger.warning(
-                            "❌ BLOCKED by extreme price change: %.2f%% > 10.00%% (last: $%.2f, current: $%.2f)",
-                            price_change_pct, last_trade.price, price
-                        )
-                        return ExecutionResult(
-                            status="BLOCKED",
-                            details=f"Extreme price movement: {price_change_pct:.2f}% > 10% threshold"
-                        )
-                    else:
-                        logger.info(
-                            "✅ Price change OK: %.2f%% ≤ 10.00%% (last: $%.2f, current: $%.2f)",
-                            price_change_pct, last_trade.price, price
-                        )
+                    logger.info(
+                        "📊 Price change from last trade: %.2f%% (last: $%.2f, current: $%.2f)",
+                        price_change_pct, last_trade.price, price
+                    )
             
             leverage = self._normalize_leverage(decision.leverage)
             
@@ -667,7 +658,7 @@ class Executor:
         pnl = pnl_before_fee - fee
         
         # Position ID
-        current_position_id = generate_position_id(self._symbol) if pre_position == 0 else self.get_current_position_id(session, self._symbol)
+        current_position_id = generate_position_id(self._symbol) if pre_position == 0 else self.get_current_position_id(session)
         
         # Exit Plan Logic - reasoning'i de ekle (tooltip için)
         exit_plan = decision.exit_plan.copy() if decision.exit_plan else {}
@@ -780,7 +771,10 @@ class Executor:
         self._update_daily_pnl(daily_pnl, pnl, portfolio, price, fee)
         session.flush()
         session.commit()
-        
+
+        # Cache'i temizle - frontend anında güncel veri alsın
+        invalidate_portfolio_cache(self._symbol)
+
         telemetry = {
             "last_action": position_side, "amount": trade.amount, "price": price,
             "position_side": position_side, "position_id": current_position_id, "fee": fee, "pnl": pnl
@@ -1289,7 +1283,10 @@ class Executor:
         post_position = portfolio.net_position  # YENİ: net_position kullan
         session.flush()
         session.commit()
-        
+
+        # Cache'i temizle - frontend anında güncel veri alsın
+        invalidate_portfolio_cache(self._symbol)
+
         # Bildirim için geçici trade objesi
         trade_summary = SimpleNamespace(
             amount=btc_amount,
@@ -1318,7 +1315,7 @@ class Executor:
         position_status = self._describe_position_change(pre_position, post_position)
         
         # Telemetry for cycle notifier
-        current_position_id = self.get_position_id_by_side(session, self._symbol, position_side)
+        current_position_id = self.get_position_id_by_side(session, position_side)
         telemetry = {
             "last_action": "CLOSE",
             "amount": btc_amount,
@@ -1427,7 +1424,7 @@ class Executor:
                 )
 
                 # Pozisyon ID'sini al
-                current_position_id = self.get_current_position_id(session, self._symbol)
+                current_position_id = self.get_current_position_id(session)
 
                 # Mevcut açık trade'lerin close_price'larını güncelle
                 trade_side = "SELL" if is_long else "BUY"
@@ -1463,6 +1460,9 @@ class Executor:
 
                 session.flush()
                 session.commit()
+
+                # Cache'i temizle - frontend anında güncel veri alsın
+                invalidate_portfolio_cache(self._symbol)
 
                 logger.info("✅ Position closed by exit plan | pnl=%.2f fee=%.2f", realized_delta, closing_fee_total)
 
@@ -1563,7 +1563,7 @@ class Executor:
                 pre_position = portfolio.position
 
                 # Position ID al
-                current_position_id = self.get_position_id_by_side(session, self._symbol, position_side)
+                current_position_id = self.get_position_id_by_side(session, position_side)
 
                 # Trade side belirle (LONG kapatmak için SELL, SHORT kapatmak için BUY)
                 trade_side = "SELL" if position_side == "LONG" else "BUY"
@@ -1612,6 +1612,9 @@ class Executor:
 
                 session.flush()
                 session.commit()
+
+                # Cache'i temizle - frontend anında güncel veri alsın
+                invalidate_portfolio_cache(self._symbol)
 
                 post_position = portfolio.net_position
 

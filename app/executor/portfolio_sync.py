@@ -548,6 +548,19 @@ def get_cache_stats() -> Dict[str, any]:
             "ttl_seconds": _CACHE_TTL,
         }
 
+
+def invalidate_portfolio_cache(symbol: str) -> None:
+    """
+    Invalidate portfolio cache for a specific symbol.
+    Call this after partial close or position changes to ensure fresh data on next API request.
+    """
+    symbol_upper = (symbol or "").upper()
+    with _cache_lock:
+        if symbol_upper in _portfolio_cache:
+            _portfolio_cache.pop(symbol_upper, None)
+            logger.debug("Portfolio cache invalidated for %s", symbol_upper)
+
+
 def calculate_correct_margin_usage(portfolio: Portfolio, current_price: float, leverage: float) -> float:
     """
     Calculate correct margin usage based on current position and current price.

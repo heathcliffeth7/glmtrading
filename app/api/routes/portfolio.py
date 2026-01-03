@@ -128,7 +128,7 @@ async def get_portfolio_summary(db: Session = Depends(get_db)):
     current_prices = await get_current_prices(SYMBOLS)
 
     for symbol in SYMBOLS:
-        portfolio = get_synced_portfolio(db, symbol, force_sync=False)
+        portfolio = get_synced_portfolio(db, symbol, force_sync=True)
         current_price = current_prices.get(symbol, 0.0)
 
         # Bu sembol için realized PnL
@@ -308,7 +308,7 @@ async def get_portfolio_by_symbol(
     if symbol not in SYMBOLS:
         raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found")
 
-    portfolio = get_synced_portfolio(db, symbol, force_sync=False)
+    portfolio = get_synced_portfolio(db, symbol, force_sync=True)
     current_price = await get_current_price(symbol)
 
     # Get open trades for this symbol
