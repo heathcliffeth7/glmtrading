@@ -4,7 +4,7 @@
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
 <title>Trading Dashboard</title>
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-<!-- Cache buster: v1.0.1 -->
+<!-- Cache buster: v1.0.5 -->
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
@@ -172,6 +172,77 @@
             background: rgba(255,255,255,0.2);
             color: #fff;
         }
+        /* Equity Chart Tooltip Styles */
+        .equity-tooltip {
+            position: absolute;
+            z-index: 100;
+            padding: 10px 14px;
+            background: #10121a;
+            border: 1px solid #283139;
+            border-radius: 8px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+            pointer-events: none;
+            font-family: 'Manrope', sans-serif;
+            min-width: 150px;
+            transition: opacity 0.15s ease, transform 0.15s ease;
+        }
+        .equity-tooltip.hidden {
+            display: none;
+        }
+        .equity-tooltip .tooltip-date {
+            color: #8a8a8a;
+            font-size: 11px;
+            margin-bottom: 6px;
+            border-bottom: 1px solid #283139;
+            padding-bottom: 4px;
+        }
+        .equity-tooltip .tooltip-equity {
+            color: #e0e0e0;
+            font-size: 14px;
+            font-weight: 700;
+        }
+        .equity-tooltip .tooltip-pnl {
+            margin-top: 4px;
+        }
+        .equity-tooltip .tooltip-drawdown {
+            color: #d63031;
+            margin-top: 2px;
+        }
+        .equity-tooltip .tooltip-trades {
+            color: #8a8a8a;
+            margin-top: 4px;
+            font-size: 10px;
+        }
+        #equity-chart-container {
+            min-height: 280px;
+        }
+        @media (min-width: 1024px) {
+            #equity-chart-container {
+                min-height: 320px;
+            }
+        }
+        /* Details Button */
+        .details-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 5px 7px;
+            background: rgba(100, 116, 139, 0.12);
+            border: 1px solid rgba(100, 116, 139, 0.25);
+            border-radius: 5px;
+            color: #94a3b8;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .details-btn:hover {
+            background: rgba(100, 116, 139, 0.22);
+            border-color: #64748b;
+            color: #e2e8f0;
+        }
+        .details-btn .material-symbols-outlined {
+            font-size: 18px;
+        }
     </style>
 </head>
 <body class="bg-background-dark font-display text-text-light">
@@ -199,7 +270,7 @@
 <span class="material-symbols-outlined text-primary text-2xl">auto_awesome</span>
 <h3 class="text-text-light text-lg font-bold leading-tight tracking-[-0.015em]">AI Insights</h3>
 </div>
-<button onclick="fetchPortfolio(); fetchTrades(); fetchGLMSignals();" class="flex items-center justify-center gap-1.5 rounded-lg bg-primary/10 text-primary px-3 py-1.5 text-xs font-medium hover:bg-primary/20 transition-colors">
+<button onclick="fetchPortfolio(); fetchTrades(); fetchAISignals();" class="flex items-center justify-center gap-1.5 rounded-lg bg-primary/10 text-primary px-3 py-1.5 text-xs font-medium hover:bg-primary/20 transition-colors">
 <span class="material-symbols-outlined text-base">refresh</span>
 <span>Refresh</span>
 </button>
@@ -275,20 +346,16 @@
 <p id="equity-change" class="text-profit text-sm font-medium leading-normal">+0.0%</p>
 </div>
 </div>
-<div id="equity-chart" class="flex min-h-[250px] flex-1 flex-col gap-8 pt-4 relative">
-<svg class="absolute inset-0" fill="none" height="100%" preserveAspectRatio="none" viewBox="0 0 472 150" width="100%" xmlns="http://www.w3.org/2000/svg">
-<defs>
-<linearGradient gradientUnits="userSpaceOnUse" id="equity-gradient" x1="236" x2="236" y1="0" y2="150">
-<stop stop-color="#1e94f6" stop-opacity="0.3"></stop>
-<stop offset="1" stop-color="#1e94f6" stop-opacity="0"></stop>
-</linearGradient>
-</defs>
-<path id="equity-line" d="M0 75 L472 75" stroke="#1e94f6" stroke-linecap="round" stroke-width="2.5"></path>
-<path id="equity-area" d="M0 75 L472 75 V150 H0 Z" fill="url(#equity-gradient)"></path>
-</svg>
-</div>
-<div id="equity-labels" class="flex justify-around pt-2">
-<p class="text-text-secondary text-[13px] font-bold leading-normal tracking-[0.015em]">Loading...</p>
+<div id="equity-chart-container" class="relative h-[280px] flex-1 pt-4">
+    <div id="equity-chart" class="w-full h-[260px]"></div>
+    <div id="equity-tooltip" class="equity-tooltip hidden">
+        <div class="tooltip-date text-xs text-text-secondary mb-1"></div>
+        <div class="tooltip-equity text-sm font-bold text-text-light"></div>
+        <div class="tooltip-pnl text-xs"></div>
+        <div class="tooltip-unrealized text-xs"></div>
+        <div class="tooltip-drawdown text-xs text-loss"></div>
+        <div class="tooltip-trades text-xs text-text-secondary"></div>
+    </div>
 </div>
 </div>
 <div class="w-full">
@@ -328,20 +395,21 @@
 <table class="w-full text-sm text-left text-text-secondary">
 <thead class="text-xs text-text-secondary uppercase bg-panel-dark">
 <tr>
-<th class="px-4 py-3" scope="col">Symbol</th>
-<th class="px-4 py-3" scope="col">Side</th>
-<th class="px-4 py-3 text-right" scope="col">Amount</th>
-<th class="px-4 py-3 text-right" scope="col">Entry Price</th>
-<th class="px-4 py-3 text-right" scope="col">Exit Price</th>
-<th class="px-4 py-3 text-right" scope="col">PnL</th>
-<th class="px-4 py-3 text-right" scope="col">Time</th>
-<th class="px-4 py-3 text-right" scope="col">Exit Time</th>
-<th class="px-2 py-3" scope="col"></th>
+<th class="px-3 py-2" scope="col">Symbol</th>
+<th class="px-3 py-2" scope="col">Side</th>
+<th class="px-3 py-2 text-right" scope="col">Amount</th>
+<th class="px-3 py-2 text-right" scope="col">Entry</th>
+<th class="px-3 py-2 text-right" scope="col">Exit</th>
+<th class="px-3 py-2 text-right" scope="col">PnL</th>
+<th class="px-2 py-2 text-right" scope="col">Time</th>
+<th class="px-2 py-2 text-right" scope="col">Exit</th>
+<th class="px-1 py-2 text-center" scope="col"></th>
+<th class="px-1 py-2" scope="col"></th>
 </tr>
 </thead>
 <tbody id="trades-tbody">
 <tr>
-<td colspan="9" class="px-4 py-4 text-center text-text-secondary">Loading trades...</td>
+<td colspan="10" class="px-3 py-3 text-center text-text-secondary">Loading trades...</td>
 </tr>
 </tbody>
 </table>
@@ -410,6 +478,11 @@
     </div>
 </div>
 
+<!-- TradingView Lightweight Charts for equity curve -->
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+<!-- Equity Chart Module -->
+<script src="js/equity-chart.js?v=1.1.3"></script>
+
 <script>
 // Endpoint keşfi: aynı origin'i dener, gerekirse 8001 portuna geri döner, manuel override için window.dashboardConfig kullanabilirsiniz.
 const dashboardConfig = window.dashboardConfig || {};
@@ -440,6 +513,7 @@ function initEndpoints() {
         (loc.origin && loc.origin !== 'null' ? loc.origin : `http://${FALLBACK_HOST}:${DEFAULT_API_PORT}`);
 
     API_BASE = base;
+    window.API_BASE = base;  // Export for external modules
     WS_URL = dashboardConfig.wsUrl || toWsUrl(base);
 
     console.log('Dashboard endpoints resolved', { API_BASE, WS_URL });
@@ -609,9 +683,22 @@ function showReasoningTooltip(event, signal, trade) {
             <div class="trade-tooltip-content" style="max-height: 300px; overflow-y: auto; border-left: 2px solid #6366f1; padding-left: 8px;">${exitReasoning}</div>
         </div>
         ` : ''}
+
+        <!-- Position Trades (async loaded) -->
+        <div id="position-trades-section" style="display: none;">
+            <div class="trade-tooltip-section">
+                <div class="trade-tooltip-label" style="margin-bottom: 8px; color: #a855f7;">Position İşlemleri</div>
+                <div id="position-trades-list" style="max-height: 200px; overflow-y: auto;"></div>
+            </div>
+        </div>
     `;
     document.body.appendChild(tooltip);
     activeTooltip = tooltip;
+
+    // Position trades async fetch
+    if (trade.position_id && trade.symbol) {
+        fetchPositionTrades(trade.symbol, trade.position_id, trade.id);
+    }
 
     // Position tooltip - center on screen for better visibility
     const tooltipRect = tooltip.getBoundingClientRect();
@@ -644,6 +731,64 @@ function hideReasoningTooltip() {
     if (activeTooltip) {
         activeTooltip.remove();
         activeTooltip = null;
+    }
+}
+
+// Fetch all trades for a position_id and update tooltip
+async function fetchPositionTrades(symbol, positionId, currentTradeId) {
+    try {
+        const response = await fetch(`${API_BASE}/api/trades/by-position/${symbol}/${encodeURIComponent(positionId)}`);
+        if (!response.ok) return;
+
+        const trades = await response.json();
+        if (!trades || trades.length <= 1) return; // Tek trade varsa gösterme
+
+        const section = document.getElementById('position-trades-section');
+        const list = document.getElementById('position-trades-list');
+        if (!section || !list) return;
+
+        // Toplam PnL hesapla
+        const totalPnl = trades.reduce((sum, t) => sum + (t.pnl || 0), 0);
+        const totalAmount = trades.reduce((sum, t) => sum + (t.amount || 0), 0);
+
+        let html = `
+            <div style="display: flex; justify-content: space-between; margin-bottom: 8px; padding: 6px; background: rgba(168, 85, 247, 0.1); border-radius: 4px;">
+                <span style="color: #a855f7; font-size: 11px;">Toplam: ${trades.length} işlem</span>
+                <span style="color: ${totalPnl >= 0 ? '#22c55e' : '#ef4444'}; font-size: 11px; font-weight: 600;">${totalPnl >= 0 ? '+' : ''}${formatCurrency(totalPnl)}</span>
+            </div>
+            <table style="width: 100%; font-size: 11px; border-collapse: collapse;">
+                <thead>
+                    <tr style="color: #9ca3af; border-bottom: 1px solid #374151;">
+                        <th style="text-align: right; padding: 4px;">Amount</th>
+                        <th style="text-align: right; padding: 4px;">Close</th>
+                        <th style="text-align: right; padding: 4px;">PnL</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        for (const t of trades) {
+            const isCurrent = t.id === currentTradeId;
+            const rowStyle = isCurrent ? 'background: rgba(168, 85, 247, 0.2);' : '';
+            const pnlColor = (t.pnl || 0) >= 0 ? '#22c55e' : '#ef4444';
+            const closePrice = t.close_price ? formatCurrency(t.close_price) : '-';
+            const pnlDisplay = t.close_price ? `${(t.pnl || 0) >= 0 ? '+' : ''}${formatCurrency(t.pnl || 0)}` : '-';
+
+            html += `
+                <tr style="${rowStyle}">
+                    <td style="padding: 4px; text-align: right;">${t.amount?.toFixed(4) || '-'}</td>
+                    <td style="padding: 4px; text-align: right;">${closePrice}</td>
+                    <td style="padding: 4px; text-align: right; color: ${pnlColor};">${pnlDisplay}</td>
+                </tr>
+            `;
+        }
+
+        html += '</tbody></table>';
+        list.innerHTML = html;
+        section.style.display = 'block';
+
+    } catch (err) {
+        console.error('fetchPositionTrades error:', err);
     }
 }
 
@@ -815,67 +960,41 @@ function updatePositionsUI(symbols) {
         const info = symbolIcons[pos.symbol] || { color: 'primary', name: pos.symbol, icon: 'monetization_on' };
         const baseSymbol = pos.symbol.replace('USDT', '');
 
-        // Hedge durumu: hem LONG hem SHORT varsa ayrı kartlar göster
+        // Hedge durumu: NET pozisyon + detay göster (tek kart)
         if (pos.is_hedged) {
-            // LONG kart
-            if (pos.long_position > 0.0001) {
-                const longPnlClass = pos.long_unrealized_pnl >= 0 ? 'text-profit' : 'text-loss';
-                const longPnlSign = pos.long_unrealized_pnl >= 0 ? '+' : '';
-                cards.push(`
-                    <div class="bg-panel-dark p-4 rounded-xl border border-border-dark flex flex-col gap-3">
-                        <div class="flex justify-between items-center">
-                            <div class="flex items-center gap-2">
-                                <span class="material-symbols-outlined text-${info.color}">${info.icon}</span>
-                                <span class="font-bold text-text-light">${info.name}</span>
-                                <span class="text-xs px-1.5 py-0.5 rounded bg-profit/20 text-profit">HEDGE</span>
-                            </div>
-                            <span class="text-lg font-bold text-text-light">${formatCurrency(pos.current_price)}</span>
-                        </div>
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-text-secondary">Position</span>
-                            <span class="text-profit font-medium">LONG: ${pos.long_position.toFixed(4)} ${baseSymbol}</span>
-                        </div>
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-text-secondary">Entry Price</span>
-                            <span class="text-text-light">${formatCurrency(pos.long_entry_price)}</span>
-                        </div>
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-text-secondary">PnL</span>
-                            <span class="${longPnlClass} font-medium">${longPnlSign}${formatCurrency(pos.long_unrealized_pnl)}</span>
-                        </div>
-                    </div>
-                `);
-            }
+            // Net pozisyon hesapla
+            const netPosition = pos.long_position - pos.short_position;
+            const netDirection = netPosition >= 0 ? 'LONG' : 'SHORT';
+            const netAmount = Math.abs(netPosition);
+            const totalPnl = (pos.long_unrealized_pnl || 0) + (pos.short_unrealized_pnl || 0);
+            const pnlClass = totalPnl >= 0 ? 'text-profit' : 'text-loss';
+            const pnlSign = totalPnl >= 0 ? '+' : '';
+            const dirClass = netDirection === 'LONG' ? 'text-profit' : 'text-loss';
 
-            // SHORT kart
-            if (pos.short_position > 0.0001) {
-                const shortPnlClass = pos.short_unrealized_pnl >= 0 ? 'text-profit' : 'text-loss';
-                const shortPnlSign = pos.short_unrealized_pnl >= 0 ? '+' : '';
-                cards.push(`
-                    <div class="bg-panel-dark p-4 rounded-xl border border-border-dark flex flex-col gap-3">
-                        <div class="flex justify-between items-center">
-                            <div class="flex items-center gap-2">
-                                <span class="material-symbols-outlined text-${info.color}">${info.icon}</span>
-                                <span class="font-bold text-text-light">${info.name}</span>
-                                <span class="text-xs px-1.5 py-0.5 rounded bg-loss/20 text-loss">HEDGE</span>
-                            </div>
-                            <span class="text-lg font-bold text-text-light">${formatCurrency(pos.current_price)}</span>
+            cards.push(`
+                <div class="bg-panel-dark p-4 rounded-xl border border-border-dark flex flex-col gap-3">
+                    <div class="flex justify-between items-center">
+                        <div class="flex items-center gap-2">
+                            <span class="material-symbols-outlined text-${info.color}">${info.icon}</span>
+                            <span class="font-bold text-text-light">${info.name}</span>
+                            <span class="text-xs px-1.5 py-0.5 rounded bg-warning/20 text-warning">HEDGED</span>
                         </div>
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-text-secondary">Position</span>
-                            <span class="text-loss font-medium">SHORT: ${pos.short_position.toFixed(4)} ${baseSymbol}</span>
-                        </div>
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-text-secondary">Entry Price</span>
-                            <span class="text-text-light">${formatCurrency(pos.short_entry_price)}</span>
-                        </div>
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-text-secondary">PnL</span>
-                            <span class="${shortPnlClass} font-medium">${shortPnlSign}${formatCurrency(pos.short_unrealized_pnl)}</span>
-                        </div>
+                        <span class="text-lg font-bold text-text-light">${formatCurrency(pos.current_price)}</span>
                     </div>
-                `);
-            }
+                    <div class="flex justify-between items-center text-sm">
+                        <span class="text-text-secondary">Net Position</span>
+                        <span class="${dirClass} font-medium">${netDirection}: ${netAmount.toFixed(4)} ${baseSymbol}</span>
+                    </div>
+                    <div class="flex justify-between items-center text-sm">
+                        <span class="text-text-secondary">Hedge Detail</span>
+                        <span class="text-text-light text-xs">${pos.long_position.toFixed(4)}L / ${pos.short_position.toFixed(4)}S</span>
+                    </div>
+                    <div class="flex justify-between items-center text-sm">
+                        <span class="text-text-secondary">Total PnL</span>
+                        <span class="${pnlClass} font-medium">${pnlSign}${formatCurrency(totalPnl)}</span>
+                    </div>
+                </div>
+            `);
         } else {
             // Normal tek pozisyon (hedge değil)
             const hasPosition = Math.abs(pos.position) > 0.0001;
@@ -986,7 +1105,7 @@ function updateTradesTable(trades) {
     if (!trades || trades.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="9" class="px-4 py-4 text-center text-text-secondary">No trades found</td>
+                <td colspan="10" class="px-3 py-3 text-center text-text-secondary">No trades found</td>
             </tr>
         `;
         return;
@@ -1008,31 +1127,36 @@ function updateTradesTable(trades) {
             ? `<div class="text-xs text-text-light mt-1">Closed: ${trade.amount.toFixed(4)} ${baseSymbol}</div>`
             : '';
 
-        // Time formatting - full date/time format
-        const entryTimeFormatted = new Date(trade.timestamp).toLocaleString('tr-TR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+        // Time formatting - compact format (dd.mm HH:mm)
+        const entryTimeFormatted = new Date(trade.timestamp).toLocaleString('tr-TR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
         const exitTimeFormatted = trade.close_time
-            ? new Date(trade.close_time).toLocaleString('tr-TR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+            ? new Date(trade.close_time).toLocaleString('tr-TR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
             : '-';
         const exitPriceFormatted = trade.close_price ? formatCurrency(trade.close_price) : '-';
 
         // Her satıra hover class ekle - signal eşleştirmesi hover zamanında yapılacak
         return `
             <tr class="${borderClass} trade-row-hoverable" data-trade-index="${index}">
-                <td class="px-4 py-4 font-medium text-text-light whitespace-nowrap">${trade.symbol.replace('USDT', '/USD')}</td>
-                <td class="px-4 py-4 ${sideClass}">${sideLabel}</td>
-                <td class="px-4 py-4 text-right">
+                <td class="px-3 py-3 font-medium text-text-light whitespace-nowrap">${trade.symbol.replace('USDT', '/USD')}</td>
+                <td class="px-3 py-3 ${sideClass}">${sideLabel}</td>
+                <td class="px-3 py-3 text-right">
                     ${isPartial ? '' : trade.amount.toFixed(4)}
                     ${closedHtml}
                     ${remainingHtml}
                 </td>
-                <td class="px-4 py-4 text-right">${formatCurrency(trade.entry_price)}</td>
-                <td class="px-4 py-4 text-right">${exitPriceFormatted}</td>
-                <td class="px-4 py-4 text-right ${pnlClass}">${pnlSign}${formatCurrency(trade.pnl || 0)}</td>
-                <td class="px-4 py-4 text-right">${entryTimeFormatted}</td>
-                <td class="px-4 py-4 text-right">${exitTimeFormatted}</td>
-                <td class="px-2 py-4 text-center">
+                <td class="px-3 py-3 text-right">${formatCurrency(trade.entry_price)}</td>
+                <td class="px-3 py-3 text-right">${exitPriceFormatted}</td>
+                <td class="px-3 py-3 text-right ${pnlClass}">${pnlSign}${formatCurrency(trade.pnl || 0)}</td>
+                <td class="px-2 py-3 text-right">${entryTimeFormatted}</td>
+                <td class="px-2 py-3 text-right">${exitTimeFormatted}</td>
+                <td class="px-1 py-3 text-center">
                     <button onclick="copyTradeToClipboard(${index}, event)" class="text-text-secondary hover:text-primary transition-colors" title="Copy">
                         <span class="material-symbols-outlined text-base" id="copy-icon-${index}">content_copy</span>
+                    </button>
+                </td>
+                <td class="px-1 py-3 text-center">
+                    <button onclick="openTradeDetails(${index}, event)" class="details-btn" title="Details">
+                        <span class="material-symbols-outlined">more_vert</span>
                     </button>
                 </td>
             </tr>
@@ -1067,65 +1191,8 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
-// Fetch equity curve
-async function fetchEquityCurve(days = 30, symbol = null) {
-    try {
-        let url = `${API_BASE}/api/portfolio/equity-curve?days=${days}`;
-        if (symbol) {
-            url += `&symbol=${symbol}`;
-        }
-        const response = await fetch(url);
-        if (!response.ok) throw new Error('Failed to fetch equity curve');
-
-        const data = await response.json();
-        updateEquityChart(data, days, symbol);
-    } catch (error) {
-        console.error('Equity curve fetch error:', error);
-    }
-}
-
-// Update equity chart
-function updateEquityChart(data, days, symbol = null) {
-    const symbolLabel = symbol ? ` (${symbol.replace('USDT', '')})` : ' (All)';
-    document.getElementById('equity-period').textContent = `Last ${days} Days${symbolLabel}`;
-
-    if (!data.data || data.data.length < 2) {
-        return;
-    }
-
-    const points = data.data;
-    const minEquity = Math.min(...points.map(p => p.equity));
-    const maxEquity = Math.max(...points.map(p => p.equity));
-    const range = maxEquity - minEquity || 1;
-
-    // Generate SVG path
-    const width = 472;
-    const height = 150;
-    const padding = 10;
-
-    const pathPoints = points.map((point, index) => {
-        const x = (index / (points.length - 1)) * width;
-        const y = height - padding - ((point.equity - minEquity) / range) * (height - 2 * padding);
-        return `${x} ${y}`;
-    });
-
-    const linePath = `M${pathPoints.join(' L')}`;
-    const areaPath = `M${pathPoints.join(' L')} V ${height} H 0 Z`;
-
-    document.getElementById('equity-line').setAttribute('d', linePath);
-    document.getElementById('equity-area').setAttribute('d', areaPath);
-
-    // Update labels
-    const labelsContainer = document.getElementById('equity-labels');
-    const labelCount = Math.min(4, points.length);
-    const step = Math.floor(points.length / labelCount);
-
-    labelsContainer.innerHTML = Array.from({ length: labelCount }, (_, i) => {
-        const index = Math.min(i * step, points.length - 1);
-        const date = new Date(points[index].timestamp);
-        return `<p class="text-text-secondary text-[13px] font-bold leading-normal tracking-[0.015em]">${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</p>`;
-    }).join('');
-}
+// Equity chart functions moved to js/equity-chart.js module
+// Functions fetchEquityCurve() and updateEquityChart() are now loaded from external module
 
 // Fetch PnL histogram
 async function fetchPnLHistogram() {
@@ -1222,6 +1289,15 @@ const copyFieldDefinitions = [
         return (prompt && prompt !== null && prompt.trim() !== '') ? prompt : 'Prompt bulunamadı';
     }}
 ];
+
+// Open trade details tooltip
+function openTradeDetails(index, event) {
+    event.stopPropagation();
+    const trade = cachedTrades[index];
+    if (trade) {
+        showReasoningTooltip(event, null, trade);
+    }
+}
 
 // Open copy modal
 function copyTradeToClipboard(tradeIndex, event) {
@@ -1515,6 +1591,12 @@ function connectWebSocket() {
                 // Real-time trade update
                 console.log('New trade received:', data.trade);
                 handleNewTrade(data.trade);
+            } else if (data.type === 'equity_update') {
+                // Real-time equity curve update
+                console.log('Equity update:', data.total_equity);
+                if (typeof window.updateEquityRealtime === 'function') {
+                    window.updateEquityRealtime(data);
+                }
             }
         } catch (error) {
             console.error('WebSocket message error:', error);
@@ -1611,8 +1693,8 @@ function updateOpenTradesPnL(symbol, currentPrice) {
     }
 }
 
-// Fetch GLM signals from API
-async function fetchGLMSignals() {
+// Fetch AI signals from API
+async function fetchAISignals() {
     try {
         // Fetch more signals (7 days, 100 limit) for better trade-signal matching
         const response = await fetch(`${API_BASE}/api/signals/recent?limit=100&days=7`);
@@ -1623,7 +1705,7 @@ async function fetchGLMSignals() {
         cachedSignals = data.signals || [];
         updateAIInsightsUI(cachedSignals);
     } catch (error) {
-        console.error('GLM signals fetch error:', error);
+        console.error('AI signals fetch error:', error);
         // Show error state
         const container = document.getElementById('ai-insights-container');
         container.innerHTML = `
@@ -1832,7 +1914,7 @@ function buildPenaltyBreakdownHTML(signal) {
     `;
 }
 
-// Update AI Insights UI with GLM signals
+// Update AI Insights UI with AI signals
 function updateAIInsightsUI(signals) {
     const container = document.getElementById('ai-insights-container');
 
@@ -1895,7 +1977,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchTrades();
     fetchEquityCurve(30);
     fetchPnLHistogram();
-    fetchGLMSignals();
+    fetchAISignals();
 
     // Visibility API: Reconnect when page becomes visible again
     // Browsers suspend WebSocket connections when tab is hidden, Cloudflare may drop them
@@ -1937,7 +2019,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Refresh data periodically (WebSocket handles real-time updates, polling is fallback)
     setInterval(fetchPortfolio, 30000);
     setInterval(fetchTrades, 300000);      // 5 dakika fallback (WebSocket anlık)
-    setInterval(fetchGLMSignals, 300000);  // 5 dakika fallback (WebSocket anlık)
+    setInterval(fetchAISignals, 300000);  // 5 dakika fallback (WebSocket anlık)
 });
 </script>
 </body></html>
